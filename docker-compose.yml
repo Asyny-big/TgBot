@@ -58,6 +58,10 @@ services:
       POSTGRES_HOST: postgres
       REDIS_HOST: redis
     command: ["alembic", "upgrade", "head"]
+    # One-shot job: the inherited image healthcheck targets the API port
+    # and would only add noise to `docker compose ps`.
+    healthcheck:
+      disable: true
     depends_on:
       postgres:
         condition: service_healthy
@@ -117,6 +121,13 @@ services:
     # Telegram and CryptoBot webhooks; nginx forwards them here in production.
     ports:
       - "127.0.0.1:${BOT_EXPOSED_PORT:-8081}:8081"
+    # The image's healthcheck probes the API's port, which this container does
+    # not serve, so inheriting it would mark the bot unhealthy forever. Locally
+    # the bot runs long polling and exposes no HTTP at all, so there is nothing
+    # to probe; the production stack replaces this with a real liveness check
+    # against the webhook server's /internal/health.
+    healthcheck:
+      disable: true
     depends_on:
       postgres:
         condition: service_healthy
