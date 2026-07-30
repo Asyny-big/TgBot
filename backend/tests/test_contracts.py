@@ -19,10 +19,20 @@ from app.domain.repositories import (
 )
 
 if TYPE_CHECKING:
+    # Only referenced from annotations: the conformance helpers below exist for
+    # mypy, not for the interpreter.
+    from app.domain.auth import TokenRevocationStore
+    from app.domain.delivery import DeliveryGateway
+    from app.domain.locks import LockManager
+    from app.domain.uow import UnitOfWork, UnitOfWorkFactory
+    from app.infrastructure.cache.locks import RedisLockManager
+    from app.infrastructure.cache.revocation import RedisTokenRevocationStore
     from app.infrastructure.db.repositories.products import SqlAlchemyProductRepository
     from app.infrastructure.db.repositories.purchases import SqlAlchemyPurchaseRepository
     from app.infrastructure.db.repositories.stats import SqlAlchemyStatsRepository
     from app.infrastructure.db.repositories.users import SqlAlchemyUserRepository
+    from app.infrastructure.db.uow import SqlAlchemyUnitOfWork, SqlAlchemyUnitOfWorkFactory
+    from tests.fakes import FakeDeliveryGateway, FakeLockManager, FakeUnitOfWorkFactory
 
 
 def _protocol_methods(protocol: type) -> set[str]:
@@ -75,3 +85,43 @@ def test_contracts_are_fully_annotated() -> None:
                 assert parameter.name in annotations, (
                     f"{protocol.__name__}.{name}({parameter.name}) is not annotated"
                 )
+
+
+# --------------------------------------------------------------------------- #
+# Static conformance: these functions never run, mypy checks them.
+# --------------------------------------------------------------------------- #
+def _lock_manager_conforms(manager: RedisLockManager) -> LockManager:
+    return manager
+
+
+def _fake_lock_manager_conforms(manager: FakeLockManager) -> LockManager:
+    return manager
+
+
+def _unit_of_work_conforms(unit: SqlAlchemyUnitOfWork) -> UnitOfWork:
+    return unit
+
+
+def _unit_of_work_factory_conforms(
+    factory: SqlAlchemyUnitOfWorkFactory,
+) -> UnitOfWorkFactory:
+    return factory
+
+
+def _fake_unit_of_work_factory_conforms(factory: FakeUnitOfWorkFactory) -> UnitOfWorkFactory:
+    return factory
+
+
+def _delivery_gateway_conforms(gateway: FakeDeliveryGateway) -> DeliveryGateway:
+    return gateway
+
+
+def _revocation_store_conforms(store: RedisTokenRevocationStore) -> TokenRevocationStore:
+    return store
+
+
+def test_the_contract_helpers_are_importable() -> None:
+    """Keeps the conformance helpers from being flagged as dead code."""
+    assert _lock_manager_conforms is not None
+    assert _unit_of_work_factory_conforms is not None
+    assert _delivery_gateway_conforms is not None
