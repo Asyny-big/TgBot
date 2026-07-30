@@ -1,0 +1,186 @@
+# =============================================================================
+# Edge server blocks.
+#
+# Rendered at container start-up by the official nginx entrypoint: every
+# ${TGSHOP_*} placeholder is replaced from the environment (NGINX_ENVSUBST_FILTER
+# restricts substitution to that prefix, so nginx's own $variables survive).
+#
+# Routing:
+#   /webhook/…  → bot   (Telegram updates, Crypto Pay notifications)
+#   /api/…      → api   (admin API)
+#   everything  → the compiled Vue panel, with SPA history fallback
+# =============================================================================
+
+upstream tgshop_api {
+    server api:8000 max_fails=3 fail_timeout=10s;
+    keepalive 32;
+}
+
+upstream tgshop_bot {
+    server bot:8081 max_fails=3 fail_timeout=10s;
+    keepalive 16;
+}
+
+# --------------------------------------------------------------------------- #
+# Unknown Host over plain HTTP: answer nothing at all.
+# --------------------------------------------------------------------------- #
+server {
+    listen      80 default_server;
+    listen      [::]:80 default_server;
+    server_name _;
+    return      444;
+}
+
+# --------------------------------------------------------------------------- #
+# Unknown SNI over TLS: refuse the handshake instead of presenting our
+# certificate to a scanner that guessed the IP address.
+# --------------------------------------------------------------------------- #
+server {
+    listen      443 ssl default_server;
+    listen      [::]:443 ssl default_server;
+    http2       on;
+    server_name _;
+    ssl_reject_handshake on;
+}
+
+# --------------------------------------------------------------------------- #
+# Plain HTTP for the real domain: ACME challenge, then redirect.
+# --------------------------------------------------------------------------- #
+server {
+    listen      80;
+    listen      [::]:80;
+    server_name ${TGSHOP_DOMAIN};
+
+    # Certbot's webroot plugin writes here; it must stay reachable over HTTP,
+    # because renewal happens before the new certificate exists.
+    location ^~ /.well-known/acme-challenge/ {
+        root         /var/www/certbot;
+        default_type "text/plain";
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# --------------------------------------------------------------------------- #
+# The deployment.
+# --------------------------------------------------------------------------- #
+server {
+    listen      443 ssl;
+    listen      [::]:443 ssl;
+    http2       on;
+    server_name ${TGSHOP_DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${TGSHOP_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${TGSHOP_DOMAIN}/privkey.pem;
+
+    # TLS 1.2 is kept because Telegram's and Crypto Pay's webhook clients must be
+    # able to reach us; everything weaker is refused.
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache   shared:TLS:10m;
+    ssl_session_timeout 1d;
+    # Session tickets without key rotation weaken forward secrecy.
+    ssl_session_tickets off;
+    # OCSP stapling is intentionally not enabled: Let's Encrypt has retired its
+    # OCSP responders, so the directive would only produce start-up warnings.
+
+    root  /usr/share/nginx/html;
+    index index.html;
+
+    # Server level, so a single location can raise one of them without nginx
+    # seeing a duplicate directive.
+    proxy_connect_timeout 5s;
+    proxy_send_timeout    30s;
+    proxy_read_timeout    30s;
+
+    # ----------------------------------------------------------------------- #
+    # Provider webhooks. Never rate limited, never cached, POST only.
+    # Both are authenticated by the bot before the body is parsed: Telegram by
+    # its secret token header, Crypto Pay by an HMAC over the raw body.
+    # ----------------------------------------------------------------------- #
+    location ^~ /webhook/ {
+        limit_except POST {
+            deny all;
+        }
+
+        client_max_body_size 512k;
+        proxy_pass http://tgshop_bot;
+        include    /etc/nginx/snippets/proxy.conf;
+        # A payment notification must not be dropped because delivery retries
+        # are still running inside the request.
+        proxy_read_timeout 60s;
+
+        include /etc/nginx/snippets/security-headers.conf;
+    }
+
+    # ----------------------------------------------------------------------- #
+    # Admin login: the one endpoint worth throttling at the edge. The API also
+    # rate limits per username in Redis; this guards the process itself against
+    # a distributed password-guessing run.
+    # ----------------------------------------------------------------------- #
+    location = /api/v1/auth/login {
+        limit_req zone=login burst=5 nodelay;
+
+        proxy_pass http://tgshop_api;
+        include    /etc/nginx/snippets/proxy.conf;
+        include    /etc/nginx/snippets/security-headers.conf;
+    }
+
+    # ----------------------------------------------------------------------- #
+    # The rest of the admin API. The limit is far above what the panel needs
+    # (a screen costs one to three requests) and far below what a scraper wants.
+    # ----------------------------------------------------------------------- #
+    location ^~ /api/ {
+        limit_req  zone=api burst=40 nodelay;
+        limit_conn perip 32;
+
+        proxy_pass http://tgshop_api;
+        include    /etc/nginx/snippets/proxy.conf;
+
+        # The admin API is per-session data; no intermediary may keep it.
+        add_header Cache-Control "no-store" always;
+        include    /etc/nginx/snippets/security-headers.conf;
+    }
+
+    # ----------------------------------------------------------------------- #
+    # Static assets. Vite fingerprints every file name, so they are immutable;
+    # a missing one must 404 instead of falling through to the SPA shell.
+    # ----------------------------------------------------------------------- #
+    location ^~ /assets/ {
+        try_files  $uri =404;
+        access_log off;
+
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        include    /etc/nginx/snippets/security-headers.conf;
+    }
+
+    # The entry document is never cached: it is what points at the current
+    # asset hashes, so a stale copy would pin the browser to a deleted bundle.
+    location = /index.html {
+        add_header Cache-Control "no-store" always;
+        include    /etc/nginx/snippets/security-headers.conf;
+    }
+
+    # Browsers ask for this unprompted; the panel has no icon.
+    location = /favicon.ico {
+        access_log    off;
+        log_not_found off;
+        return        204;
+    }
+
+    # An admin panel has nothing for crawlers.
+    location = /robots.txt {
+        access_log off;
+        default_type "text/plain";
+        return      200 "User-agent: *\nDisallow: /\n";
+    }
+
+    # History mode: an unknown path renders the panel, which routes it.
+    location / {
+        try_files $uri $uri/ /index.html;
+        include   /etc/nginx/snippets/security-headers.conf;
+    }
+}
