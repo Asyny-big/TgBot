@@ -97,6 +97,9 @@ ignore = [
 # FastAPI resolves dependency annotations at runtime, so Annotated dependency
 # aliases must stay importable outside a TYPE_CHECKING block.
 "app/api/v1/endpoints/**" = ["TC001", "TC002", "TC003"]
+# SQLAlchemy resolves Mapped[...] annotations when configuring mappers, so the
+# annotated types must be imported at runtime too.
+"app/infrastructure/db/models.py" = ["TC001", "TC002", "TC003"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
