@@ -107,13 +107,13 @@ shell: ## Open a shell inside the api container
 # --------------------------------- Production -------------------------------- #
 
 preflight: ## Check .env for everything that would break a production deploy
-	./scripts/preflight.sh
+	bash scripts/preflight.sh
 
 tls-init: ## Issue the first TLS certificate (run before the first prod-up)
-	./scripts/tls-init.sh
+	bash scripts/tls-init.sh
 
 renew: ## Renew the certificate and reload nginx when it changed (cron target)
-	./scripts/renew-certs.sh
+	bash scripts/renew-certs.sh
 
 prod-build: ## Build the production images
 	$(COMPOSE_PROD) build --pull
@@ -137,10 +137,10 @@ prod-migrate: ## Apply pending migrations in production
 	$(COMPOSE_PROD) run --rm migrations alembic upgrade head
 
 backup: ## Dump the production database into ./backups
-	./scripts/backup.sh
+	bash scripts/backup.sh
 
 restore: ## Restore a dump: make restore f=backups/tgshop-20260130-021500Z.dump
-	./scripts/restore.sh "$(f)"
+	bash scripts/restore.sh "$(f)"
 
 clean: ## Remove caches and build artefacts
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
