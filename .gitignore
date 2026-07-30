@@ -1,1 +1,40 @@
-# placeholder probe
+# --------------------------------- Secrets ---------------------------------- #
+.env
+.env.*
+!.env.example
+
+# --------------------------------- Python ----------------------------------- #
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+dist/
+build/
+
+# ----------------------------------- Node ----------------------------------- #
+node_modules/
+.vite/
+frontend/dist/
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+
+# ------------------------------- Editors / OS -------------------------------- #
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ------------------------------- Runtime data -------------------------------- #
+*.log
+logs/
+.docker-data/
