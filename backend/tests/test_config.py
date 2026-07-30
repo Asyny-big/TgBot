@@ -19,7 +19,7 @@ from app.core.config import (
     TelegramSettings,
     get_settings,
 )
-from tests.conftest import VALID_BOT_TOKEN, build_settings
+from tests.settings_factory import VALID_BOT_TOKEN, build_settings
 
 
 def test_postgres_dsn_escapes_credentials() -> None:
