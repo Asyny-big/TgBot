@@ -106,6 +106,10 @@ class PurchaseRepository(Protocol):
         """Return the purchase behind a provider invoice id, or ``None``."""
         ...
 
+    async def get_by_charge_id(self, telegram_charge_id: str) -> Purchase | None:
+        """Return the purchase carrying this Telegram charge id, or ``None``."""
+        ...
+
     async def find_access_granting(self, user_id: int, product_id: UUID) -> Purchase | None:
         """Return the paid or delivered purchase of this product by this user."""
         ...
