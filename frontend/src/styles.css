@@ -120,6 +120,7 @@ h2 { font-size: 16px; margin: 0 0 12px; }
   overflow: hidden;
 }
 .panel + .panel, .cards + .panel, .panel + .cards { margin-top: 16px; }
+.cards + .cards { margin-top: 12px; }
 .panel-head { padding: 12px 14px; border-bottom: 1px solid var(--border); font-weight: 600; }
 
 table { width: 100%; border-collapse: collapse; }
@@ -157,6 +158,8 @@ td.actions button + button { margin-left: 6px; }
 
 .pager { display: flex; align-items: center; gap: 10px; padding: 10px 14px; color: var(--muted); }
 .pager .spacer { flex: 1; }
+/* The page-size label sits inline in the pager, so it drops the block margin. */
+.pager label { margin-bottom: 0; }
 
 .state { padding: 28px 14px; text-align: center; color: var(--muted); }
 
