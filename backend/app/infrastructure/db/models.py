@@ -38,6 +38,19 @@ USDT_SCALE: Final = 2
 
 _ACCESS_STATUS_SQL: Final = "status IN ('paid', 'delivered')"
 
+#: Operator class that makes ``ILIKE '%term%'`` index-assisted.
+_TRGM_OPS: Final = "gin_trgm_ops"
+
+
+def _trigram_index(name: str, column: str) -> Index:
+    """A GIN trigram index for the admin panel's substring search.
+
+    A B-tree cannot serve ``ILIKE '%term%'`` — the pattern has no anchored
+    prefix — so without this the admin search degrades into a full table scan as
+    soon as the shop has real traffic.
+    """
+    return Index(name, column, postgresql_using="gin", postgresql_ops={column: _TRGM_OPS})
+
 
 def _enum_column[EnumT: enum.Enum](enum_class: type[EnumT], name: str) -> Enum:
     """Native PostgreSQL enum storing the enum *values* (not member names)."""
@@ -88,6 +101,9 @@ class ProductModel(TimestampMixin, Base):
         CheckConstraint("price_stars IS NULL OR price_stars > 0", name="price_stars_positive"),
         CheckConstraint("price_usdt IS NULL OR price_usdt > 0", name="price_usdt_positive"),
         Index("ix_products_is_active_created_at", "is_active", "created_at"),
+        _trigram_index("ix_products_title_trgm", "title"),
+        _trigram_index("ix_products_slug_trgm", "slug"),
+        _trigram_index("ix_products_description_trgm", "description"),
     )
 
 
@@ -111,6 +127,7 @@ class UserModel(Base):
     __table_args__ = (
         CheckConstraint("telegram_id > 0", name="telegram_id_positive"),
         Index("ix_users_username_lower", text("lower(username)")),
+        _trigram_index("ix_users_username_trgm", "username"),
     )
 
 
@@ -177,6 +194,8 @@ class PurchaseModel(Base):
         Index("ix_purchases_product_id_status", "product_id", "status"),
         Index("ix_purchases_user_id", "user_id"),
         Index("ix_purchases_status_created_at", "status", "created_at"),
+        _trigram_index("ix_purchases_external_id_trgm", "external_id"),
+        _trigram_index("ix_purchases_telegram_charge_id_trgm", "telegram_charge_id"),
         CheckConstraint("amount > 0", name="amount_positive"),
         CheckConstraint(
             "status IN ('pending', 'expired') OR paid_at IS NOT NULL",
