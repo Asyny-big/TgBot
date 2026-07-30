@@ -1,0 +1,26 @@
+# =============================================================================
+# Build context for the edge image (nginx/Dockerfile is built from the repo root).
+#
+# Everything is excluded and then only what the image needs is allowed back in.
+# A deny-list would eventually leak something; this cannot. It keeps .env, the
+# database dumps and the git history out of the context that is handed to the
+# Docker daemon, and it keeps the context small enough that a rebuild is quick.
+# =============================================================================
+*
+
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/tsconfig.json
+!frontend/vite.config.ts
+!frontend/index.html
+!frontend/src/
+!frontend/tests/
+
+!nginx/nginx.conf
+!nginx/conf.d/
+!nginx/snippets/
+!nginx/templates/
+
+# Never needed, and expensive to transfer.
+frontend/node_modules/
+frontend/dist/
