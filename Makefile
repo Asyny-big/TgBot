@@ -1,11 +1,14 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 BACKEND := backend
+FRONTEND := frontend
+NPM := npm --prefix $(FRONTEND)
 UV := uv --directory $(BACKEND)
 COMPOSE := docker compose
 
 .PHONY: help env install lint format typecheck test test-unit check up down restart logs ps shell \
-	migrate migrate-down revision bot-logs clean
+	migrate migrate-down revision bot-logs openapi \
+	ui-install ui-types ui-lint ui-typecheck ui-test ui-build ui-dev ui-check clean
 
 help: ## Show the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -48,7 +51,33 @@ migrate-down: ## Roll back the most recent migration
 revision: ## Autogenerate a migration: make revision m="add coupons"
 	$(COMPOSE) run --rm migrations alembic revision --autogenerate -m "$(m)"
 
-check: lint typecheck test ## Everything CI runs
+openapi: ## Refresh backend/openapi.json (source of the frontend types)
+	$(UV) run python scripts/export_openapi.py
+
+ui-install: ## Install the admin panel dependencies
+	$(NPM) install
+
+ui-types: openapi ## Regenerate the TypeScript types from OpenAPI
+	$(NPM) run api:types
+
+ui-lint: ## Lint the admin panel
+	$(NPM) run lint
+
+ui-typecheck: ## Type-check the admin panel
+	$(NPM) run typecheck
+
+ui-test: ## Run the admin panel tests
+	$(NPM) run test
+
+ui-build: ## Type-check and build the admin panel
+	$(NPM) run build
+
+ui-dev: ## Start the admin panel dev server
+	$(NPM) run dev
+
+ui-check: ui-lint ui-typecheck ui-test ui-build ## Everything CI runs for the panel
+
+check: lint typecheck test ## Everything CI runs for the backend
 
 up: env ## Start the development stack
 	$(COMPOSE) up -d --build
