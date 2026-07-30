@@ -6,13 +6,17 @@ NPM := npm --prefix $(FRONTEND)
 UV := uv --directory $(BACKEND)
 COMPOSE := docker compose
 
+COMPOSE_PROD := docker compose -f docker-compose.prod.yml
+
 .PHONY: help env install lint format typecheck test test-unit check up down restart logs ps shell \
 	migrate migrate-down revision bot-logs openapi \
-	ui-install ui-types ui-lint ui-typecheck ui-test ui-build ui-dev ui-check clean
+	ui-install ui-types ui-lint ui-typecheck ui-test ui-build ui-dev ui-check clean \
+	preflight tls-init renew prod-build prod-up prod-down prod-restart prod-ps prod-logs \
+	prod-migrate backup restore
 
 help: ## Show the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
-		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
 env: ## Create .env from the template when it does not exist yet
 	@test -f .env || (cp .env.example .env && echo ".env created — fill in the secrets")
@@ -99,6 +103,44 @@ ps: ## Show container status
 
 shell: ## Open a shell inside the api container
 	$(COMPOSE) exec api /bin/bash
+
+# --------------------------------- Production -------------------------------- #
+
+preflight: ## Check .env for everything that would break a production deploy
+	./scripts/preflight.sh
+
+tls-init: ## Issue the first TLS certificate (run before the first prod-up)
+	./scripts/tls-init.sh
+
+renew: ## Renew the certificate and reload nginx when it changed (cron target)
+	./scripts/renew-certs.sh
+
+prod-build: ## Build the production images
+	$(COMPOSE_PROD) build --pull
+
+prod-up: ## Start the production stack
+	$(COMPOSE_PROD) up -d
+
+prod-down: ## Stop the production stack and keep the volumes
+	$(COMPOSE_PROD) down
+
+prod-restart: ## Rebuild and recreate the application containers
+	$(COMPOSE_PROD) up -d --build api bot nginx
+
+prod-ps: ## Show production container status
+	$(COMPOSE_PROD) ps
+
+prod-logs: ## Follow every production log
+	$(COMPOSE_PROD) logs -f --tail 100
+
+prod-migrate: ## Apply pending migrations in production
+	$(COMPOSE_PROD) run --rm migrations alembic upgrade head
+
+backup: ## Dump the production database into ./backups
+	./scripts/backup.sh
+
+restore: ## Restore a dump: make restore f=backups/tgshop-20260130-021500Z.dump
+	./scripts/restore.sh "$(f)"
 
 clean: ## Remove caches and build artefacts
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
