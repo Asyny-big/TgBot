@@ -146,6 +146,46 @@ records the visitor's Telegram profile and nothing else.
 | Stars and USDT invoices both paid | the database allows exactly one paid copy; the loser is reported, not delivered |
 | An invoice is never paid | housekeeping expires it, and it stops being polled |
 
+## Admin API
+
+Every endpoint except `/auth/login` and the health probes requires a bearer
+access token. Login is rate limited per client and username; the refresh token
+travels in an httpOnly, SameSite=strict cookie and is rotated (and revoked) on
+every use.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/auth/login` | exchange credentials for a token pair |
+| `POST` | `/auth/refresh` | rotate the refresh token |
+| `POST` | `/auth/logout` | revoke the refresh token |
+| `GET` | `/auth/me` | current administrator |
+| `GET` | `/products` | list with pagination, search and activity filter |
+| `POST` | `/products` | create; the response carries the ready-to-copy deep link |
+| `GET` | `/products/{id}` | read one |
+| `PATCH` | `/products/{id}` | partial update — omitted fields are untouched, `null` clears a nullable one |
+| `DELETE` | `/products/{id}` | delete a product that was never sold (`409` otherwise) |
+| `GET` | `/purchases` | search by Telegram id, username, product, invoice or charge id |
+| `POST` | `/purchases/{id}/verify` | **check a payment manually** |
+| `POST` | `/purchases/{id}/resend` | send the purchased link again |
+| `GET` | `/stats/overview` | today / week / month / all-time, Stars and USDT split, top products, last sales |
+
+### Manual payment check
+
+For the support case "I paid but got no link". The operation is idempotent and
+never invents a payment:
+
+| Purchase state | What the check does | Outcome |
+| --- | --- | --- |
+| delivered | nothing | `already_delivered` |
+| paid, delivery failed | retries delivery | `delivered_now` / `delivery_failed` |
+| pending, CryptoBot | asks Crypto Pay for the invoice state | `settled_and_delivered` / `still_unpaid` / `expired_unpaid` |
+| pending, Stars | uses the stored Telegram charge id (Stars has no invoice lookup) | `settled_and_delivered` / `no_provider_evidence` |
+| refunded | nothing | `refunded` |
+| provider unreachable | nothing | `provider_unavailable` — press again later |
+
+Validation failures return `422` with the offending field, its rule and a
+message; the submitted values are never echoed back.
+
 ## Migrations
 
 Alembic runs on the async engine. In the compose stack a one-shot `migrations`
@@ -191,6 +231,6 @@ or missing value stops the process instead of failing mid-payment. See
 | 2 | Database schema, migrations, repositories | done |
 | 3 | Service layer, dependency injection | done |
 | 4 | Bot: product card, Stars, CryptoBot, re-delivery | done |
-| 5 | Admin API: auth, CRUD, statistics, search, webhooks | planned |
+| 5 | Admin API: auth, CRUD, statistics, search, manual payment check | done |
 | 6 | Vue 3 admin panel | planned |
 | 7 | Nginx, production compose, deployment guide | planned |
