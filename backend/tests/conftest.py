@@ -16,6 +16,7 @@ from app.api.deps import RESOURCES_STATE_KEY, get_resources
 from app.core.config import (
     AppSettings,
     CryptoBotSettings,
+    DeliverySettings,
     Environment,
     LogFormat,
     PostgresSettings,
@@ -36,9 +37,13 @@ if TYPE_CHECKING:
 from tests.db import (  # noqa: F401  (fixture re-export)
     database_dsn,
     db_session,
+    live_database,
+    live_locks,
+    live_uow_factory,
     migrated_database,
     products,
     purchases,
+    redis_client,
     stats,
     users,
 )
@@ -47,6 +52,7 @@ VALID_BOT_TOKEN = "123456789:AAHfake-Test-Token_for_unit_tests_only01"  # noqa: 
 
 _SETTINGS_CLASSES = (
     AppSettings,
+    DeliverySettings,
     PostgresSettings,
     RedisSettings,
     TelegramSettings,
@@ -89,6 +95,7 @@ def build_settings(**overrides: Any) -> Settings:
             api_token=SecretStr("12345:cryptobot-test-token"),
             network="testnet",
         ),
+        "delivery": DeliverySettings(max_attempts=2, initial_backoff_seconds=0.01),
         "security": SecuritySettings(
             jwt_secret=SecretStr("a" * 48),
             admin_username="administrator",
