@@ -228,6 +228,15 @@ class CryptoBotSettings(BaseSettings):
     asset: str = "USDT"
     invoice_ttl_seconds: int = Field(default=1800, ge=60, le=86400)
     request_timeout: float = Field(default=15.0, gt=0)
+    webhook_path: str = "/webhook/cryptobot"
+
+    @field_validator("webhook_path")
+    @classmethod
+    def _validate_webhook_path(cls, value: str) -> str:
+        if not value.startswith("/"):
+            msg = "webhook_path must start with '/'"
+            raise ValueError(msg)
+        return value.rstrip("/")
 
     @property
     def api_base_url(self) -> str:
@@ -235,6 +244,21 @@ class CryptoBotSettings(BaseSettings):
         if self.network == "testnet":
             return CRYPTOBOT_TESTNET_API
         return CRYPTOBOT_MAINNET_API
+
+
+class BotSettings(BaseSettings):
+    """Runtime of the bot process: webhook server and background workers."""
+
+    model_config = _settings_config("BOT_")
+
+    webhook_host: str = "0.0.0.0"  # noqa: S104 — only reachable through nginx
+    webhook_port: int = Field(default=8081, ge=1, le=65535)
+    # One card action per buyer at a time; also the anti-flood window.
+    throttle_seconds: float = Field(default=1.5, ge=0.0, le=30.0)
+    # Reconciliation covers lost provider notifications.
+    reconciliation_interval_seconds: float = Field(default=60.0, ge=5.0, le=3600.0)
+    reconciliation_batch_size: int = Field(default=50, ge=1, le=200)
+    housekeeping_interval_seconds: float = Field(default=300.0, ge=10.0, le=86400.0)
 
 
 class DeliverySettings(BaseSettings):
@@ -307,6 +331,7 @@ class Settings(BaseModel):
     redis: RedisSettings
     telegram: TelegramSettings
     cryptobot: CryptoBotSettings
+    bot: BotSettings
     delivery: DeliverySettings
     security: SecuritySettings
 
@@ -325,6 +350,7 @@ def get_settings() -> Settings:
         redis=_load(RedisSettings),
         telegram=_load(TelegramSettings),
         cryptobot=_load(CryptoBotSettings),
+        bot=_load(BotSettings),
         delivery=_load(DeliverySettings),
         security=_load(SecuritySettings),
     )
