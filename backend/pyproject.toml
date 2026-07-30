@@ -95,8 +95,10 @@ ignore = [
 ]
 "alembic/**" = ["ANN", "ERA", "INP001"]
 # FastAPI resolves dependency annotations at runtime, so Annotated dependency
-# aliases must stay importable outside a TYPE_CHECKING block.
+# aliases must stay importable outside a TYPE_CHECKING block. Pydantic schemas
+# need their field types at runtime for the same reason.
 "app/api/v1/endpoints/**" = ["TC001", "TC002", "TC003"]
+"app/api/schemas/**" = ["TC001", "TC002", "TC003"]
 # SQLAlchemy resolves Mapped[...] annotations when configuring mappers, so the
 # annotated types must be imported at runtime too.
 "app/infrastructure/db/models.py" = ["TC001", "TC002", "TC003"]
