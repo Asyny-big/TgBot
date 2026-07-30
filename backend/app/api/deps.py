@@ -7,9 +7,11 @@ from typing import Annotated, Final, cast
 from fastapi import Depends, Request
 
 from app.core.config import Settings
+from app.core.container import Container
 from app.core.resources import Resources
 
 RESOURCES_STATE_KEY: Final = "resources"
+CONTAINER_STATE_KEY: Final = "container"
 
 
 def get_resources(request: Request) -> Resources:
@@ -21,10 +23,20 @@ def get_resources(request: Request) -> Resources:
     return cast("Resources", resources)
 
 
+def get_container(request: Request) -> Container:
+    """Return the wired service container created by the application lifespan."""
+    container = getattr(request.app.state, CONTAINER_STATE_KEY, None)
+    if container is None:
+        msg = "Service container is not initialised"
+        raise RuntimeError(msg)
+    return cast("Container", container)
+
+
 def get_settings_dep(resources: Annotated[Resources, Depends(get_resources)]) -> Settings:
     """Return the validated settings of the running process."""
     return resources.settings
 
 
 ResourcesDep = Annotated[Resources, Depends(get_resources)]
+ContainerDep = Annotated[Container, Depends(get_container)]
 SettingsDep = Annotated[Settings, Depends(get_settings_dep)]
