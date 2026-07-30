@@ -20,8 +20,8 @@ from app.core.exceptions import (
 from app.domain.commands import ProductDraft, ProductUpdate
 from app.domain.pagination import PageRequest, ProductFilters
 from app.services.products import ProductService
-from tests.conftest import VALID_BOT_TOKEN
 from tests.fakes import FakeUnitOfWorkFactory
+from tests.settings_factory import VALID_BOT_TOKEN
 
 
 def _telegram() -> TelegramSettings:
