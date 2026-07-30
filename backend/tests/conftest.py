@@ -32,6 +32,17 @@ if TYPE_CHECKING:
 
     from fastapi import FastAPI
 
+# Database fixtures live in tests/db.py; re-exported here so pytest collects them.
+from tests.db import (  # noqa: F401  (fixture re-export)
+    database_dsn,
+    db_session,
+    migrated_database,
+    products,
+    purchases,
+    stats,
+    users,
+)
+
 VALID_BOT_TOKEN = "123456789:AAHfake-Test-Token_for_unit_tests_only01"  # noqa: S105
 
 _SETTINGS_CLASSES = (
