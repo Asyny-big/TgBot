@@ -5,7 +5,7 @@ UV := uv --directory $(BACKEND)
 COMPOSE := docker compose
 
 .PHONY: help env install lint format typecheck test test-unit check up down restart logs ps shell \
-	migrate migrate-down revision clean
+	migrate migrate-down revision bot-logs clean
 
 help: ## Show the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -61,6 +61,9 @@ restart: ## Recreate the api container
 
 logs: ## Follow the api logs
 	$(COMPOSE) logs -f api
+
+bot-logs: ## Follow the bot logs
+	$(COMPOSE) logs -f bot
 
 ps: ## Show container status
 	$(COMPOSE) ps
