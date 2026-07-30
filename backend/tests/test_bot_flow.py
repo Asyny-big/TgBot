@@ -60,6 +60,7 @@ from app.core.container import Container
 from app.core.exceptions import PaymentGatewayError
 from app.domain.commands import ProductDraft
 from app.domain.enums import PaymentProvider, PurchaseStatus
+from app.infrastructure.cache.rate_limit import RedisRateLimiter
 from app.infrastructure.payments.cryptobot import SIGNATURE_HEADER, CryptoBotClient
 from app.infrastructure.telegram.gateways import TelegramDeliveryGateway
 from tests.bot_harness import (
@@ -70,12 +71,13 @@ from tests.bot_harness import (
     refunded_payment_update,
     start_update,
 )
-from tests.conftest import build_settings
+from tests.settings_factory import build_settings
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
     from aiogram import Dispatcher
+    from redis.asyncio import Redis
 
     from app.domain.entities import Product
     from app.infrastructure.cache.locks import RedisLockManager
@@ -207,12 +209,13 @@ def crypto_pay() -> FakeCryptoPay:
 async def harness(
     live_database: Database,
     live_locks: RedisLockManager,
+    redis_client: Redis,
     migrated_database: str,
     crypto_pay: FakeCryptoPay,
 ) -> AsyncIterator[BotHarness]:
     """A bot wired to the live database, live Redis and a fake Crypto Pay."""
     settings = _settings(migrated_database)
-    container = _container(settings, live_database, live_locks, crypto_pay)
+    container = _container(settings, live_database, live_locks, redis_client, crypto_pay)
     bot = RecordingBot()
     checkout = create_checkout(container, bot)
     dispatcher = create_dispatcher(container, checkout)
@@ -233,6 +236,7 @@ def _container(
     settings: Settings,
     database: Database,
     locks: RedisLockManager,
+    redis: Redis,
     crypto_pay: FakeCryptoPay,
 ) -> Container:
     """A container using the live infrastructure and the fake payment provider."""
@@ -255,6 +259,7 @@ def _container(
         settings=settings,
         uow_factory=uow_factory,
         locks=locks,
+        rate_limiter=RedisRateLimiter(redis),
         crypto_payments=crypto_client,
         products=ProductService(uow_factory=uow_factory, telegram=settings.telegram),
         purchases=PurchaseService(uow_factory=uow_factory, locks=locks),
