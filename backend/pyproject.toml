@@ -1,0 +1,155 @@
+[project]
+name = "tgshop-backend"
+version = "0.1.0"
+description = "Telegram Digital Shop — deep-link only bot, admin API and payment gateways"
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    "aiogram>=3.15,<4",
+    "alembic>=1.14,<2",
+    "argon2-cffi>=23.1,<26",
+    "asyncpg>=0.30,<0.31",
+    "fastapi>=0.115,<1",
+    "httpx>=0.28,<0.29",
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.7,<3",
+    "pyjwt>=2.10,<3",
+    "redis>=5.2,<7",
+    "sqlalchemy[asyncio]>=2.0.36,<2.1",
+    "structlog>=24.4,<26",
+    "uvicorn[standard]>=0.34,<1",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.14,<2",
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.25,<2",
+    "pytest-cov>=6.0,<8",
+    "ruff>=0.9,<1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+# --------------------------------------------------------------------------- #
+# Ruff
+# --------------------------------------------------------------------------- #
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["."]
+
+[tool.ruff.lint]
+select = [
+    "A",     # flake8-builtins
+    "ANN",   # flake8-annotations — full typing is mandatory in this project
+    "ARG",   # flake8-unused-arguments
+    "ASYNC", # flake8-async
+    "B",     # flake8-bugbear
+    "C4",    # flake8-comprehensions
+    "DTZ",   # flake8-datetimez — naive datetimes are forbidden
+    "E",     # pycodestyle errors
+    "EM",    # flake8-errmsg
+    "ERA",   # eradicate — no commented-out code
+    "F",     # pyflakes
+    "G",     # flake8-logging-format
+    "I",     # isort
+    "ICN",   # flake8-import-conventions
+    "ISC",   # flake8-implicit-str-concat
+    "N",     # pep8-naming
+    "PERF",  # perflint
+    "PGH",   # pygrep-hooks
+    "PIE",   # flake8-pie
+    "PL",    # pylint
+    "PT",    # flake8-pytest-style
+    "PTH",   # flake8-use-pathlib
+    "Q",     # flake8-quotes
+    "RET",   # flake8-return
+    "RSE",   # flake8-raise
+    "RUF",   # ruff-specific
+    "S",     # flake8-bandit
+    "SIM",   # flake8-simplify
+    "T20",   # flake8-print — structlog only
+    "TC",    # flake8-type-checking
+    "TID",   # flake8-tidy-imports
+    "TRY",   # tryceratops
+    "UP",    # pyupgrade
+    "W",     # pycodestyle warnings
+]
+ignore = [
+    "ANN401", # typing.Any is allowed in a few deliberate boundary signatures
+    "ISC001", # conflicts with the formatter
+    "TRY003", # explicit messages in raised exceptions are wanted here
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101",    # asserts are the point of a test suite
+    "PLR2004", # magic values are fine in assertions
+    "ARG001",  # fixtures are injected by name
+]
+"alembic/**" = ["ANN", "ERA", "INP001"]
+# FastAPI resolves dependency annotations at runtime, so Annotated dependency
+# aliases must stay importable outside a TYPE_CHECKING block.
+"app/api/v1/endpoints/**" = ["TC001", "TC002", "TC003"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.ruff.format]
+quote-style = "double"
+line-ending = "lf"
+
+# --------------------------------------------------------------------------- #
+# Mypy
+# --------------------------------------------------------------------------- #
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+warn_unreachable = true
+warn_no_return = true
+disallow_any_unimported = true
+show_error_codes = true
+pretty = true
+files = ["app", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["asyncpg.*"]
+ignore_missing_imports = true
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+# --------------------------------------------------------------------------- #
+# Pytest
+# --------------------------------------------------------------------------- #
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "--strict-markers --strict-config -ra"
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
