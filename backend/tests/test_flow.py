@@ -26,8 +26,8 @@ from app.services.delivery import DeliveryService
 from app.services.products import ProductService
 from app.services.purchases import PurchaseService
 from app.services.stats import StatsService
-from tests.conftest import VALID_BOT_TOKEN
 from tests.fakes import FakeDeliveryGateway
+from tests.settings_factory import VALID_BOT_TOKEN
 
 if TYPE_CHECKING:
     from app.domain.entities import Product
