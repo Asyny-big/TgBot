@@ -192,3 +192,19 @@ class InvalidTokenError(AppError):
     status_code = HTTPStatus.UNAUTHORIZED
     code = "invalid_token"
     message = "Invalid or expired token"
+
+
+class PaymentGatewayError(AppError):
+    """A payment provider refused a request or could not be reached."""
+
+    status_code = HTTPStatus.BAD_GATEWAY
+    code = "payment_gateway_error"
+    message = "Payment provider is unavailable"
+
+
+class InvalidWebhookSignatureError(AppError):
+    """A webhook body did not match its signature."""
+
+    status_code = HTTPStatus.UNAUTHORIZED
+    code = "invalid_webhook_signature"
+    message = "Invalid webhook signature"
