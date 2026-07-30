@@ -1,4 +1,4 @@
-"""Webhook endpoints served by the bot process.
+"""HTTP endpoints served by the bot process.
 
 Both providers post here, and both are authenticated before anything is read:
 
@@ -9,16 +9,22 @@ Both providers post here, and both are authenticated before anything is read:
 
 Every handler answers ``200`` as soon as the payment is recorded. A provider that
 retries a notification must find an idempotent endpoint, not an error.
+
+The process also exposes a liveness route for the container healthcheck. It is
+deliberately *not* published by nginx and deliberately does not touch PostgreSQL
+or Redis: restarting the bot cannot fix a database outage, and a probe that fails
+during one would turn a dependency blip into a restart loop.
 """
 
 from __future__ import annotations
 
 import json
 from http import HTTPStatus
-from typing import Any
+from typing import Any, Final
 
 from aiohttp import web
 
+from app import __version__
 from app.core.exceptions import AppError, LockBusyError, PurchaseNotFoundError
 from app.core.logging import get_logger
 from app.domain.enums import PaymentProvider
@@ -33,6 +39,19 @@ logger = get_logger(__name__)
 
 CRYPTO_CLIENT_KEY: web.AppKey[CryptoBotClient] = web.AppKey("crypto_client")
 CHECKOUT_KEY: web.AppKey[CheckoutService] = web.AppKey("checkout")
+
+#: Internal liveness route. Never exposed through nginx.
+HEALTH_PATH: Final = "/internal/health"
+
+
+async def handle_health(request: web.Request) -> web.Response:  # noqa: ARG001 — aiohttp signature
+    """Report that the bot process is able to serve HTTP."""
+    return web.json_response({"status": "alive", "version": __version__})
+
+
+def register_health_route(app: web.Application) -> None:
+    """Mount the liveness route used by the container healthcheck."""
+    app.router.add_get(HEALTH_PATH, handle_health)
 
 
 def _extract_invoice_id(payload: dict[str, Any]) -> str | None:
