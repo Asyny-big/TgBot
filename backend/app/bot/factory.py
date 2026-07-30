@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram import Dispatcher
 
 from app.bot.handlers import payments, start
 from app.bot.middlewares import (
@@ -16,34 +14,25 @@ from app.bot.middlewares import (
     ThrottleMiddleware,
 )
 from app.core.logging import get_logger
-from app.infrastructure.telegram.gateways import (
-    TelegramDeliveryGateway,
-    TelegramStarsInvoiceSender,
+from app.infrastructure.telegram.factory import (
+    create_delivery_gateway,
+    create_stars_sender,
 )
-from app.services.checkout import CheckoutService
 
 if TYPE_CHECKING:
-    from app.core.config import Settings
+    from aiogram import Bot
+
     from app.core.container import Container
+    from app.services.checkout import CheckoutService
 
 logger = get_logger(__name__)
 
 
-def create_bot(settings: Settings) -> Bot:
-    """Create the Bot with HTML parse mode as the default."""
-    return Bot(
-        token=settings.telegram.bot_token.get_secret_value(),
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
-
-
 def create_checkout(container: Container, bot: Bot) -> CheckoutService:
     """Wire the checkout service to this process's Telegram transport."""
-    return CheckoutService(
-        purchases=container.purchases,
-        delivery=container.build_delivery(TelegramDeliveryGateway(bot)),
-        stars=TelegramStarsInvoiceSender(bot),
-        crypto=container.crypto_payments,
+    return container.build_checkout(
+        delivery_gateway=create_delivery_gateway(bot),
+        stars=create_stars_sender(bot),
     )
 
 
