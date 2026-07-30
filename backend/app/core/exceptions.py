@@ -104,3 +104,91 @@ class InvalidPriceError(ValidationError):
 
     code = "invalid_price"
     message = "At least one price (Stars or USDT) must be set"
+
+
+class LockBusyError(ConflictError):
+    """Another operation holds the lock for this resource."""
+
+    code = "lock_busy"
+    message = "This operation is already in progress, please try again shortly"
+
+
+class ProductInactiveError(ConflictError):
+    """The product exists but is not on sale."""
+
+    code = "product_inactive"
+    message = "This product is not available"
+
+
+class ProviderNotSupportedError(ValidationError):
+    """The product has no price for the requested payment rail."""
+
+    code = "provider_not_supported"
+    message = "This payment method is not available for this product"
+
+
+class InvalidDeliveryUrlError(ValidationError):
+    """The delivery link must be an absolute http(s) URL."""
+
+    code = "invalid_delivery_url"
+    message = "Delivery URL must start with http:// or https://"
+
+
+class DeliveryError(AppError):
+    """Base class for delivery transport failures."""
+
+    status_code = HTTPStatus.BAD_GATEWAY
+    code = "delivery_failed"
+    message = "Could not deliver the purchase"
+
+
+class DeliveryTransientError(DeliveryError):
+    """A temporary transport failure: retrying can succeed.
+
+    ``retry_after`` carries the provider's own back-off hint (Telegram flood
+    control) when it supplied one.
+    """
+
+    code = "delivery_transient_error"
+    message = "Temporary delivery failure"
+
+    def __init__(
+        self,
+        message: str | None = None,
+        /,
+        *,
+        retry_after: float | None = None,
+        **details: object,
+    ) -> None:
+        super().__init__(message, **details)
+        self.retry_after = retry_after
+
+
+class DeliveryPermanentError(DeliveryError):
+    """The transport refused for good: the bot is blocked, the chat is gone."""
+
+    code = "delivery_permanent_error"
+    message = "The buyer cannot receive messages from the bot"
+
+
+class DeliveryExhaustedError(DeliveryError):
+    """Every retry was spent without a successful send."""
+
+    code = "delivery_exhausted"
+    message = "Delivery failed after all retries"
+
+
+class AuthenticationError(AppError):
+    """Wrong administrator credentials."""
+
+    status_code = HTTPStatus.UNAUTHORIZED
+    code = "invalid_credentials"
+    message = "Invalid username or password"
+
+
+class InvalidTokenError(AppError):
+    """The JWT is malformed, expired, of the wrong type, or revoked."""
+
+    status_code = HTTPStatus.UNAUTHORIZED
+    code = "invalid_token"
+    message = "Invalid or expired token"
