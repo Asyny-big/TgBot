@@ -20,6 +20,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 
 COPY app ./app
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
