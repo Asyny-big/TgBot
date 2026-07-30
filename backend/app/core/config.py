@@ -293,6 +293,13 @@ class SecuritySettings(BaseSettings):
     refresh_token_ttl_days: int = Field(default=14, ge=1, le=90)
     admin_username: str = Field(min_length=3, max_length=64)
     admin_password: SecretStr
+    # Credential guessing protection on the admin login endpoint.
+    login_rate_limit: int = Field(default=10, ge=1, le=1000)
+    login_rate_window_seconds: float = Field(default=300.0, ge=1.0, le=3600.0)
+    # The refresh token travels in an httpOnly cookie; Secure is dropped only
+    # for plain-HTTP local development.
+    cookie_secure: bool = True
+    cookie_name: str = "tgshop_refresh"
     # NoDecode keeps pydantic-settings from JSON-decoding the raw env value, so
     # the comma separated form below is parsed by the validator instead.
     cors_origins: Annotated[tuple[str, ...], NoDecode] = ()
