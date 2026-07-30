@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from app.infrastructure.cache.locks import RedisLockManager
 from app.infrastructure.cache.revocation import RedisTokenRevocationStore
 from app.infrastructure.db.uow import SqlAlchemyUnitOfWorkFactory
+from app.infrastructure.payments.cryptobot import CryptoBotClient
 from app.services.auth import AuthService
 from app.services.delivery import DeliveryService
 from app.services.products import ProductService
@@ -33,6 +34,7 @@ class Container:
     settings: Settings
     uow_factory: SqlAlchemyUnitOfWorkFactory
     locks: RedisLockManager
+    crypto_payments: CryptoBotClient
     products: ProductService
     purchases: PurchaseService
     stats: StatsService
@@ -53,6 +55,7 @@ class Container:
             settings=settings,
             uow_factory=uow_factory,
             locks=locks,
+            crypto_payments=CryptoBotClient(settings.cryptobot),
             products=ProductService(uow_factory=uow_factory, telegram=settings.telegram),
             purchases=purchases,
             stats=StatsService(uow_factory=uow_factory),
