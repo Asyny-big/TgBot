@@ -30,7 +30,6 @@ const canNext = computed(() => props.offset + props.limit < props.total);
     <label
       for="page-size"
       class="hint"
-      style="margin: 0"
     >На странице</label>
     <select
       id="page-size"
