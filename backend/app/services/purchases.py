@@ -250,6 +250,31 @@ class PurchaseService:
             raise PurchaseNotFoundError(purchase_id=str(purchase_id))
         return purchase
 
+    async def product_for_checkout(self, product_id: UUID) -> Product:
+        """Return a product that may be sold right now.
+
+        Raises:
+            ProductNotFoundError: no product with this id.
+            ProductInactiveError: the product is not on sale.
+        """
+        async with self.uow_factory() as uow:
+            product = await uow.products.get(product_id)
+        if product is None:
+            raise ProductNotFoundError(product_id=str(product_id))
+        if not product.is_active:
+            raise ProductInactiveError(product_id=str(product_id))
+        return product
+
+    async def find_by_invoice(
+        self,
+        *,
+        provider: PaymentProvider,
+        external_id: str,
+    ) -> Purchase | None:
+        """Return the purchase behind a provider invoice id, or ``None``."""
+        async with self.uow_factory() as uow:
+            return await uow.purchases.get_by_external_id(provider, external_id)
+
     async def find_owned(self, user_id: int, product_id: UUID) -> Purchase | None:
         """Return the buyer's paid or delivered purchase of this product."""
         async with self.uow_factory() as uow:
