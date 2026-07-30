@@ -21,10 +21,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from app.core.exceptions import DuplicatePurchaseError
+from app.core.exceptions import AppError, DuplicatePurchaseError
 from app.core.logging import get_logger
-from app.domain.enums import PaymentProvider
-from app.domain.payments import InvoiceRequest
+from app.domain.enums import PaymentProvider, PurchaseStatus
+from app.domain.payments import InvoiceRequest, PaymentState
+from app.domain.verification import VerificationOutcome, VerificationReport
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -167,3 +168,168 @@ class CheckoutService:
     async def redeliver(self, purchase_id: UUID) -> DeliveryResult:
         """Hand the link over again to a buyer who already owns the product."""
         return await self.delivery.redeliver(purchase_id)
+
+    async def verify_payment(self, purchase_id: UUID) -> VerificationReport:
+        """Re-check one purchase against the provider and finish it if needed.
+
+        Used by the admin panel when a buyer reports a payment without a link.
+        Fully idempotent:
+
+        * already delivered → nothing is sent, nothing changes;
+        * paid but undelivered → delivery is retried;
+        * pending → the provider is asked for the truth. CryptoBot is queried
+          through its API; Telegram Stars has no lookup endpoint, so the stored
+          charge id is used — its presence is Telegram's own confirmation that
+          the payment happened;
+        * refunded or genuinely unpaid → reported, never "fixed".
+
+        Raises:
+            PurchaseNotFoundError: no purchase with this id.
+            LockBusyError: a payment or delivery for it is being processed.
+        """
+        purchase = await self.purchases.get(purchase_id)
+        status_before = purchase.status
+
+        if purchase.status is PurchaseStatus.REFUNDED:
+            return self._report(purchase, VerificationOutcome.REFUNDED, status_before)
+
+        if purchase.status is PurchaseStatus.DELIVERED:
+            return self._report(purchase, VerificationOutcome.ALREADY_DELIVERED, status_before)
+
+        if purchase.status is PurchaseStatus.PAID:
+            # The money is in; only the hand-over is missing.
+            result = await self.delivery.deliver_purchase(purchase_id)
+            outcome = (
+                VerificationOutcome.DELIVERED_NOW
+                if result.succeeded
+                else VerificationOutcome.DELIVERY_FAILED
+            )
+            refreshed = await self.purchases.get(purchase_id)
+            return self._report(refreshed, outcome, status_before, delivery=result)
+
+        if purchase.provider is PaymentProvider.STARS:
+            return await self._verify_stars(purchase, status_before)
+        return await self._verify_crypto(purchase, status_before)
+
+    async def _verify_stars(
+        self,
+        purchase: Purchase,
+        status_before: PurchaseStatus,
+    ) -> VerificationReport:
+        """Stars has no invoice lookup: the stored charge id is the evidence."""
+        if not purchase.telegram_charge_id:
+            return self._report(
+                purchase,
+                VerificationOutcome.NO_PROVIDER_EVIDENCE,
+                status_before,
+                detail=(
+                    "Telegram Stars provides no invoice lookup and no charge id was "
+                    "recorded for this invoice, so no payment ever reached the bot."
+                ),
+            )
+        return await self._settle_and_report(
+            purchase,
+            status_before,
+            telegram_charge_id=purchase.telegram_charge_id,
+            provider_state=PaymentState.PAID,
+        )
+
+    async def _verify_crypto(
+        self,
+        purchase: Purchase,
+        status_before: PurchaseStatus,
+    ) -> VerificationReport:
+        """Ask Crypto Pay what really happened to this invoice."""
+        try:
+            states = await self.crypto.fetch_states([purchase.external_id])
+        except AppError as error:
+            logger.warning(
+                "verification_provider_unavailable",
+                purchase_id=str(purchase.id),
+                error=str(error),
+            )
+            return self._report(
+                purchase,
+                VerificationOutcome.PROVIDER_UNAVAILABLE,
+                status_before,
+                detail=str(error),
+            )
+
+        state = states.get(purchase.external_id)
+        if state is PaymentState.PAID:
+            return await self._settle_and_report(
+                purchase,
+                status_before,
+                provider_state=state,
+            )
+        if state is PaymentState.EXPIRED:
+            return self._report(
+                purchase,
+                VerificationOutcome.EXPIRED_UNPAID,
+                status_before,
+                provider_state=state,
+            )
+        return self._report(
+            purchase,
+            VerificationOutcome.STILL_UNPAID,
+            status_before,
+            provider_state=state,
+            detail=None if state else "The provider does not know this invoice any more.",
+        )
+
+    async def _settle_and_report(
+        self,
+        purchase: Purchase,
+        status_before: PurchaseStatus,
+        *,
+        provider_state: PaymentState,
+        telegram_charge_id: str | None = None,
+    ) -> VerificationReport:
+        """Confirm the payment we had missed, then deliver."""
+        result = await self.settle_payment(
+            provider=purchase.provider,
+            external_id=purchase.external_id,
+            telegram_charge_id=telegram_charge_id,
+        )
+        outcome = (
+            VerificationOutcome.SETTLED_AND_DELIVERED
+            if result.succeeded
+            else VerificationOutcome.DELIVERY_FAILED
+        )
+        refreshed = await self.purchases.get(purchase.id)
+        logger.info(
+            "purchase_verified",
+            purchase_id=str(purchase.id),
+            provider=purchase.provider.value,
+            outcome=outcome.value,
+            status_before=status_before.value,
+            status_after=refreshed.status.value,
+        )
+        return self._report(
+            refreshed,
+            outcome,
+            status_before,
+            provider_state=provider_state,
+            delivery=result,
+        )
+
+    @staticmethod
+    def _report(  # noqa: PLR0913 — a report simply has this many fields
+        purchase: Purchase,
+        outcome: VerificationOutcome,
+        status_before: PurchaseStatus,
+        *,
+        provider_state: PaymentState | None = None,
+        delivery: DeliveryResult | None = None,
+        detail: str | None = None,
+    ) -> VerificationReport:
+        return VerificationReport(
+            purchase_id=purchase.id,
+            provider=purchase.provider,
+            outcome=outcome,
+            status_before=status_before,
+            status_after=purchase.status,
+            provider_state=provider_state,
+            delivery=delivery,
+            detail=detail,
+        )
