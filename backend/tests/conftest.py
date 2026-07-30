@@ -12,6 +12,16 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.api.deps import RESOURCES_STATE_KEY, get_resources
+from app.core.config import (
+    AppSettings,
+    BotSettings,
+    CryptoBotSettings,
+    DeliverySettings,
+    PostgresSettings,
+    RedisSettings,
+    SecuritySettings,
+    TelegramSettings,
+)
 from app.core.resources import Resources
 from app.main import create_app
 from tests.settings_factory import build_settings
@@ -66,6 +76,26 @@ class FakeCache:
 
     async def close(self) -> None:
         self.closed = True
+
+
+# Every settings group whose env-file reading must be disabled in tests.
+_SETTINGS_CLASSES = (
+    AppSettings,
+    BotSettings,
+    DeliverySettings,
+    PostgresSettings,
+    RedisSettings,
+    TelegramSettings,
+    CryptoBotSettings,
+    SecuritySettings,
+)
+
+
+@pytest.fixture(autouse=True)
+def ignore_local_env_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the suite hermetic: a developer's .env must never leak into tests."""
+    for settings_class in _SETTINGS_CLASSES:
+        monkeypatch.setitem(settings_class.model_config, "env_file", None)
 
 
 def build_resources(
