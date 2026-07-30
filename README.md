@@ -114,6 +114,38 @@ Covered by tests against real PostgreSQL and real Redis: double `/start`, ten
 replayed payment webhooks, five parallel deliveries, two competing invoices for
 one product, and two buyers who must not block each other.
 
+## Bot
+
+One process (`python -m app.bot`) owns everything Telegram: updates, payments and
+delivery. It runs long polling locally and an aiohttp webhook server in
+production, where nginx forwards two paths to it — `/webhook/telegram` (secret
+token checked) and `/webhook/cryptobot` (HMAC signature checked).
+
+### Purchase flow
+
+```
+/start <slug>          card: photo, title, description, prices, two buttons
+                       → nothing is billed, no purchase, no invoice
+⭐ or 💎 pressed        pending purchase + provider invoice created
+payment notification   confirm_payment → deliver_purchase → mark_delivered
+/start <slug> again    already owned → the link is re-sent, never re-charged
+```
+
+An invoice exists only because a buyer pressed a payment button. Opening a card
+records the visitor's Telegram profile and nothing else.
+
+### Resilience
+
+| Situation | Behaviour |
+| --- | --- |
+| The same webhook arrives five times | one confirmation, one delivery |
+| A webhook never arrives | the reconciliation loop polls Crypto Pay and settles the payment |
+| Telegram flood control or an outage | delivery retries with exponential back-off, honouring `retry_after` |
+| The buyer blocked the bot | no retries; the purchase stays `paid` and the next `/start` delivers it |
+| Two payment buttons pressed at once | one invoice: the second press is refused by the lock |
+| Stars and USDT invoices both paid | the database allows exactly one paid copy; the loser is reported, not delivered |
+| An invoice is never paid | housekeeping expires it, and it stops being polled |
+
 ## Migrations
 
 Alembic runs on the async engine. In the compose stack a one-shot `migrations`
@@ -158,7 +190,7 @@ or missing value stops the process instead of failing mid-payment. See
 | 1 | Skeleton, configuration, logging, Docker, CI | done |
 | 2 | Database schema, migrations, repositories | done |
 | 3 | Service layer, dependency injection | done |
-| 4 | Bot: product card, Stars, CryptoBot, re-delivery | planned |
+| 4 | Bot: product card, Stars, CryptoBot, re-delivery | done |
 | 5 | Admin API: auth, CRUD, statistics, search, webhooks | planned |
 | 6 | Vue 3 admin panel | planned |
 | 7 | Nginx, production compose, deployment guide | planned |
