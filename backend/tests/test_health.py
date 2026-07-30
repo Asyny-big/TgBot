@@ -11,7 +11,8 @@ from app import __version__
 from app.api.deps import RESOURCES_STATE_KEY, get_resources
 from app.api.middleware import REQUEST_ID_HEADER
 from app.main import create_app
-from tests.conftest import build_resources, build_settings
+from tests.conftest import build_resources
+from tests.settings_factory import build_settings
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
