@@ -36,6 +36,25 @@ backend/app/
 └── bot/             aiogram handlers, keyboards, middlewares
 ```
 
+## Data model
+
+Three tables; money-critical rules are database constraints, not conventions.
+
+| Table | Purpose | Key invariants |
+| --- | --- | --- |
+| `products` | one digital good per deep-link slug | unique `slug` matching Telegram's payload rules, at least one price set, prices strictly positive |
+| `users` | Telegram profile snapshot | `telegram_id` as primary key, case-insensitive username index for admin search |
+| `purchases` | one attempt to buy one product | unique `(provider, external_id)`, partial unique `(user_id, product_id)` while paid or delivered, unique Telegram charge id, delivered rows must carry a link and a timestamp |
+
+Prices are independent per rail: `price_stars` (integer XTR) and `price_usdt`
+(`NUMERIC(12,2)`). A rail without a price is simply not offered on the card.
+Purchases store the amount actually charged, so later price changes never
+rewrite history. Every amount is `NUMERIC` and every timestamp is timezone aware.
+
+Statuses: `pending → paid → delivered`, plus `refunded` (Stars refund revokes
+access) and `expired` (unpaid invoice). Money that arrives after expiry is still
+honoured; a refunded purchase can never be re-paid.
+
 ## Quick start
 
 ```bash
@@ -48,10 +67,34 @@ Local development without Docker:
 
 ```bash
 make install              # uv sync --frozen
+make test-unit            # tests that need no database
 make check                # ruff + mypy --strict + pytest
 ```
 
 `make help` lists every target.
+
+## Migrations
+
+Alembic runs on the async engine. In the compose stack a one-shot `migrations`
+service applies `alembic upgrade head` before the API container starts.
+
+```bash
+make migrate                        # upgrade head
+make migrate-down                   # downgrade -1
+make revision m="add coupon codes"  # autogenerate a new revision
+```
+
+`alembic check` runs as part of the test suite, so a model change without a
+migration fails CI instead of production.
+
+The integration suite needs a disposable PostgreSQL database:
+
+```bash
+export TEST_DATABASE_DSN=postgresql+asyncpg://tgshop:tgshop@127.0.0.1:5432/tgshop_test
+make test
+```
+
+Without that variable the database tests are skipped and the rest still run.
 
 ## Configuration
 
@@ -72,7 +115,7 @@ or missing value stops the process instead of failing mid-payment. See
 | Stage | Scope | Status |
 | --- | --- | --- |
 | 1 | Skeleton, configuration, logging, Docker, CI | done |
-| 2 | Database schema, migrations, repositories | planned |
+| 2 | Database schema, migrations, repositories | done |
 | 3 | Service layer, dependency injection | planned |
 | 4 | Bot: product card, Stars, CryptoBot, re-delivery | planned |
 | 5 | Admin API: auth, CRUD, statistics, search, webhooks | planned |
