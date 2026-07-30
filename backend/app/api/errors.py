@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from http import HTTPStatus
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -14,6 +14,8 @@ from app.core.exceptions import AppError
 from app.core.logging import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from fastapi import FastAPI, Request
     from starlette.responses import Response
 
@@ -58,13 +60,28 @@ async def _handle_http_exception(_: Request, exc: Exception) -> Response:
     return _render(status_code, code, message, {})
 
 
+def _describe(error: Mapping[str, Any]) -> dict[str, str]:
+    """Reduce a pydantic error to JSON-safe, non-echoing fields.
+
+    Neither ``input`` nor ``ctx`` is included: they can carry non-serialisable
+    objects (``Decimal``, exceptions) and would echo submitted values — such as a
+    password — straight back to the client.
+    """
+    location = ".".join(str(part) for part in error.get("loc", ()) if part != "body")
+    return {
+        "field": location or "body",
+        "type": str(error.get("type", "invalid")),
+        "message": str(error.get("msg", "Invalid value")),
+    }
+
+
 async def _handle_validation_error(_: Request, exc: Exception) -> Response:
     errors = exc.errors() if isinstance(exc, RequestValidationError) else []
     return _render(
         HTTPStatus.UNPROCESSABLE_ENTITY,
         "validation_error",
         "Request payload is invalid",
-        {"fields": [dict(item) for item in errors]},
+        {"fields": [_describe(item) for item in errors]},
     )
 
 
