@@ -186,6 +186,42 @@ never invents a payment:
 Validation failures return `422` with the offending field, its rule and a
 message; the submitted values are never echoed back.
 
+## Admin panel
+
+Vue 3 + TypeScript + Pinia, built by Vite into static files that nginx serves.
+No UI framework: the whole bundle is ~128 KB (48 KB gzipped).
+
+```bash
+make ui-install      # npm install
+make ui-dev          # dev server on :5173, proxying /api to :8000
+make ui-check        # eslint + vue-tsc + vitest + build
+```
+
+Screens: **Статистика** (four revenue windows, Stars and USDT split, top
+products, latest sales), **Товары** (search, pagination, create/edit, hide,
+delete, one-click deep-link copy), **Покупки** (search across every field,
+status filter, «Проверить платеж» and «Отправить ссылку» per row).
+
+Built for large data sets: pagination, search and filtering all happen on the
+server, search input is debounced, and a superseded request is aborted — so a
+page never renders the answer to an older query.
+
+### Types come from the API
+
+`backend/openapi.json` is exported from the running app (`make openapi`), and
+`make ui-types` regenerates `src/api/schema.d.ts` from it with
+`openapi-typescript`. Every request and response in the panel is typed from that
+file, so renaming a field on the server breaks `vue-tsc`, not production. CI
+regenerates the types and fails if the committed file differs.
+
+### Session handling
+
+The access token lives in memory only — never in `localStorage`, so an XSS
+cannot read it. The refresh token is an httpOnly cookie that JavaScript cannot
+touch. On `401` the client refreshes once and replays the request; parallel 401s
+share a single refresh, so the rotating refresh token is never spent twice. A
+page reload resumes the session from the cookie alone.
+
 ## Migrations
 
 Alembic runs on the async engine. In the compose stack a one-shot `migrations`
@@ -232,5 +268,5 @@ or missing value stops the process instead of failing mid-payment. See
 | 3 | Service layer, dependency injection | done |
 | 4 | Bot: product card, Stars, CryptoBot, re-delivery | done |
 | 5 | Admin API: auth, CRUD, statistics, search, manual payment check | done |
-| 6 | Vue 3 admin panel | planned |
+| 6 | Vue 3 admin panel | done |
 | 7 | Nginx, production compose, deployment guide | planned |
