@@ -12,10 +12,12 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from app.infrastructure.cache.locks import RedisLockManager
+from app.infrastructure.cache.rate_limit import RedisRateLimiter
 from app.infrastructure.cache.revocation import RedisTokenRevocationStore
 from app.infrastructure.db.uow import SqlAlchemyUnitOfWorkFactory
 from app.infrastructure.payments.cryptobot import CryptoBotClient
 from app.services.auth import AuthService
+from app.services.checkout import CheckoutService
 from app.services.delivery import DeliveryService
 from app.services.products import ProductService
 from app.services.purchases import PurchaseService
@@ -25,6 +27,7 @@ if TYPE_CHECKING:
     from app.core.config import Settings
     from app.core.resources import Resources
     from app.domain.delivery import DeliveryGateway
+    from app.domain.payments import StarsInvoiceSender
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +37,7 @@ class Container:
     settings: Settings
     uow_factory: SqlAlchemyUnitOfWorkFactory
     locks: RedisLockManager
+    rate_limiter: RedisRateLimiter
     crypto_payments: CryptoBotClient
     products: ProductService
     purchases: PurchaseService
@@ -55,6 +59,7 @@ class Container:
             settings=settings,
             uow_factory=uow_factory,
             locks=locks,
+            rate_limiter=RedisRateLimiter(resources.cache.client),
             crypto_payments=CryptoBotClient(settings.cryptobot),
             products=ProductService(uow_factory=uow_factory, telegram=settings.telegram),
             purchases=purchases,
@@ -63,6 +68,20 @@ class Container:
                 settings.security,
                 RedisTokenRevocationStore(resources.cache.client),
             ),
+        )
+
+    def build_checkout(
+        self,
+        *,
+        delivery_gateway: DeliveryGateway,
+        stars: StarsInvoiceSender,
+    ) -> CheckoutService:
+        """Wire checkout to a concrete transport (bot process or admin API)."""
+        return CheckoutService(
+            purchases=self.purchases,
+            delivery=self.build_delivery(delivery_gateway),
+            stars=stars,
+            crypto=self.crypto_payments,
         )
 
     def build_delivery(self, gateway: DeliveryGateway) -> DeliveryService:
