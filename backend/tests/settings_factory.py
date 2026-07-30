@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 from pydantic import SecretStr
 
 from app.core.config import (
@@ -25,24 +24,6 @@ from app.core.config import (
 )
 
 VALID_BOT_TOKEN = "123456789:AAHfake-Test-Token_for_unit_tests_only01"  # noqa: S105
-
-_SETTINGS_CLASSES = (
-    AppSettings,
-    BotSettings,
-    DeliverySettings,
-    PostgresSettings,
-    RedisSettings,
-    TelegramSettings,
-    CryptoBotSettings,
-    SecuritySettings,
-)
-
-
-@pytest.fixture(autouse=True)
-def _ignore_local_env_file(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the suite hermetic: a developer's .env must never leak into tests."""
-    for settings_class in _SETTINGS_CLASSES:
-        monkeypatch.setitem(settings_class.model_config, "env_file", None)
 
 
 def build_settings(**overrides: Any) -> Settings:
