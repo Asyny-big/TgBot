@@ -355,6 +355,11 @@ sudo usermod -aG docker "$USER" && newgrp docker
 
 git clone https://github.com/Asyny-big/TgBot.git /opt/tgshop
 cd /opt/tgshop
+
+# GitHub does not carry the executable bit through its web API, so restore it
+# once after cloning. (`make` targets invoke the scripts through bash and work
+# either way.)
+chmod +x scripts/*.sh
 ```
 
 ## Configuring .env
@@ -651,6 +656,7 @@ unattended recovery.
 
 ```bash
 git clone https://github.com/Asyny-big/TgBot.git /opt/tgshop && cd /opt/tgshop
+chmod +x scripts/*.sh
 cp /secure/backup/.env .env && chmod 600 .env
 ./scripts/tls-init.sh
 make prod-build && make prod-up
