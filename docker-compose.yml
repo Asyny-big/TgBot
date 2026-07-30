@@ -100,6 +100,33 @@ services:
     networks:
       - tgshop
 
+  bot:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+    command: ["python", "-m", "app.bot"]
+    volumes:
+      - ./backend/app:/app/app:ro
+    # Telegram and CryptoBot webhooks; nginx forwards them here in production.
+    ports:
+      - "127.0.0.1:${BOT_EXPOSED_PORT:-8081}:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    networks:
+      - tgshop
+
 volumes:
   postgres_data:
   redis_data:
