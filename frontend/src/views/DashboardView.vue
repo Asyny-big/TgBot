@@ -58,10 +58,7 @@ onMounted(() => {
         </div>
       </div>
 
-      <div
-        class="cards"
-        style="margin-top: 12px"
-      >
+      <div class="cards">
         <div class="card">
           <div class="label">
             Товаров
