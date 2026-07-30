@@ -16,7 +16,7 @@ from app.core.resources import Resources
 from app.infrastructure.cache.redis import RedisClient
 from app.infrastructure.db.engine import Database
 from app.main import create_app
-from tests.conftest import build_settings
+from tests.settings_factory import build_settings
 
 UNREACHABLE_PORT = 1
 
