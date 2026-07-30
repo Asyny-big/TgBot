@@ -76,6 +76,13 @@ class SqlAlchemyPurchaseRepository:
         model = (await self._session.execute(statement)).scalar_one_or_none()
         return to_purchase(model) if model is not None else None
 
+    async def get_by_charge_id(self, telegram_charge_id: str) -> Purchase | None:
+        statement = select(PurchaseModel).where(
+            PurchaseModel.telegram_charge_id == telegram_charge_id
+        )
+        model = (await self._session.execute(statement)).scalar_one_or_none()
+        return to_purchase(model) if model is not None else None
+
     async def find_access_granting(self, user_id: int, product_id: UUID) -> Purchase | None:
         statement = select(PurchaseModel).where(
             PurchaseModel.user_id == user_id,
