@@ -11,6 +11,8 @@ import asyncio
 import hashlib
 import hmac
 import json
+import socket
+from contextlib import suppress
 from dataclasses import dataclass
 from decimal import Decimal
 from http import HTTPStatus
@@ -1030,3 +1032,130 @@ async def test_a_throttled_buyer_is_told_to_slow_down(live_locks: RedisLockManag
         assert TOO_FAST in bot.texts()
     finally:
         await bot.session.close()
+
+
+# --------------------------------------------------------------------------- #
+# The webhook server as the container runs it
+# --------------------------------------------------------------------------- #
+async def test_the_webhook_server_serves_every_route_and_shuts_down_on_request(
+    harness: BotHarness,
+) -> None:
+    """The production transport, end to end: bind, serve, stop, release the port.
+
+    Covers what the container depends on and nothing else can prove: the liveness
+    route answers, both provider routes exist and reject unauthenticated calls,
+    and a shutdown request actually ends the process instead of leaving the port
+    held.
+    """
+    from app.bot.runner import BotRuntime, run_webhook  # noqa: PLC0415
+    from app.bot.webhooks import HEALTH_PATH  # noqa: PLC0415
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    settings = harness.settings.model_copy(
+        update={
+            "telegram": TelegramSettings(
+                bot_token=SecretStr("123456789:AAHfake-Test-Token_for_unit_tests_only01"),
+                bot_username="MyShopBot",
+                use_webhook=True,
+                webhook_base_url="https://shop.example.com",
+                webhook_secret=SecretStr("webhook-secret-value"),
+                drop_pending_updates=True,
+            ),
+            "bot": BotSettings(throttle_seconds=0.0, webhook_port=port),
+        },
+    )
+
+    runtime = BotRuntime(
+        settings=settings,
+        container=harness.container,
+        bot=harness.bot,
+        dispatcher=harness.dispatcher,
+        checkout=harness.checkout,
+    )
+    stop = asyncio.Event()
+    server = asyncio.create_task(run_webhook(runtime, stop))
+    base = f"http://127.0.0.1:{port}"
+    try:
+        async with asyncio.timeout(10):
+            await _wait_until_listening(port)
+
+        async with httpx.AsyncClient(base_url=base, timeout=5.0) as client:
+            liveness = await client.get(HEALTH_PATH)
+            assert liveness.status_code == 200
+            assert liveness.json()["status"] == "alive"
+
+            # Registered, and closed to anyone without the secret token.
+            unauthorised = await client.post(
+                settings.telegram.webhook_path,
+                json={"update_id": 1},
+            )
+            assert unauthorised.status_code == 401
+
+            # Registered, and closed to anyone without a valid signature.
+            unsigned = await client.post(
+                settings.cryptobot.webhook_path,
+                json={"update_type": "invoice_paid"},
+            )
+            assert unsigned.status_code == 401
+
+        stop.set()
+        await asyncio.wait_for(server, timeout=10)
+    finally:
+        if not server.done():
+            server.cancel()
+            with suppress(asyncio.CancelledError):
+                await server
+
+    # The port is free again, so a restart cannot fail on "address in use".
+    with socket.socket() as rebind:
+        rebind.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        rebind.bind(("127.0.0.1", port))
+
+
+async def _wait_until_listening(port: int) -> None:
+    """Wait for the webhook server to accept connections."""
+    while True:
+        try:
+            _, writer = await asyncio.open_connection("127.0.0.1", port)
+        except OSError:
+            await asyncio.sleep(0.05)
+            continue
+        writer.close()
+        with suppress(ConnectionError):
+            await writer.wait_closed()
+        return
+
+
+async def test_long_polling_stops_when_the_process_is_asked_to(harness: BotHarness) -> None:
+    """Ctrl+C locally, SIGTERM in a container: both must end the polling loop.
+
+    Without this, `stop_polling` would never be called and the process would hang
+    until it was killed, skipping every cleanup path.
+    """
+    from app.bot.runner import BotRuntime, run_polling  # noqa: PLC0415
+
+    runtime = BotRuntime(
+        settings=harness.settings,
+        container=harness.container,
+        bot=harness.bot,
+        dispatcher=harness.dispatcher,
+        checkout=harness.checkout,
+    )
+    stop = asyncio.Event()
+    polling = asyncio.create_task(run_polling(runtime, stop))
+    try:
+        # Give the loop time to reach getUpdates before asking it to stop.
+        await asyncio.sleep(0.1)
+        assert not polling.done()
+
+        stop.set()
+        async with asyncio.timeout(10):
+            await polling
+    finally:
+        if not polling.done():
+            polling.cancel()
+            with suppress(asyncio.CancelledError):
+                await polling
