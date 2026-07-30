@@ -4,7 +4,8 @@ BACKEND := backend
 UV := uv --directory $(BACKEND)
 COMPOSE := docker compose
 
-.PHONY: help env install lint format typecheck test check up down restart logs ps shell clean
+.PHONY: help env install lint format typecheck test test-unit check up down restart logs ps shell \
+	migrate migrate-down revision clean
 
 help: ## Show the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -27,8 +28,25 @@ format: ## Auto-fix lint findings and format the code
 typecheck: ## Run mypy in strict mode
 	$(UV) run mypy
 
-test: ## Run the test suite with coverage
+test: ## Run every test (needs TEST_DATABASE_DSN for the integration suite)
 	$(UV) run pytest --cov=app --cov-report=term-missing
+
+test-unit: ## Run only the tests that need no database
+	$(UV) run pytest --cov=app --cov-report=term-missing -p no:cacheprovider \
+		--ignore=tests/test_repository_products.py \
+		--ignore=tests/test_repository_purchases.py \
+		--ignore=tests/test_repository_stats.py \
+		--ignore=tests/test_migrations.py \
+		--ignore=tests/test_contracts.py
+
+migrate: ## Apply every pending migration
+	$(COMPOSE) run --rm migrations alembic upgrade head
+
+migrate-down: ## Roll back the most recent migration
+	$(COMPOSE) run --rm migrations alembic downgrade -1
+
+revision: ## Autogenerate a migration: make revision m="add coupons"
+	$(COMPOSE) run --rm migrations alembic revision --autogenerate -m "$(m)"
 
 check: lint typecheck test ## Everything CI runs
 
