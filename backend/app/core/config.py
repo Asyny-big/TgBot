@@ -130,6 +130,9 @@ class RedisSettings(BaseSettings):
     password: SecretStr | None = None
     max_connections: int = Field(default=20, ge=1, le=500)
     socket_timeout: float = Field(default=5.0, gt=0)
+    # Distributed locks always expire: a crashed process must not block a buyer.
+    lock_ttl_seconds: float = Field(default=45.0, ge=5.0, le=300.0)
+    lock_wait_seconds: float = Field(default=0.0, ge=0.0, le=30.0)
 
     @field_validator("password", mode="before")
     @classmethod
@@ -234,6 +237,27 @@ class CryptoBotSettings(BaseSettings):
         return CRYPTOBOT_MAINNET_API
 
 
+class DeliverySettings(BaseSettings):
+    """Retry policy for handing the purchased link to the buyer."""
+
+    model_config = _settings_config("DELIVERY_")
+
+    max_attempts: int = Field(default=4, ge=1, le=10)
+    initial_backoff_seconds: float = Field(default=1.0, gt=0, le=60.0)
+    max_backoff_seconds: float = Field(default=20.0, gt=0, le=300.0)
+    backoff_multiplier: float = Field(default=2.0, ge=1.0, le=10.0)
+    # Random jitter spreads retries so a Telegram outage does not produce a
+    # synchronised thundering herd when it ends.
+    jitter_ratio: float = Field(default=0.25, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _check_backoff_bounds(self) -> Self:
+        if self.max_backoff_seconds < self.initial_backoff_seconds:
+            msg = "max_backoff_seconds must not be smaller than initial_backoff_seconds"
+            raise ValueError(msg)
+        return self
+
+
 class SecuritySettings(BaseSettings):
     """Admin authentication and browser-facing security policy."""
 
@@ -283,6 +307,7 @@ class Settings(BaseModel):
     redis: RedisSettings
     telegram: TelegramSettings
     cryptobot: CryptoBotSettings
+    delivery: DeliverySettings
     security: SecuritySettings
 
 
@@ -300,5 +325,6 @@ def get_settings() -> Settings:
         redis=_load(RedisSettings),
         telegram=_load(TelegramSettings),
         cryptobot=_load(CryptoBotSettings),
+        delivery=_load(DeliverySettings),
         security=_load(SecuritySettings),
     )
