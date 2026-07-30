@@ -38,3 +38,8 @@ Thumbs.db
 *.log
 logs/
 .docker-data/
+
+# --------------------------- Backups (never commit) -------------------------- #
+backups/
+*.dump
+*.dump.sha256
