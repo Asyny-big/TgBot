@@ -16,17 +16,23 @@ from uuid import uuid4
 import pytest
 from alembic.config import Config
 from alembic.util.exc import CommandError
-from sqlalchemy import NullPool
+from pydantic import SecretStr
+from redis.asyncio import Redis
+from sqlalchemy import NullPool, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from alembic import command
-from app.core.config import BACKEND_DIR
+from app.core.config import BACKEND_DIR, PostgresSettings, RedisSettings
 from app.domain.commands import ProductDraft, PurchaseDraft, UserDraft
 from app.domain.enums import PaymentProvider, PurchaseStatus
+from app.infrastructure.cache.locks import RedisLockManager
+from app.infrastructure.db.engine import Database
 from app.infrastructure.db.repositories.products import SqlAlchemyProductRepository
 from app.infrastructure.db.repositories.purchases import SqlAlchemyPurchaseRepository
 from app.infrastructure.db.repositories.stats import SqlAlchemyStatsRepository
 from app.infrastructure.db.repositories.users import SqlAlchemyUserRepository
+from app.infrastructure.db.uow import SqlAlchemyUnitOfWorkFactory
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -34,7 +40,10 @@ if TYPE_CHECKING:
     from app.domain.entities import Product, Purchase, User
 
 DSN_ENV_VAR = "TEST_DATABASE_DSN"
+REDIS_DSN_ENV_VAR = "TEST_REDIS_DSN"
 ALEMBIC_DSN_ENV_VAR = "ALEMBIC_DATABASE_DSN"
+
+TABLES_TO_TRUNCATE = ("purchases", "users", "products")
 
 
 def alembic_config(dsn: str) -> Config:
@@ -84,6 +93,62 @@ async def db_session(migrated_database: str) -> AsyncIterator[AsyncSession]:
         await transaction.rollback()
         await connection.close()
         await engine.dispose()
+
+
+@pytest.fixture
+async def redis_client() -> AsyncIterator[Redis]:
+    """A flushed Redis database, or skip the tests that need one."""
+    dsn = os.getenv(REDIS_DSN_ENV_VAR)
+    if not dsn:
+        pytest.skip(f"{REDIS_DSN_ENV_VAR} is not set — skipping Redis integration tests")
+    client: Redis = Redis.from_url(dsn, decode_responses=True)
+    try:
+        await client.flushdb()
+        yield client
+    finally:
+        await client.flushdb()
+        await client.aclose()
+
+
+@pytest.fixture
+async def live_database(migrated_database: str) -> AsyncIterator[Database]:
+    """A real connection pool with real commits, for concurrency tests.
+
+    The transaction-per-test trick cannot be used here: concurrent coroutines
+    need their own sessions and real commits, so the tables are truncated instead.
+    """
+    url = make_url(migrated_database)
+    settings = PostgresSettings(
+        host=url.host or "127.0.0.1",
+        port=url.port or 5432,
+        user=url.username or "postgres",
+        password=SecretStr(url.password or ""),
+        db=url.database or "postgres",
+        pool_size=10,
+    )
+    database = Database(settings)
+    await _truncate(database)
+    try:
+        yield database
+    finally:
+        await _truncate(database)
+        await database.dispose()
+
+
+async def _truncate(database: Database) -> None:
+    statement = text(f"TRUNCATE {', '.join(TABLES_TO_TRUNCATE)} RESTART IDENTITY CASCADE")
+    async with database.engine.begin() as connection:
+        await connection.execute(statement)
+
+
+@pytest.fixture
+def live_uow_factory(live_database: Database) -> SqlAlchemyUnitOfWorkFactory:
+    return SqlAlchemyUnitOfWorkFactory(live_database)
+
+
+@pytest.fixture
+def live_locks(redis_client: Redis) -> RedisLockManager:
+    return RedisLockManager(redis_client, RedisSettings(lock_ttl_seconds=10.0))
 
 
 @pytest.fixture
@@ -168,6 +233,7 @@ async def seed_paid_purchase(
 
 __all__ = [
     "DSN_ENV_VAR",
+    "REDIS_DSN_ENV_VAR",
     "PaymentProvider",
     "PurchaseStatus",
     "alembic_config",
