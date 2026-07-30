@@ -18,13 +18,14 @@ from typing import TYPE_CHECKING
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
-from app.bot.factory import create_bot, create_checkout, create_dispatcher
+from app.bot.factory import create_checkout, create_dispatcher
 from app.bot.webhooks import register_cryptobot_webhook
 from app.bot.workers import HousekeepingWorker, ReconciliationWorker
 from app.core.config import get_settings
 from app.core.container import Container
 from app.core.logging import configure_logging, get_logger
 from app.core.resources import Resources
+from app.infrastructure.telegram.factory import create_bot
 
 if TYPE_CHECKING:
     from aiogram import Bot, Dispatcher
