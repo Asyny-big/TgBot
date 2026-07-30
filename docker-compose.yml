@@ -127,6 +127,20 @@ services:
     networks:
       - tgshop
 
+  admin:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: runtime
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${ADMIN_EXPOSED_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_started
+    networks:
+      - tgshop
+
 volumes:
   postgres_data:
   redis_data:
