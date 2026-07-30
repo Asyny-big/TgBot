@@ -8,6 +8,7 @@ handlers — so what is tested is the bot, not a mock of it.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -15,6 +16,8 @@ from aiogram import Bot
 from aiogram.methods import (
     AnswerCallbackQuery,
     AnswerPreCheckoutQuery,
+    GetMe,
+    GetUpdates,
     SendInvoice,
     SendMessage,
     SendPhoto,
@@ -38,6 +41,8 @@ if TYPE_CHECKING:
 
 BOT_TOKEN = "123456789:AAHfake-Test-Token_for_unit_tests_only01"  # noqa: S105
 CHAT_TYPE_PRIVATE = "private"
+#: How long a faked getUpdates call blocks, mimicking Telegram's long polling.
+POLL_INTERVAL_SECONDS = 0.05
 
 
 class RecordingBot(Bot):
@@ -59,6 +64,12 @@ class RecordingBot(Bot):
         if isinstance(method, SendMessage) and self.fail_send_message:
             self.failed_calls.append(method)
             raise self.fail_send_message.pop(0)
+        if isinstance(method, GetUpdates):
+            # Real long polling blocks until Telegram has something or the
+            # timeout expires. Answering instantly would turn the polling loop
+            # into a busy-wait that starves the event loop.
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+            return []
         self.calls.append(method)
         return _canned_result(method)
 
@@ -83,7 +94,10 @@ def _canned_result(method: TelegramMethod[Any]) -> Any:
         return make_message(text=getattr(method, "text", None) or "sent")
     if isinstance(method, AnswerCallbackQuery | AnswerPreCheckoutQuery):
         return True
-    return True  # pragma: no cover — no other method is used by the shop
+    if isinstance(method, GetMe):
+        # aiogram identifies the bot before it starts polling.
+        return User(id=1, is_bot=True, first_name="Shop", username="MyShopBot")
+    return True
 
 
 def make_user(telegram_id: int = 4242, username: str | None = "buyer") -> User:
