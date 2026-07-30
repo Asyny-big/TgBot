@@ -73,6 +73,47 @@ make check                # ruff + mypy --strict + pytest
 
 `make help` lists every target.
 
+## Service layer
+
+Use cases live in `backend/app/services`, wired once in `app/core/container.py`.
+Responsibilities are deliberately split:
+
+| Service | Owns | Never does |
+| --- | --- | --- |
+| `ProductService` | validation, CRUD, deep links | payments |
+| `PurchaseService` | purchase lifecycle, payment confirmation, repeat-purchase check | sending messages |
+| `DeliveryService` | sending the link, retries, delivery logging, confirming delivery | purchase rules |
+| `StatsService` | dashboard aggregates and purchase search | writes |
+| `AuthService` | admin login, JWT issue/rotate/revoke | anything else |
+
+The payment flow is explicitly staged, so business rules and transport stay apart:
+
+```
+payment confirmed
+    → PurchaseService.confirm_payment()      (money recorded, nothing sent)
+    → DeliveryService.deliver_purchase()     (send + retry with back-off)
+    → PurchaseService.mark_delivered()       (delivery recorded)
+```
+
+A failed delivery leaves the purchase `paid`, so the buyer keeps the right to the
+link and the next attempt (or the next `/start`) hands it over. No database
+transaction is ever held open while Telegram is being awaited.
+
+### Concurrency
+
+Two independent guards, because either one alone can be bypassed:
+
+* **Redis locks with a mandatory TTL** (`REDIS_LOCK_TTL_SECONDS`, default 45s)
+  serialise invoice creation, payment confirmation and delivery. Every lock
+  expires on its own, so a crashed worker cannot block a buyer, and release is a
+  compare-and-delete that cannot free somebody else's lock.
+* **Database constraints** make the rules absolute: one invoice per purchase, one
+  paid copy per buyer, one Telegram charge recorded once.
+
+Covered by tests against real PostgreSQL and real Redis: double `/start`, ten
+replayed payment webhooks, five parallel deliveries, two competing invoices for
+one product, and two buyers who must not block each other.
+
 ## Migrations
 
 Alembic runs on the async engine. In the compose stack a one-shot `migrations`
@@ -116,7 +157,7 @@ or missing value stops the process instead of failing mid-payment. See
 | --- | --- | --- |
 | 1 | Skeleton, configuration, logging, Docker, CI | done |
 | 2 | Database schema, migrations, repositories | done |
-| 3 | Service layer, dependency injection | planned |
+| 3 | Service layer, dependency injection | done |
 | 4 | Bot: product card, Stars, CryptoBot, re-delivery | planned |
 | 5 | Admin API: auth, CRUD, statistics, search, webhooks | planned |
 | 6 | Vue 3 admin panel | planned |
