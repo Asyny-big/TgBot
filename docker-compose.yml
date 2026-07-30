@@ -45,6 +45,25 @@ services:
     networks:
       - tgshop
 
+  # Runs to completion before the api starts, so the schema is always current.
+  migrations:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    restart: "no"
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - tgshop
+
   api:
     build:
       context: ./backend
@@ -76,6 +95,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     networks:
       - tgshop
 
