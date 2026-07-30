@@ -15,6 +15,7 @@ from pydantic import SecretStr
 from app.api.deps import RESOURCES_STATE_KEY, get_resources
 from app.core.config import (
     AppSettings,
+    BotSettings,
     CryptoBotSettings,
     DeliverySettings,
     Environment,
@@ -52,6 +53,7 @@ VALID_BOT_TOKEN = "123456789:AAHfake-Test-Token_for_unit_tests_only01"  # noqa: 
 
 _SETTINGS_CLASSES = (
     AppSettings,
+    BotSettings,
     DeliverySettings,
     PostgresSettings,
     RedisSettings,
@@ -95,6 +97,7 @@ def build_settings(**overrides: Any) -> Settings:
             api_token=SecretStr("12345:cryptobot-test-token"),
             network="testnet",
         ),
+        "bot": BotSettings(throttle_seconds=0.0),
         "delivery": DeliverySettings(max_attempts=2, initial_backoff_seconds=0.01),
         "security": SecuritySettings(
             jwt_secret=SecretStr("a" * 48),
