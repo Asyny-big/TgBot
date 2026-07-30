@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.api.deps import CONTAINER_STATE_KEY, RESOURCES_STATE_KEY
+from app.api.deps import CHECKOUT_STATE_KEY, CONTAINER_STATE_KEY, RESOURCES_STATE_KEY
 from app.api.errors import register_exception_handlers
 from app.api.middleware import RequestContextMiddleware
 from app.api.v1.router import api_router
@@ -17,6 +17,11 @@ from app.core.config import Settings, get_settings
 from app.core.container import Container
 from app.core.logging import configure_logging, get_logger
 from app.core.resources import Resources
+from app.infrastructure.telegram.factory import (
+    create_bot,
+    create_delivery_gateway,
+    create_stars_sender,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -29,8 +34,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Create infrastructure pools on start-up and release them on shutdown."""
     settings: Settings = app.state.settings
     resources = Resources.create(settings)
+    container = Container.create(resources)
+    # The admin API sends messages too: re-delivery and manual payment checks.
+    bot = create_bot(settings)
+    checkout = container.build_checkout(
+        delivery_gateway=create_delivery_gateway(bot),
+        stars=create_stars_sender(bot),
+    )
     setattr(app.state, RESOURCES_STATE_KEY, resources)
-    setattr(app.state, CONTAINER_STATE_KEY, Container.create(resources))
+    setattr(app.state, CONTAINER_STATE_KEY, container)
+    setattr(app.state, CHECKOUT_STATE_KEY, checkout)
 
     checks = await resources.check()
     logger.info(
@@ -42,6 +55,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        await bot.session.close()
+        await container.crypto_payments.close()
         await resources.close()
         logger.info("api_stopped")
 
