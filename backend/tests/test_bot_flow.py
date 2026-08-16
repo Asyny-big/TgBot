@@ -1159,3 +1159,57 @@ async def test_long_polling_stops_when_the_process_is_asked_to(harness: BotHarne
             polling.cancel()
             with suppress(asyncio.CancelledError):
                 await polling
+
+
+# --------------------------------------------------------------------------- #
+# A link that turned out to be broken
+# --------------------------------------------------------------------------- #
+async def test_a_rotated_link_is_what_a_re_delivery_sends(harness: BotHarness) -> None:
+    """The buyer always receives the link the product carries *now*.
+
+    The support case behind this: the buyer paid with Stars, the link was dead,
+    and the next day the administrator fixed the product and pressed «Отправить
+    ссылку». Sending the snapshot taken at the moment of the sale would hand the
+    dead link over a second time, so delivery reads the product instead.
+    """
+    from app.domain.commands import ProductUpdate  # noqa: PLC0415
+    from tests.bot_harness import successful_payment_update  # noqa: PLC0415
+
+    broken = "https://example.com/broken-invite"
+    working = "https://example.com/working-invite"
+
+    product = await _product(harness, delivery_url=broken)
+    user = make_user()
+    await harness.feed(start_update(product.slug, user=user))
+    await harness.feed(
+        pay_button_update(provider=PaymentProvider.STARS, product_id=product.id, user=user)
+    )
+    payload = await _stars_payload(harness)
+    await harness.feed(successful_payment_update(payload=payload, amount=STARS_PRICE, user=user))
+
+    assert any(broken in text for text in harness.bot.texts())
+
+    # The administrator fixes the product the next day.
+    await harness.container.products.update(
+        product.id,
+        ProductUpdate(delivery_url=working),
+    )
+
+    # …and presses «Отправить ссылку» in the panel.
+    owned = await harness.container.purchases.find_owned(user.id, product.id)
+    assert owned is not None
+    result = await harness.checkout.redeliver(owned.id)
+
+    assert result.succeeded
+    assert working in harness.bot.last_text()
+    # The dead link is never sent again, by any path.
+    assert sum(broken in text for text in harness.bot.texts()) == 1
+
+    # The buyer opening the deep link again also gets the working one.
+    await harness.feed(start_update(product.slug, user=user, update_id=77))
+    assert working in harness.bot.last_text()
+    assert sum(working in text for text in harness.bot.texts()) == 2
+
+    # No second charge for any of it.
+    overview = await harness.container.stats.overview()
+    assert overview.total.purchases_count == 1
