@@ -11,7 +11,7 @@ COMPOSE_PROD := docker compose -f docker-compose.prod.yml
 .PHONY: help env install lint format typecheck test test-unit check up down restart logs ps shell \
 	migrate migrate-down revision bot-logs openapi \
 	ui-install ui-types ui-lint ui-typecheck ui-test ui-build ui-dev ui-check clean \
-	preflight tls-init renew prod-build prod-up prod-down prod-restart prod-ps prod-logs \
+	preflight tls-init renew prod-build prod-up prod-down prod-restart prod-reload prod-ps prod-logs \
 	prod-migrate backup restore
 
 help: ## Show the available targets
@@ -126,6 +126,9 @@ prod-down: ## Stop the production stack and keep the volumes
 
 prod-restart: ## Rebuild and recreate the application containers
 	$(COMPOSE_PROD) up -d --build api bot nginx
+
+prod-reload: ## Make the edge re-resolve api/bot after they were recreated
+	$(COMPOSE_PROD) exec nginx nginx -s reload
 
 prod-ps: ## Show production container status
 	$(COMPOSE_PROD) ps

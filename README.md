@@ -705,8 +705,19 @@ cd /opt/tgshop
 git pull
 make prod-build                     # rebuild the images
 make prod-up                        # recreate what changed
+make prod-reload                    # the edge must re-resolve api and bot
 make prod-ps                        # confirm everything is healthy again
 ```
+
+**Do not skip `make prod-reload`.** `upstream tgshop_api { server api:8000; }`
+resolves the name once, when nginx starts. Recreating `api` or `bot` gives the
+new container a different address on the Docker network, and nginx keeps sending
+requests to the old one — so the panel and the API answer `502` while
+`make prod-ps` reports every container healthy, which is the most misleading
+shape a deployment failure can take. A reload re-reads the configuration and
+re-resolves both upstreams; it is instant and drops no connection. (`make
+prod-restart` recreates nginx along with `api` and `bot`, so it does not need
+this step.)
 
 Migrations are applied automatically: `api` and `bot` depend on the `migrations`
 job completing successfully, so a new schema is in place before the new code
@@ -723,7 +734,7 @@ To roll back to the previous release:
 
 ```bash
 git checkout <previous-tag>
-make prod-build && make prod-up
+make prod-build && make prod-up && make prod-reload
 ```
 
 A rollback across a migration that dropped a column needs the dump:
@@ -736,6 +747,7 @@ against it, so rolling back the application is enough and the schema can stay:
 ```bash
 git checkout <previous-tag>
 make prod-build && make prod-up      # the schema is left alone
+make prod-reload
 ```
 
 Do **not** `alembic downgrade` once bonuses have been accrued. The downgrade
@@ -789,6 +801,37 @@ docker compose -f docker-compose.prod.yml logs --tail 200 api
 
 Configuration is validated on start-up, so a bad value shows up as a single
 explicit error naming the field, not as a mid-payment failure.
+
+### `502` from a stack that reports itself healthy
+
+```bash
+make prod-reload                                # almost always this
+```
+
+nginx resolved `api` and `bot` when it started. If they were recreated since
+— an update, a rollback, a manual `up -d api` — their addresses changed and the
+edge is still talking to containers that no longer exist. The access log records
+the address it used, so one comparison confirms it:
+
+```bash
+# what nginx is dialling
+docker compose -f docker-compose.prod.yml logs --tail 20 nginx | grep upstream_addr
+# where the container actually is
+docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' \
+  "$(docker compose -f docker-compose.prod.yml ps -q api)"
+```
+
+The container is on two networks, so two addresses are printed; the edge one is
+what nginx should be using. An `upstream_addr` that is neither of them is this
+and nothing more.
+
+Two things to know about it. Recreating a container does not always change its
+address — Docker often hands back the one just released — so the same deployment
+step fails only sometimes, which is exactly why it is worth a runbook line
+rather than trusting that it worked last time. And do not diagnose it with
+`getent hosts api` inside nginx: Docker's embedded DNS answers with the
+*current* address, so that lookup looks correct while nginx is still using the
+stale one it cached at start-up.
 
 ### The database is corrupt or the data is wrong
 
