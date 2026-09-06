@@ -5,7 +5,6 @@ Lives outside ``conftest`` so harnesses can import it without a circular import.
 
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import Any
 
 from pydantic import SecretStr
@@ -65,7 +64,6 @@ def build_settings(**overrides: Any) -> Settings:
             discount_percent=10,
             reward_percent=15,
             max_bonus_payment_percent=50,
-            bonus_units_per_usdt=Decimal(500),
         ),
         "security": SecuritySettings(
             jwt_secret=SecretStr("a" * 48),

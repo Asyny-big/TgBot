@@ -9,7 +9,6 @@ runtime failure in the middle of a payment flow.
 from __future__ import annotations
 
 import re
-from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
@@ -31,7 +30,6 @@ MIN_JWT_SECRET_LENGTH: Final = 32
 MIN_ADMIN_PASSWORD_LENGTH: Final = 12
 
 MAX_PERCENT: Final = 100
-MAX_BONUS_RATE: Final = Decimal(1_000_000)
 _PREVIEW_URL_SCHEMES: Final = frozenset({"http", "https"})
 
 CRYPTOBOT_MAINNET_API: Final = "https://pay.crypt.bot/api"
@@ -299,6 +297,12 @@ class ReferralSettings(BaseSettings):
     ``enabled`` is a master switch. With it off the shop behaves exactly as it
     did before the feature existed: no referral payload is recognised, no
     discount is applied and no bonus is accrued or spent.
+
+    There is deliberately no exchange rate here. One bonus is one Telegram
+    Star, and a purchase settled in USDT is converted using the *product's own*
+    two prices at the moment of the sale — see ``Product.stars_per_usdt``. That
+    keeps the shop free of any external price feed, and of any fixed rate that
+    would silently go stale.
     """
 
     model_config = _settings_config("REFERRAL_")
@@ -311,15 +315,10 @@ class ReferralSettings(BaseSettings):
     """Share of every settled purchase credited to the inviter as bonuses."""
 
     max_bonus_payment_percent: int = Field(default=50, ge=0, le=MAX_PERCENT)
-    """Largest share of a price that bonuses may cover."""
+    """Largest share of a Stars price that bonuses may cover.
 
-    bonus_units_per_usdt: Decimal = Field(default=Decimal(500), gt=0, le=MAX_BONUS_RATE)
-    """Bonus units earned per 1 USDT, and the rate they are spent back at.
-
-    The balance is a single number in bonus units (one unit ≈ one Telegram
-    Star), so purchases settled in USDT need a rate to join the same pool. The
-    rate in force is stored on every converted ledger entry, which keeps history
-    readable after the rate changes.
+    One bonus is one Telegram Star, so this is read directly off the price: a
+    1000 Star product accepts at most 500 bonuses at 50%.
     """
 
     preview_directory_url: str | None = None

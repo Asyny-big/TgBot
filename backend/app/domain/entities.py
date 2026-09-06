@@ -52,6 +52,25 @@ class Product:
         """Providers with a configured price, in display order."""
         return tuple(provider for provider in PaymentProvider if self.supports(provider))
 
+    @property
+    def stars_per_usdt(self) -> Decimal | None:
+        """How many Telegram Stars one USDT is worth *for this product*.
+
+        The shop declares this itself by pricing the item in both currencies, so
+        it needs no external price feed and no fixed rate that could go stale:
+        the two prices on the row already say what the merchant considers
+        equivalent. Used to express a USDT payment in Stars when crediting a
+        referral reward, and recorded on the ledger entry so repricing the
+        product later never recomputes an old reward.
+
+        ``None`` when the product carries only one of the two prices — there is
+        then no declared equivalence, and the caller credits nothing rather than
+        inventing a rate.
+        """
+        if self.price_stars is None or self.price_usdt is None or self.price_usdt <= 0:
+            return None
+        return Decimal(self.price_stars) / self.price_usdt
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class User:
@@ -178,8 +197,12 @@ class BonusTransaction:
     type: BonusTransactionType
     referral_id: UUID | None = None
     purchase_id: UUID | None = None
-    rate_units_per_usdt: Decimal | None = None
-    """Rate in force when a USDT amount was converted into units."""
+    stars_per_usdt: Decimal | None = None
+    """Rate used to express a USDT payment in Stars, when one was needed.
+
+    Recorded so an old reward is never recomputed: repricing the product
+    tomorrow changes the rate for tomorrow's sales only.
+    """
 
     created_at: datetime
 

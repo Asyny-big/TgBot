@@ -50,7 +50,13 @@ def _money(amount: int | Decimal) -> str:
 
 
 def product_card(card: ProductCard) -> str:
-    """Caption of the product card: title, description and prices."""
+    """Caption of the product card: title, description and prices.
+
+    An invited buyer with an unused referral discount sees the list price struck
+    through beside what they will actually pay. Everybody else sees exactly the
+    card this shop has always shown — the discounted line only exists when the
+    option carries one.
+    """
     lines = [f"<b>{escape(card.product.title)}</b>"]
     if card.product.description:
         lines.append("")
@@ -58,7 +64,14 @@ def product_card(card: ProductCard) -> str:
     lines.append("")
     for option in card.options:
         symbol = "⭐" if option.currency.value == "XTR" else "💎"
-        lines.append(f"{symbol} {_money(option.amount)} {option.currency.value}")
+        if option.discounted_amount is not None:
+            price = f"<s>{_money(option.amount)}</s> {_money(option.discounted_amount)}"
+        else:
+            price = _money(option.amount)
+        lines.append(f"{symbol} {price} {option.currency.value}")
+    if card.is_discounted:
+        lines.append("")
+        lines.append(f"🎁 Скидка {card.discount_percent}% по приглашению")
     return "\n".join(lines)
 
 
@@ -101,6 +114,7 @@ BONUS_UNAVAILABLE: Final = "Не удалось открыть раздел бо
 BONUS_BALANCE_CHANGED: Final = (
     "Баланс бонусов изменился. Откройте товар заново, чтобы увидеть актуальную цену."
 )
+BONUS_STARS_ONLY: Final = "Бонусами можно оплачивать только покупки за Telegram Stars."
 PURCHASE_COMPLETE_HINT: Final = "🎁 Приглашай друзей и получай бонусы с их покупок."
 
 

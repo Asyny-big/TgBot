@@ -1766,10 +1766,6 @@
             "type": "integer",
             "title": "Max Bonus Payment Percent"
           },
-          "bonus_units_per_usdt": {
-            "type": "number",
-            "title": "Bonus Units Per Usdt"
-          },
           "preview_directory_url": {
             "anyOf": [
               {
@@ -1789,11 +1785,10 @@
           "discount_percent",
           "reward_percent",
           "max_bonus_payment_percent",
-          "bonus_units_per_usdt",
           "preview_directory_url"
         ],
         "title": "ReferralSettingsResponse",
-        "description": "The referral programme's configured numbers, as the shop is running them."
+        "description": "The referral programme's configured numbers, as the shop is running them.\n\nNo exchange rate: one bonus is one Telegram Star, and a USDT sale is\nconverted using the product's own two prices at the moment of the sale."
       },
       "RefreshRequest": {
         "properties": {

@@ -26,11 +26,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from app.core.exceptions import AppError, InsufficientBonusBalanceError
+from app.core.exceptions import (
+    AppError,
+    BonusesNotAvailableError,
+    InsufficientBonusBalanceError,
+)
 from app.core.logging import get_logger
-from app.domain.bonuses import BonusPolicy, PriceQuote, plain_quote, quote, reward_units
+from app.domain.bonuses import (
+    BonusPolicy,
+    PriceQuote,
+    plain_quote,
+    quote,
+    reward_bonuses,
+)
 from app.domain.commands import BonusTransactionDraft
-from app.domain.enums import PURCHASE_HISTORY_STATUSES, BonusTransactionType, PurchaseStatus
+from app.domain.enums import (
+    PURCHASE_HISTORY_STATUSES,
+    BonusTransactionType,
+    Currency,
+    PurchaseStatus,
+)
 from app.domain.locks import bonus_lock_key
 from app.domain.notifications import RewardNotice
 
@@ -40,7 +55,6 @@ if TYPE_CHECKING:
 
     from app.core.config import ReferralSettings
     from app.domain.entities import Purchase, Referral
-    from app.domain.enums import Currency
     from app.domain.locks import LockManager
     from app.domain.notifications import RewardNotifier
     from app.domain.uow import UnitOfWork, UnitOfWorkFactory
@@ -81,6 +95,11 @@ class BonusService:
         """The configured numbers as a domain value object."""
         return BonusPolicy.from_settings(self.settings)
 
+    @property
+    def discount_percent(self) -> int:
+        """Referral discount this shop gives, as a percentage."""
+        return self.settings.discount_percent if self.settings.enabled else 0
+
     # ------------------------------------------------------------------ pricing
 
     async def resolve(
@@ -98,9 +117,17 @@ class BonusService:
             InsufficientBonusBalanceError: the buyer asked to spend bonuses they
                 no longer have. Refusing is deliberate: silently charging the
                 full price would surprise somebody who just saw a lower one.
+            BonusesNotAvailableError: bonuses were requested on a rail that
+                cannot spend them.
         """
         if not self.settings.enabled:
             return plain_quote(base_amount, currency)
+
+        if use_bonus and currency is not Currency.XTR:
+            # A bonus is a Star, so it can only reduce a Stars invoice. The bot
+            # never offers the choice on a crypto card, so reaching this means a
+            # hand-crafted callback — refuse it rather than quietly ignore it.
+            raise BonusesNotAvailableError(user_id=user_id, currency=currency.value)
 
         referral = await uow.referrals.get_by_referred(user_id)
         discount_eligible = await self._discount_eligible(uow, user_id, referral=referral)
@@ -143,6 +170,17 @@ class BonusService:
             return offer.quote_with_bonus
         return offer.quote_without_bonus
 
+    async def discount_eligible(self, uow: UnitOfWork, user_id: int) -> bool:
+        """Whether this buyer's next purchase carries the referral discount.
+
+        Answered from the caller's transaction, which is what lets the product
+        card show the reduced price without a second round trip.
+        """
+        if not self.settings.enabled:
+            return False
+        referral = await uow.referrals.get_by_referred(user_id)
+        return await self._discount_eligible(uow, user_id, referral=referral)
+
     async def hold_for(self, uow: UnitOfWork, purchase: Purchase, priced: PriceQuote) -> None:
         """Record the reservation behind a purchase that was just created.
 
@@ -158,7 +196,8 @@ class BonusService:
                 amount=-priced.bonus_units,
                 type=BonusTransactionType.BONUS_RESERVED,
                 purchase_id=purchase.id,
-                rate_units_per_usdt=self.policy.rate_for(priced.currency),
+                # No rate: bonuses are only ever spent on a Stars invoice, and
+                # one bonus is one Star.
             )
         )
         if entry is None:  # pragma: no cover — a fresh purchase id cannot collide
@@ -209,6 +248,10 @@ class BonusService:
         """
         without = plain_quote(base_amount, currency)
         if not self.settings.enabled:
+            return BonusOffer(quote_without_bonus=without)
+        if currency is not Currency.XTR:
+            # Bonuses are a Stars discount. A crypto card is never asked about
+            # them, so the ordinary two-tap flow is preserved there.
             return BonusOffer(quote_without_bonus=without)
 
         async with self.uow_factory() as uow:
@@ -355,13 +398,8 @@ class BonusService:
             if referral is None:
                 return None
 
-            units = reward_units(purchase.amount, purchase.currency, self.policy)
+            units, rate = await self._reward_for(uow, purchase)
             if units <= 0:
-                logger.info(
-                    "referral_reward_below_minimum",
-                    purchase_id=str(purchase_id),
-                    amount=str(purchase.amount),
-                )
                 return None
 
             async with self.locks.lock(bonus_lock_key(referral.referrer_user_id)):
@@ -372,7 +410,7 @@ class BonusService:
                         type=BonusTransactionType.REFERRAL_REWARD,
                         referral_id=referral.id,
                         purchase_id=purchase.id,
-                        rate_units_per_usdt=self.policy.rate_for(purchase.currency),
+                        stars_per_usdt=rate,
                     )
                 )
                 if entry is None:
@@ -418,6 +456,55 @@ class BonusService:
                 user_id=notice.user_id,
                 error=str(error),
             )
+
+    async def _reward_for(
+        self,
+        uow: UnitOfWork,
+        purchase: Purchase,
+    ) -> tuple[int, Decimal | None]:
+        """Bonuses this sale earns its inviter, and the rate used to get there.
+
+        A Stars sale needs no conversion and carries no rate. A USDT sale is
+        expressed in Stars through the rate the *product itself* declares by
+        carrying both prices — read here, inside the caller's transaction, and
+        stored on the ledger entry so repricing the product later cannot
+        recompute an old reward.
+
+        Returns ``(0, ...)`` for "nothing to credit", which covers a USDT
+        product that declares no rate at all.
+        """
+        rate = await self._stars_per_usdt(uow, purchase)
+        if purchase.currency is not Currency.XTR and rate is None:
+            logger.warning(
+                "reward_without_declared_rate",
+                purchase_id=str(purchase.id),
+                product_id=str(purchase.product_id),
+                currency=purchase.currency.value,
+            )
+            return 0, None
+
+        units = reward_bonuses(
+            purchase.amount,
+            purchase.currency,
+            policy=self.policy,
+            stars_per_usdt=rate,
+        )
+        if units <= 0:
+            logger.info(
+                "referral_reward_below_minimum",
+                purchase_id=str(purchase.id),
+                amount=str(purchase.amount),
+                currency=purchase.currency.value,
+            )
+        return units, rate
+
+    @staticmethod
+    async def _stars_per_usdt(uow: UnitOfWork, purchase: Purchase) -> Decimal | None:
+        """The rate this sale's product declares, or ``None`` for a Stars sale."""
+        if purchase.currency is Currency.XTR:
+            return None
+        product = await uow.products.get(purchase.product_id)
+        return None if product is None else product.stars_per_usdt
 
     async def _discount_eligible(
         self,

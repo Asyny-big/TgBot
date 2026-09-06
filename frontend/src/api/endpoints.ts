@@ -23,6 +23,9 @@ export type PurchaseResponse = Schemas["PurchaseResponse"];
 export type VerificationResponse = Schemas["VerificationResponse"];
 export type DeliveryAttemptResponse = Schemas["DeliveryAttemptResponse"];
 export type OverviewResponse = Schemas["OverviewResponse"];
+export type ReferralRecordResponse = Schemas["ReferralRecordResponse"];
+export type ReferralPartyResponse = Schemas["ReferralPartyResponse"];
+export type ReferralSettingsResponse = Schemas["ReferralSettingsResponse"];
 export type PageMeta = Schemas["PageMeta"];
 export type PurchaseStatus = Schemas["PurchaseStatus"];
 export type PaymentProvider = Schemas["PaymentProvider"];
@@ -30,6 +33,7 @@ export type VerificationOutcome = Schemas["VerificationOutcome"];
 
 export type ProductPage = Schemas["PageResponse_ProductResponse_"];
 export type PurchasePage = Schemas["PageResponse_PurchaseRecordResponse_"];
+export type ReferralPage = Schemas["PageResponse_ReferralRecordResponse_"];
 
 export interface ProductQuery {
   limit: number;
@@ -43,6 +47,12 @@ export interface PurchaseQuery {
   offset: number;
   search?: string | undefined;
   status?: PurchaseStatus[] | undefined;
+}
+
+export interface ReferralQuery {
+  limit: number;
+  offset: number;
+  search?: string | undefined;
 }
 
 export function createApi(client: ApiClient) {
@@ -83,6 +93,22 @@ export function createApi(client: ApiClient) {
         }),
       verify: (id: string) => client.post<VerificationResponse>(`/purchases/${id}/verify`, {}),
       resend: (id: string) => client.post<DeliveryAttemptResponse>(`/purchases/${id}/resend`, {}),
+    },
+
+    /**
+     * Read only by design: the referral percentages are process configuration,
+     * so the panel reports them and there is nothing here to PATCH.
+     */
+    referrals: {
+      list: (query: ReferralQuery) =>
+        client.get<ReferralPage>("/referrals", {
+          query: {
+            limit: query.limit,
+            offset: query.offset,
+            search: query.search,
+          },
+        }),
+      settings: () => client.get<ReferralSettingsResponse>("/referrals/settings"),
     },
 
     stats: {

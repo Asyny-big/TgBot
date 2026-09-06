@@ -1,30 +1,37 @@
-"""Bonus balance arithmetic and the checkout pricing port.
+"""Bonus arithmetic and the checkout pricing port.
 
 Two things live here, and both are deliberately free of infrastructure:
 
-* the **money maths** — a set of pure functions, so the rules that decide what a
-  buyer is charged can be read, reviewed and tested without a database;
+* the **money maths** — pure functions, so the rules that decide what a buyer is
+  charged can be read, reviewed and tested without a database;
 * the **ports** through which the purchase and delivery services reach the
   referral feature, so those services keep working unchanged when the ports are
   not wired in.
 
-Rounding always favours the shop. A discount is floored, a reward is floored,
-and the units needed to cover a discount are ceilinged. The reason is not greed
-but arithmetic safety: Telegram Stars are integers, ``price_stars`` is an
-``Integer`` column and the Stars gateway sends ``int(Decimal(amount))``. If
-rounding could ever go the other way, a fraction of a star would vanish
-silently between the quote and the invoice.
+**One bonus is one Telegram Star.** That is not a configured rate, it is the
+model: the balance is a count of Stars' worth of discount, and it is spendable
+only on a Stars purchase. ``PriceQuote.bonus_amount`` is therefore *derived*
+from the unit count rather than stored beside it, so the two can never disagree.
 
-The bonus balance is a single pool of integer **units**, where one unit is worth
-one Telegram Star. Purchases settled in USDT join the same pool through a
-configured rate, and the rate in force is recorded on the ledger entry it
-produced, so changing the rate later never rewrites history.
+A purchase settled in USDT still earns its inviter a reward, and the Stars
+equivalent comes from the **product's own two prices** at the moment of the sale
+(``Product.stars_per_usdt``). The shop has already declared that equivalence by
+pricing the item in both currencies, so no external price feed is involved, and
+no fixed rate can silently go stale. The rate actually used is written onto the
+ledger entry, which is what keeps an old reward from being recomputed after the
+admin repriced the product.
+
+Rounding always favours the shop: a discount is floored and a reward is floored.
+The reason is arithmetic safety rather than greed — ``price_stars`` is an
+``Integer`` column and the Stars gateway sends ``int(Decimal(amount))``, so if
+rounding could go the other way a fraction of a Star would vanish silently
+between the quote and the invoice.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from decimal import ROUND_FLOOR, Decimal
 from typing import TYPE_CHECKING, Final, Protocol
 
 from app.domain.enums import Currency
@@ -56,24 +63,18 @@ def floor_to_step(value: Decimal, currency: Currency) -> Decimal:
     return (value / step).to_integral_value(rounding=ROUND_FLOOR) * step
 
 
-def ceil_to_step(value: Decimal, currency: Currency) -> Decimal:
-    """Round up to something the provider can charge."""
-    step = price_step(currency)
-    return (value / step).to_integral_value(rounding=ROUND_CEILING) * step
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class BonusPolicy:
-    """The configured numbers, lifted out of settings into the domain.
+    """The configured percentages, lifted out of settings into the domain.
 
     Taking a small value object rather than the whole settings tree keeps the
-    maths callable from a test with three literals.
+    maths callable from a test with three literals. Note what is *absent*: no
+    exchange rate, because one bonus is one Star by definition.
     """
 
     discount_percent: int = 10
     reward_percent: int = 15
     max_bonus_payment_percent: int = 50
-    units_per_usdt: Decimal = Decimal(500)
 
     @classmethod
     def from_settings(cls, settings: ReferralSettings) -> BonusPolicy:
@@ -82,12 +83,7 @@ class BonusPolicy:
             discount_percent=settings.discount_percent,
             reward_percent=settings.reward_percent,
             max_bonus_payment_percent=settings.max_bonus_payment_percent,
-            units_per_usdt=settings.bonus_units_per_usdt,
         )
-
-    def rate_for(self, currency: Currency) -> Decimal | None:
-        """Conversion rate recorded on a ledger entry, if one was needed."""
-        return None if currency is Currency.XTR else self.units_per_usdt
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -105,15 +101,22 @@ class PriceQuote:
     discount_amount: Decimal = Decimal(0)
     """Referral discount, in the purchase currency."""
 
-    bonus_amount: Decimal = Decimal(0)
-    """Value covered by bonuses, in the purchase currency."""
-
     bonus_units: int = 0
-    """Units debited from the balance to fund ``bonus_amount``."""
+    """Bonuses spent. Only ever non-zero on a Stars purchase."""
 
     currency: Currency = Currency.XTR
     referral_id: UUID | None = None
     """The relationship the discount came from, if any."""
+
+    @property
+    def bonus_amount(self) -> Decimal:
+        """Money value of the bonuses spent.
+
+        Derived, not stored: one bonus is one Star, so the count *is* the
+        amount. Making it a property is what makes that invariant impossible to
+        violate by constructing an inconsistent quote.
+        """
+        return Decimal(self.bonus_units)
 
     @property
     def charged_amount(self) -> Decimal:
@@ -127,7 +130,7 @@ class PriceQuote:
 
     @property
     def uses_bonus(self) -> bool:
-        """Whether any bonus units were spent."""
+        """Whether any bonuses were spent."""
         return self.bonus_units > 0
 
     @property
@@ -141,35 +144,6 @@ def plain_quote(base_amount: Decimal, currency: Currency) -> PriceQuote:
     return PriceQuote(base_amount=base_amount, currency=currency)
 
 
-def units_for_money(amount: Decimal, currency: Currency, policy: BonusPolicy) -> int:
-    """Value of an amount expressed in bonus units, rounded down."""
-    if currency is Currency.XTR:
-        return int(amount.to_integral_value(rounding=ROUND_FLOOR))
-    return int((amount * policy.units_per_usdt).to_integral_value(rounding=ROUND_FLOOR))
-
-
-def money_for_units(units: int, currency: Currency, policy: BonusPolicy) -> Decimal:
-    """Largest amount these units can pay for, rounded down to a chargeable step."""
-    if units <= 0:
-        return Decimal(0)
-    if currency is Currency.XTR:
-        return Decimal(units)
-    return floor_to_step(Decimal(units) / policy.units_per_usdt, currency)
-
-
-def units_to_cover(amount: Decimal, currency: Currency, policy: BonusPolicy) -> int:
-    """Units required to fund this amount, rounded up.
-
-    Rounded up on purpose: the buyer must never receive a fraction of a step for
-    free because the rate did not divide evenly.
-    """
-    if amount <= 0:
-        return 0
-    if currency is Currency.XTR:
-        return int(amount.to_integral_value(rounding=ROUND_CEILING))
-    return int((amount * policy.units_per_usdt).to_integral_value(rounding=ROUND_CEILING))
-
-
 def discount_for(base_amount: Decimal, currency: Currency, policy: BonusPolicy) -> Decimal:
     """Referral discount on a first purchase, rounded down."""
     if policy.discount_percent <= 0:
@@ -178,63 +152,85 @@ def discount_for(base_amount: Decimal, currency: Currency, policy: BonusPolicy) 
     return floor_to_step(raw, currency)
 
 
-def max_bonus_payment(base_amount: Decimal, currency: Currency, policy: BonusPolicy) -> Decimal:
-    """Largest share of this price that bonuses are allowed to cover."""
-    if policy.max_bonus_payment_percent <= 0:
-        return Decimal(0)
-    raw = base_amount * Decimal(policy.max_bonus_payment_percent) / _PERCENT
-    return floor_to_step(raw, currency)
+def stars_equivalent(
+    paid_amount: Decimal,
+    currency: Currency,
+    *,
+    stars_per_usdt: Decimal | None,
+) -> Decimal | None:
+    """What a settled payment is worth in Telegram Stars.
+
+    A Stars payment is already in Stars. A USDT payment needs the rate the
+    product itself declared; without one there is nothing to convert with, and
+    ``None`` says so rather than guessing.
+    """
+    if currency is Currency.XTR:
+        return paid_amount
+    if stars_per_usdt is None or stars_per_usdt <= 0:
+        return None
+    return paid_amount * stars_per_usdt
 
 
-def reward_units(paid_amount: Decimal, currency: Currency, policy: BonusPolicy) -> int:
-    """Bonus units earned by the inviter from one settled purchase.
+def reward_bonuses(
+    paid_amount: Decimal,
+    currency: Currency,
+    *,
+    policy: BonusPolicy,
+    stars_per_usdt: Decimal | None = None,
+) -> int:
+    """Bonuses earned by the inviter from one settled purchase.
 
-    The base is what the buyer *actually paid*, never the list price: a buyer who
-    paid 900 after a discount earns the inviter 135, not 150.
+    The base is what the buyer *actually paid*, never the list price: a buyer
+    who paid 900 Stars after a discount earns the inviter 135, not 150.
+
+    Returns ``0`` when a USDT purchase carries no declared rate — the caller
+    logs that and credits nothing, which is safer than inventing a rate.
     """
     if policy.reward_percent <= 0:
         return 0
-    value = units_for_money(paid_amount, currency, policy)
-    return int(
-        (Decimal(value) * Decimal(policy.reward_percent) / _PERCENT).to_integral_value(
-            rounding=ROUND_FLOOR,
-        )
-    )
+    stars = stars_equivalent(paid_amount, currency, stars_per_usdt=stars_per_usdt)
+    if stars is None or stars <= 0:
+        return 0
+    earned = stars * Decimal(policy.reward_percent) / _PERCENT
+    return int(earned.to_integral_value(rounding=ROUND_FLOOR))
 
 
-def spendable_units(
+def max_bonus_payment(base_amount: Decimal, policy: BonusPolicy) -> int:
+    """Largest number of bonuses allowed against this Stars price.
+
+    Read straight off the price because one bonus is one Star: 1000 ⭐ at 50%
+    accepts 500 bonuses, 600 ⭐ accepts 300, 200 ⭐ accepts 100.
+    """
+    if policy.max_bonus_payment_percent <= 0:
+        return 0
+    raw = base_amount * Decimal(policy.max_bonus_payment_percent) / _PERCENT
+    return int(raw.to_integral_value(rounding=ROUND_FLOOR))
+
+
+def spendable_bonuses(
     base_amount: Decimal,
     currency: Currency,
     *,
     balance: int,
     policy: BonusPolicy,
-) -> tuple[int, Decimal]:
-    """Units the buyer may spend on this price, and what they are worth.
+) -> int:
+    """Bonuses the buyer may spend on this price.
 
     Bounded by three things at once: the balance, the configured share of the
-    price, and what the units convert to at a chargeable step. Returns
-    ``(0, 0)`` when nothing can usefully be spent.
+    price, and the requirement that something is still left to charge — the
+    purchases table refuses a zero amount, and an invoice for nothing is not a
+    sale.
+
+    Always ``0`` outside Telegram Stars: bonuses are a Stars discount, and
+    spending them on a crypto invoice is not a thing the shop offers.
     """
-    if balance <= 0:
-        return 0, Decimal(0)
+    if currency is not Currency.XTR or balance <= 0:
+        return 0
 
-    allowed = max_bonus_payment(base_amount, currency, policy)
-    affordable = money_for_units(balance, currency, policy)
-    payable = min(allowed, affordable)
-    if payable <= 0:
-        return 0, Decimal(0)
-
-    # Never leave nothing to charge: the purchases table rejects a zero amount,
-    # and an invoice for nothing is not a sale.
-    payable = min(payable, base_amount - price_step(currency))
-    if payable <= 0:
-        return 0, Decimal(0)
-
-    units = min(units_to_cover(payable, currency, policy), balance)
-    worth = min(payable, money_for_units(units, currency, policy))
-    if units <= 0 or worth <= 0:
-        return 0, Decimal(0)
-    return units, worth
+    payable = min(balance, max_bonus_payment(base_amount, policy))
+    # Leave at least one Star to actually charge.
+    payable = min(payable, int(base_amount) - 1)
+    return max(payable, 0)
 
 
 def quote(  # noqa: PLR0913 — pricing genuinely depends on this many inputs
@@ -266,12 +262,11 @@ def quote(  # noqa: PLR0913 — pricing genuinely depends on this many inputs
             )
 
     if use_bonus:
-        units, worth = spendable_units(base_amount, currency, balance=balance, policy=policy)
-        if units > 0:
+        spent = spendable_bonuses(base_amount, currency, balance=balance, policy=policy)
+        if spent > 0:
             return PriceQuote(
                 base_amount=base_amount,
-                bonus_amount=worth,
-                bonus_units=units,
+                bonus_units=spent,
                 currency=currency,
             )
 
@@ -281,9 +276,9 @@ def quote(  # noqa: PLR0913 — pricing genuinely depends on this many inputs
 class CheckoutPricing(Protocol):
     """How the purchase service asks the referral feature what to charge.
 
-    Both methods take the caller's unit of work: pricing and the reservation of
-    bonus units must commit in the *same* transaction as the purchase they
-    belong to, otherwise a crash between the two could bill a buyer for an
+    ``resolve`` and ``hold_for`` take the caller's unit of work: pricing and the
+    reservation of bonuses must commit in the *same* transaction as the purchase
+    they belong to, otherwise a crash between the two could bill a buyer for an
     amount whose funding was never recorded.
     """
 
@@ -302,6 +297,8 @@ class CheckoutPricing(Protocol):
             InsufficientBonusBalanceError: the buyer asked to spend bonuses they
                 no longer have — the balance moved between the prompt and the
                 button press.
+            BonusesNotAvailableError: bonuses were requested on a rail that
+                cannot spend them.
         """
         ...
 
@@ -317,6 +314,19 @@ class CheckoutPricing(Protocol):
 
         Only a prediction: whoever acts on it must have ``resolve`` re-derive
         the number under a lock before a buyer is committed to it.
+        """
+        ...
+
+    @property
+    def discount_percent(self) -> int:
+        """Referral discount this shop gives, as a percentage."""
+        ...
+
+    async def discount_eligible(self, uow: UnitOfWork, user_id: int) -> bool:
+        """Whether this buyer's next purchase carries the referral discount.
+
+        Answered from the caller's transaction so the product card can show the
+        reduced price without a second round trip.
         """
         ...
 
@@ -359,16 +369,13 @@ __all__ = [
     "CheckoutPricing",
     "PriceQuote",
     "SaleCompletion",
-    "ceil_to_step",
     "discount_for",
     "floor_to_step",
     "max_bonus_payment",
-    "money_for_units",
     "plain_quote",
     "price_step",
     "quote",
-    "reward_units",
-    "spendable_units",
-    "units_for_money",
-    "units_to_cover",
+    "reward_bonuses",
+    "spendable_bonuses",
+    "stars_equivalent",
 ]

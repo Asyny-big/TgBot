@@ -21,13 +21,16 @@ if TYPE_CHECKING:
 
 
 class ReferralSettingsResponse(ApiModel):
-    """The referral programme's configured numbers, as the shop is running them."""
+    """The referral programme's configured numbers, as the shop is running them.
+
+    No exchange rate: one bonus is one Telegram Star, and a USDT sale is
+    converted using the product's own two prices at the moment of the sale.
+    """
 
     enabled: bool
     discount_percent: int
     reward_percent: int
     max_bonus_payment_percent: int
-    bonus_units_per_usdt: float
     preview_directory_url: str | None
 
     @classmethod
@@ -37,7 +40,6 @@ class ReferralSettingsResponse(ApiModel):
             discount_percent=settings.discount_percent,
             reward_percent=settings.reward_percent,
             max_bonus_payment_percent=settings.max_bonus_payment_percent,
-            bonus_units_per_usdt=float(settings.bonus_units_per_usdt),
             preview_directory_url=settings.preview_directory_url,
         )
 

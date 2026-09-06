@@ -3,7 +3,13 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, vi } from "vitest";
 
-import type { OverviewResponse, ProductResponse, PurchaseRecordResponse } from "@/api/endpoints";
+import type {
+  OverviewResponse,
+  ProductResponse,
+  PurchaseRecordResponse,
+  ReferralRecordResponse,
+  ReferralSettingsResponse,
+} from "@/api/endpoints";
 
 export function usePiniaForEachTest(): void {
   beforeEach(() => {
@@ -63,6 +69,51 @@ export function makeRecord(
   };
 }
 
+export function makeReferral(
+  overrides: Partial<ReferralRecordResponse> = {},
+): ReferralRecordResponse {
+  return {
+    id: "33333333-3333-4333-8333-333333333333",
+    referrer: {
+      buyer: {
+        telegram_id: 7001,
+        username: "inviter",
+        first_name: "A",
+        display_name: "@inviter",
+      },
+      bonus_balance: 135,
+    },
+    referred: {
+      buyer: {
+        telegram_id: 7002,
+        username: "invited",
+        first_name: "B",
+        display_name: "@invited",
+      },
+      bonus_balance: 0,
+    },
+    created_at: "2026-07-30T10:00:00Z",
+    discount_used_at: null,
+    discount_purchase_id: null,
+    referred_purchase_count: 1,
+    reward_total: 135,
+    ...overrides,
+  };
+}
+
+export function makeReferralSettings(
+  overrides: Partial<ReferralSettingsResponse> = {},
+): ReferralSettingsResponse {
+  return {
+    enabled: true,
+    discount_percent: 10,
+    reward_percent: 15,
+    max_bonus_payment_percent: 50,
+    preview_directory_url: null,
+    ...overrides,
+  };
+}
+
 export function makeOverview(): OverviewResponse {
   const revenue = (period: OverviewResponse["today"]["period"]) => ({
     period,
@@ -101,6 +152,10 @@ export function stubApi() {
       search: vi.fn(),
       verify: vi.fn(),
       resend: vi.fn(),
+    },
+    referrals: {
+      list: vi.fn(),
+      settings: vi.fn(),
     },
     stats: {
       overview: vi.fn(),

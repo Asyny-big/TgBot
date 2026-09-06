@@ -244,7 +244,7 @@ def _create_bonus_transactions() -> None:
         ),
         sa.Column("referral_id", sa.Uuid(), nullable=True),
         sa.Column("purchase_id", sa.Uuid(), nullable=True),
-        sa.Column("rate_units_per_usdt", sa.Numeric(precision=18, scale=6), nullable=True),
+        sa.Column("stars_per_usdt", sa.Numeric(precision=18, scale=6), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -253,7 +253,7 @@ def _create_bonus_transactions() -> None:
         ),
         sa.CheckConstraint("amount <> 0", name=op.f("ck_bonus_transactions_amount_not_zero")),
         sa.CheckConstraint(
-            "rate_units_per_usdt IS NULL OR rate_units_per_usdt > 0",
+            "stars_per_usdt IS NULL OR stars_per_usdt > 0",
             name=op.f("ck_bonus_transactions_rate_positive"),
         ),
         sa.ForeignKeyConstraint(

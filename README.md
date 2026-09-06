@@ -57,7 +57,7 @@ Five tables; money-critical rules are database constraints, not conventions.
 | `users` | Telegram profile snapshot | `telegram_id` as primary key, case-insensitive username index for admin search, unique `referral_code`, `bonus_balance >= 0` |
 | `purchases` | one attempt to buy one product | unique `(provider, external_id)`, partial unique `(user_id, product_id)` while paid or delivered, unique Telegram charge id, delivered rows must carry a link and a timestamp, the stored price breakdown must add up |
 | `referrals` | one buyer, attributed to whoever invited them | unique `referred_user_id` (one referrer for life), `referrer_user_id <> referred_user_id`, the one-time discount is consumed by at most one purchase |
-| `bonus_transactions` | every movement of every bonus balance | partial unique `(purchase_id, type)` — one entry of each kind per purchase, which is what makes a replayed webhook credit a reward once |
+| `bonus_transactions` | every movement of every bonus balance, in whole Stars | partial unique `(purchase_id, type)` — one entry of each kind per purchase, which is what makes a replayed webhook credit a reward once |
 
 Prices are independent per rail: `price_stars` (integer XTR) and `price_usdt`
 (`NUMERIC(12,2)`). A rail without a price is simply not offered on the card.
@@ -141,7 +141,12 @@ records the visitor's Telegram profile and nothing else.
 
 With bonuses available, one question comes between the button and the invoice —
 "spend them on this purchase?" — and that question is a message, not an invoice.
-A buyer with no bonuses never sees it.
+A buyer with no bonuses never sees it, and neither does a buyer paying in USDT.
+
+An invited buyer with an unused discount also sees the reduced price on the card
+itself, struck through beside the list price. The extra reads happen inside the
+transaction the card already opened, and every other buyer's card is byte for
+byte what it always was.
 
 ### Resilience
 
@@ -196,10 +201,9 @@ nothing from C: there is no second level.
 
 ### Bonuses
 
-A single pool of integer units, where one unit is worth one Telegram Star.
-Purchases settled in USDT join the same pool at `REFERRAL_BONUS_UNITS_PER_USDT`,
-and the rate in force is stored on every converted ledger entry, so changing it
-later never rewrites history.
+**One bonus is one Telegram Star.** That is the model, not a configured rate:
+the balance is a single integer, 135 bonuses is 135 Stars of discount, and there
+is no second currency and nothing to convert when spending.
 
 Bonuses are not Telegram Stars, cannot be withdrawn and cannot be transferred —
 they only reduce a future price in this shop, which is why the bot shows them as
@@ -207,8 +211,9 @@ a plain `Баланс` and never as `⭐ Telegram Stars`.
 
 | Rule | Where it is enforced |
 | --- | --- |
-| At most half a price may be paid with bonuses | `REFERRAL_MAX_BONUS_PAYMENT_PERCENT`, and the price maths always leaves at least one chargeable step |
-| A product can never be bought for nothing | the existing `amount > 0` check on `purchases` |
+| Bonuses are spendable only on a Stars purchase | the pricing function returns zero outside XTR, and the checkout refuses a request to spend them on a crypto invoice |
+| At most half a Stars price may be paid with bonuses | `REFERRAL_MAX_BONUS_PAYMENT_PERCENT`, read straight off the price: 1000 ⭐ accepts 500 bonuses |
+| A product can never be bought for nothing | the price maths always leaves at least one Star, backed by the existing `amount > 0` check on `purchases` |
 | The same units cannot fund two checkouts | a Redis lock on the balance, `SELECT … FOR UPDATE` on the row, and `bonus_balance >= 0` |
 | The balance is always explained by the ledger | both move in the same transaction; `recompute_balance` can prove it |
 | A first referral purchase never combines the discount with bonuses | the pricing function refuses to; the discount wins |
@@ -224,6 +229,36 @@ A refund does **not** reverse a credited reward. There is no reversal, no debt
 and no negative balance, and the existing refund flow is untouched: the purchase
 becomes `refunded` and the bonus ledger does not move. Bonuses that were spent
 on a purchase that is later refunded are not returned either.
+
+### What a USDT sale earns
+
+A purchase settled in USDT still earns its inviter a reward, and the Stars
+equivalent comes from **the product's own two prices**:
+
+```
+stars_per_usdt   = product.price_stars / product.price_usdt
+stars_equivalent = paid_usdt × stars_per_usdt
+reward           = floor(stars_equivalent × REFERRAL_REWARD_PERCENT / 100)
+```
+
+An item priced at `700 ⭐ / 10 USDT` is the shop stating that one USDT is worth
+70 Stars here, so a 10 USDT payment is 700 Stars and earns 105 bonuses. No
+external price feed is consulted and no fixed rate can go stale, because the
+rate is whatever the merchant's own catalogue says at the moment of the sale.
+
+There is deliberately **no rate to configure**. Neither the Bot API nor the
+Crypto Pay API exposes a Stars exchange rate — Crypto Pay does not know `XTR` at
+all, and the only official figures live in the MTProto client API, which a bot
+cannot reach. A hardcoded constant was the alternative, and a hardcoded constant
+silently goes wrong.
+
+The rate actually used is written onto the ledger entry (`stars_per_usdt`), so
+repricing the product tomorrow never recomputes yesterday's reward.
+
+A product priced in USDT **only** declares no equivalence. Its sales credit no
+reward, and the omission is logged (`reward_without_declared_rate`) rather than
+guessed at — set a Stars price on the product if you want its crypto sales to
+pay referrals.
 
 ### The preview directory
 
@@ -492,8 +527,11 @@ a working default. Two are worth a decision before launch:
 | Variable | Default | Why you might change it |
 | --- | --- | --- |
 | `REFERRAL_PREVIEW_DIRECTORY_URL` | *(empty)* | the one hop channel invited users are sent to. Empty hides the button, so set it or invited users see no next step |
-| `REFERRAL_BONUS_UNITS_PER_USDT` | `500` | how many bonus units 1 USDT is worth. Only matters if you sell through CryptoBot; it is recorded on every converted ledger entry, so changing it later does not rewrite history |
 | `REFERRAL_ENABLED` | `true` | set to `false` to deploy the schema without switching the feature on |
+
+If you sell through CryptoBot and want those sales to pay referral rewards, give
+each product **both** prices — that pair is what declares the USDT-to-Stars rate
+for its own sales. A product priced in USDT only credits no reward.
 
 Then check the whole file, including the cross-component agreements the
 application cannot see for itself:

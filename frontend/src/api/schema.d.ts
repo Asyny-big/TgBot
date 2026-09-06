@@ -279,6 +279,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/referrals/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Referral programme configuration
+         * @description The numbers this process is running with.
+         *
+         *     Changing them is a deploy, not a form: they are validated once on start-up,
+         *     which is what keeps a bad value from surfacing in the middle of a checkout.
+         */
+        get: operations["read_settings_api_v1_referrals_settings_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/referrals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List referral relationships
+         * @description Relationships newest first. ``search`` matches either party.
+         */
+        get: operations["list_referrals_api_v1_referrals_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/stats/overview": {
         parameters: {
             query?: never;
@@ -420,6 +463,12 @@ export interface components {
         PageResponse_PurchaseRecordResponse_: {
             /** Items */
             items: components["schemas"]["PurchaseRecordResponse"][];
+            meta: components["schemas"]["PageMeta"];
+        };
+        /** PageResponse[ReferralRecordResponse] */
+        PageResponse_ReferralRecordResponse_: {
+            /** Items */
+            items: components["schemas"]["ReferralRecordResponse"][];
             meta: components["schemas"]["PageMeta"];
         };
         /**
@@ -615,6 +664,60 @@ export interface components {
             components: {
                 [key: string]: "ok" | "fail";
             };
+        };
+        /**
+         * ReferralPartyResponse
+         * @description One side of a referral relationship, with their bonus balance.
+         */
+        ReferralPartyResponse: {
+            buyer: components["schemas"]["BuyerResponse"];
+            /** Bonus Balance */
+            bonus_balance: number;
+        };
+        /**
+         * ReferralRecordResponse
+         * @description One relationship: who invited whom, and what it has produced.
+         */
+        ReferralRecordResponse: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            referrer: components["schemas"]["ReferralPartyResponse"];
+            referred: components["schemas"]["ReferralPartyResponse"];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Discount Used At */
+            discount_used_at: string | null;
+            /** Discount Purchase Id */
+            discount_purchase_id: string | null;
+            /** Referred Purchase Count */
+            referred_purchase_count: number;
+            /** Reward Total */
+            reward_total: number;
+        };
+        /**
+         * ReferralSettingsResponse
+         * @description The referral programme's configured numbers, as the shop is running them.
+         *
+         *     No exchange rate: one bonus is one Telegram Star, and a USDT sale is
+         *     converted using the product's own two prices at the moment of the sale.
+         */
+        ReferralSettingsResponse: {
+            /** Enabled */
+            enabled: boolean;
+            /** Discount Percent */
+            discount_percent: number;
+            /** Reward Percent */
+            reward_percent: number;
+            /** Max Bonus Payment Percent */
+            max_bonus_payment_percent: number;
+            /** Preview Directory Url */
+            preview_directory_url: string | null;
         };
         /**
          * RefreshRequest
@@ -1134,6 +1237,59 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DeliveryAttemptResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_settings_api_v1_referrals_settings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReferralSettingsResponse"];
+                };
+            };
+        };
+    };
+    list_referrals_api_v1_referrals_get: {
+        parameters: {
+            query?: {
+                search?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PageResponse_ReferralRecordResponse_"];
                 };
             };
             /** @description Validation Error */

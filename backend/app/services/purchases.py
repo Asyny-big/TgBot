@@ -23,7 +23,7 @@ from app.core.exceptions import (
     UserNotFoundError,
 )
 from app.core.logging import get_logger
-from app.domain.bonuses import plain_quote
+from app.domain.bonuses import BonusPolicy, discount_for, plain_quote
 from app.domain.cards import PaymentOption, ProductCard
 from app.domain.commands import PurchaseDraft
 from app.domain.locks import payment_lock_key, purchase_lock_key
@@ -75,13 +75,17 @@ class PurchaseService:
             if not product.is_active:
                 raise ProductInactiveError(slug=slug)
             owned = await uow.purchases.find_access_granting(profile.telegram_id, product.id)
-
-        options = tuple(
-            PaymentOption(
-                provider=provider,
-                amount=self._price(product, provider),
-                currency=provider.currency,
+            # Asked in the same transaction the card already opened, so showing
+            # the reduced price costs no extra round trip. Returns False for
+            # every ordinary visitor, and instantly when the feature is off.
+            discounted = owned is None and await self._discount_eligible(
+                uow,
+                profile.telegram_id,
             )
+
+        percent = self.discount_percent if discounted else 0
+        options = tuple(
+            self._payment_option(product, provider, discount_percent=percent)
             for provider in product.available_providers
         )
         logger.info(
@@ -89,8 +93,53 @@ class PurchaseService:
             telegram_id=profile.telegram_id,
             slug=slug,
             owned=owned is not None,
+            discounted=discounted,
         )
-        return ProductCard(product=product, options=options, owned_purchase=owned)
+        return ProductCard(
+            product=product,
+            options=options,
+            owned_purchase=owned,
+            discount_percent=percent,
+        )
+
+    @property
+    def discount_percent(self) -> int:
+        """Referral discount the shop is configured to give, as a percentage."""
+        return 0 if self.pricing is None else self.pricing.discount_percent
+
+    async def _discount_eligible(self, uow: UnitOfWork, user_id: int) -> bool:
+        """Whether this visitor's next purchase carries the referral discount."""
+        if self.pricing is None:
+            return False
+        return await self.pricing.discount_eligible(uow, user_id)
+
+    def _payment_option(
+        self,
+        product: Product,
+        provider: PaymentProvider,
+        *,
+        discount_percent: int,
+    ) -> PaymentOption:
+        """One button, with the reduced price attached when one applies.
+
+        ``amount`` stays the list price whatever happens: the discount is a
+        property of this visitor's next sale, not of the catalogue.
+        """
+        listed = self._price(product, provider)
+        if discount_percent <= 0:
+            return PaymentOption(
+                provider=provider,
+                amount=listed,
+                currency=provider.currency,
+            )
+        policy = BonusPolicy(discount_percent=discount_percent)
+        discount = discount_for(Decimal(listed), provider.currency, policy)
+        return PaymentOption(
+            provider=provider,
+            amount=listed,
+            currency=provider.currency,
+            discounted_amount=Decimal(listed) - discount if discount > 0 else None,
+        )
 
     async def remember_user(self, profile: UserDraft) -> User:
         """Store or refresh the Telegram profile snapshot."""

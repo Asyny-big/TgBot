@@ -23,6 +23,7 @@ from app.bot.middlewares import BotServices
 from app.bot.texts import (
     ALREADY_PURCHASED,
     BONUS_BALANCE_CHANGED,
+    BONUS_STARS_ONLY,
     CARD_UNAVAILABLE,
     CRYPTO_INVOICE_CREATED,
     DELIVERY_FAILED,
@@ -36,6 +37,7 @@ from app.bot.texts import (
 )
 from app.core.exceptions import (
     AppError,
+    BonusesNotAvailableError,
     ConflictError,
     DuplicatePurchaseError,
     InsufficientBonusBalanceError,
@@ -209,6 +211,15 @@ async def _start_checkout(
         # The balance moved between the question and the answer. Refusing is
         # safer than silently charging a price the buyer never agreed to.
         await callback.answer(BONUS_BALANCE_CHANGED, show_alert=True)
+    except BonusesNotAvailableError:
+        # Bonuses are a Stars discount; the bot never offers them on a crypto
+        # card, so this is a hand-crafted callback rather than a real buyer.
+        logger.warning(
+            "bonus_spend_refused_for_provider",
+            user_id=user.id,
+            provider=provider.value,
+        )
+        await callback.answer(BONUS_STARS_ONLY, show_alert=True)
     except DuplicatePurchaseError:
         # Already paid for: no new invoice, just hand the link over again.
         await callback.answer(ALREADY_PURCHASED, show_alert=True)

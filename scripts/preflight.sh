@@ -159,6 +159,11 @@ else
     if [[ -n "${reward}" ]] && [[ "${reward}" =~ ^[0-9]+$ ]] && (( reward > 100 )); then
         fail "REFERRAL_REWARD_PERCENT=${reward} is above 100"
     fi
+    # Removed with the "1 bonus = 1 Star" model: a USDT sale is now converted
+    # using the product's own two prices, so a configured rate is meaningless.
+    if [[ -n "$(env_value REFERRAL_BONUS_UNITS_PER_USDT)" ]]; then
+        flag "REFERRAL_BONUS_UNITS_PER_USDT is no longer used and can be deleted from .env"
+    fi
 fi
 
 printf '\nSecurity\n'

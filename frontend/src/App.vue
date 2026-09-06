@@ -40,6 +40,12 @@ async function signOut(): Promise<void> {
       >
         Покупки
       </RouterLink>
+      <RouterLink
+        to="/referrals"
+        active-class="active"
+      >
+        Рефералы
+      </RouterLink>
       <div class="spacer" />
       <div class="who">
         {{ auth.username }}

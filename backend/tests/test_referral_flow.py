@@ -22,9 +22,14 @@ import pytest
 from pydantic import SecretStr
 
 from app.core.config import DeliverySettings, ReferralSettings, TelegramSettings
-from app.core.exceptions import InsufficientBonusBalanceError
+from app.core.exceptions import BonusesNotAvailableError, InsufficientBonusBalanceError
 from app.domain.commands import ProductDraft, UserDraft
-from app.domain.enums import BonusTransactionType, PaymentProvider, PurchaseStatus
+from app.domain.enums import (
+    BonusTransactionType,
+    Currency,
+    PaymentProvider,
+    PurchaseStatus,
+)
 from app.services.bonuses import BonusService
 from app.services.delivery import DeliveryService
 from app.services.products import ProductService
@@ -137,7 +142,6 @@ def referral_settings() -> ReferralSettings:
         discount_percent=10,
         reward_percent=15,
         max_bonus_payment_percent=50,
-        bonus_units_per_usdt=Decimal(500),
     )
 
 
@@ -797,3 +801,272 @@ async def test_the_ledger_always_explains_the_balance(shop: Shop) -> None:
 def _far_future() -> datetime:
     """A moment by which every invoice in a test has certainly expired."""
     return datetime.now(UTC) + timedelta(days=1)
+
+
+# --- Rewards from a USDT purchase
+
+
+async def _buy_with_crypto(
+    shop: Shop,
+    buyer: UserDraft,
+    product: Product,
+) -> Purchase:
+    """One complete USDT sale: invoice, payment, delivery."""
+    purchase = await shop.purchases.start_purchase(
+        user_id=buyer.telegram_id,
+        product_id=product.id,
+        provider=PaymentProvider.CRYPTO,
+        external_id=uuid4().hex,
+    )
+    await shop.purchases.confirm_payment(
+        provider=PaymentProvider.CRYPTO,
+        external_id=purchase.external_id,
+    )
+    result = await shop.delivery.deliver_purchase(purchase.id)
+    assert result.succeeded
+    return await shop.purchases.get(purchase.id)
+
+
+async def _burn_discount(shop: Shop, buyer: UserDraft) -> None:
+    """Spend this buyer's one-time referral discount on a throwaway sale.
+
+    Used by the tests that want a *full price* purchase, since an invited
+    buyer's very first one is always discounted.
+    """
+    await _buy(shop, buyer, await _product(shop, price_stars=10, price_usdt=None))
+
+
+async def test_a_usdt_purchase_earns_through_the_products_declared_rate(
+    shop: Shop,
+) -> None:
+    """The specification's example, end to end.
+
+    The product is priced at 700 ⭐ / 10 USDT, so the shop itself has declared
+    70 ⭐ per USDT. A 10 USDT payment is therefore worth 700 ⭐, and 15% of that
+    is 105 bonuses.
+    """
+    await _buyers(shop, INVITER, INVITED)
+    await _invite(shop, INVITER, INVITED)
+    await _burn_discount(shop, INVITED)
+    product = await _product(shop, price_stars=700, price_usdt=Decimal("10.00"))
+    before = await _balance(shop, INVITER.telegram_id)
+
+    purchase = await _buy_with_crypto(shop, INVITED, product)
+
+    assert purchase.amount == Decimal("10.00")
+    assert await _balance(shop, INVITER.telegram_id) - before == 105
+
+
+async def test_a_usdt_reward_records_the_rate_it_used(shop: Shop) -> None:
+    """Stored on the entry, so the number can always be explained later."""
+    await _buyers(shop, INVITER, INVITED)
+    await _invite(shop, INVITER, INVITED)
+    product = await _product(shop, price_stars=700, price_usdt=Decimal("10.00"))
+
+    purchase = await _buy_with_crypto(shop, INVITED, product)
+
+    async with shop.uow_factory() as uow:
+        entry = await uow.bonuses.find_for_purchase(
+            purchase.id,
+            BonusTransactionType.REFERRAL_REWARD,
+        )
+    assert entry is not None
+    assert entry.stars_per_usdt == Decimal(70)
+
+
+async def test_repricing_the_product_does_not_recompute_an_old_reward(
+    shop: Shop,
+) -> None:
+    """The rule that makes historical bonuses trustworthy.
+
+    A reward earned at 70 ⭐/USDT stays what it was even after the admin moves
+    the product to 80 ⭐/USDT — the old entry keeps its own rate, and only the
+    next sale uses the new one.
+    """
+    await _buyers(shop, INVITER, INVITED, THIRD)
+    await _invite(shop, INVITER, INVITED)
+    await _invite(shop, INVITER, THIRD)
+    await _burn_discount(shop, INVITED)
+    await _burn_discount(shop, THIRD)
+    product = await _product(shop, price_stars=700, price_usdt=Decimal("10.00"))
+    first = await _buy_with_crypto(shop, INVITED, product)
+
+    from app.domain.commands import ProductUpdate  # noqa: PLC0415
+
+    await shop.products.update(product.id, ProductUpdate(price_stars=800))
+    second = await _buy_with_crypto(shop, THIRD, product)
+
+    async with shop.uow_factory() as uow:
+        old = await uow.bonuses.find_for_purchase(
+            first.id,
+            BonusTransactionType.REFERRAL_REWARD,
+        )
+        new = await uow.bonuses.find_for_purchase(
+            second.id,
+            BonusTransactionType.REFERRAL_REWARD,
+        )
+    assert old is not None
+    assert new is not None
+    # The old reward and its rate are untouched…
+    assert old.amount == 105
+    assert old.stars_per_usdt == Decimal(70)
+    # …while the new sale used the new rate: 800/10 gives 80, times 10 is 800, 15% is 120.
+    assert new.amount == 120
+    assert new.stars_per_usdt == Decimal(80)
+
+
+async def test_a_usdt_only_product_earns_nothing_and_says_so(shop: Shop) -> None:
+    """No Stars price means no declared rate, so there is nothing to convert.
+
+    Crediting a guess would be worse than crediting nothing; the service logs
+    the sale and moves on.
+    """
+    await _buyers(shop, INVITER, INVITED)
+    await _invite(shop, INVITER, INVITED)
+    await _burn_discount(shop, INVITED)
+    product = await _product(shop, price_stars=None, price_usdt=Decimal("10.00"))
+    before = await _balance(shop, INVITER.telegram_id)
+
+    purchase = await _buy_with_crypto(shop, INVITED, product)
+
+    assert purchase.amount == Decimal("10.00")
+    assert await _balance(shop, INVITER.telegram_id) == before
+    assert await _ledger_types(shop, purchase.id) == []
+
+
+async def test_a_usdt_purchase_still_gets_the_referral_discount(shop: Shop) -> None:
+    """The discount is a percentage, so it needs no rate at all."""
+    await _buyers(shop, INVITER, INVITED)
+    await _invite(shop, INVITER, INVITED)
+    product = await _product(shop, price_stars=700, price_usdt=Decimal("10.00"))
+
+    purchase = await _buy_with_crypto(shop, INVITED, product)
+
+    assert purchase.base_amount == Decimal("10.00")
+    assert purchase.discount_amount == Decimal("1.00")
+    assert purchase.amount == Decimal("9.00")
+    # 9 USDT at 70 stars each is 630 stars, and 15% of that is 94.5, floored to 94.
+    assert await _balance(shop, INVITER.telegram_id) == 94
+
+
+# --- Bonuses are a Stars discount and nothing else
+
+
+async def test_bonuses_cannot_be_spent_on_a_crypto_purchase(shop: Shop) -> None:
+    """Explicitly refused rather than quietly ignored.
+
+    The bot never offers the choice on a crypto card, so a request to spend
+    bonuses there is a hand-crafted callback — and charging the full price
+    silently would be the wrong answer to it.
+    """
+    await _buyers(shop, INVITER, INVITED)
+    await _invite(shop, INVITER, INVITED)
+    await _buy(shop, INVITED, await _product(shop))
+    assert await _balance(shop, INVITER.telegram_id) == 135
+
+    product = await _product(shop, price_stars=1000, price_usdt=Decimal("10.00"))
+    with pytest.raises(BonusesNotAvailableError):
+        await shop.purchases.start_purchase(
+            user_id=INVITER.telegram_id,
+            product_id=product.id,
+            provider=PaymentProvider.CRYPTO,
+            external_id=uuid4().hex,
+            use_bonus=True,
+        )
+    assert await _balance(shop, INVITER.telegram_id) == 135
+
+
+async def test_no_bonus_offer_is_made_on_a_crypto_card(shop: Shop) -> None:
+    await _buyers(shop, INVITER, INVITED)
+    await _invite(shop, INVITER, INVITED)
+    await _buy(shop, INVITED, await _product(shop))
+
+    offer = await shop.bonuses.offer_for(
+        user_id=INVITER.telegram_id,
+        base_amount=Decimal("10.00"),
+        currency=Currency.USDT,
+    )
+
+    assert not offer.available
+    assert offer.quote_without_bonus.charged_amount == Decimal("10.00")
+
+
+async def test_one_bonus_buys_exactly_one_star(shop: Shop) -> None:
+    """The model, asserted against real rows."""
+    await _buyers(shop, INVITER, INVITED)
+    await _invite(shop, INVITER, INVITED)
+    await _buy(shop, INVITED, await _product(shop, price_stars=1000))
+    assert await _balance(shop, INVITER.telegram_id) == 135
+
+    purchase = await _buy(shop, INVITER, await _product(shop, price_stars=1000), use_bonus=True)
+
+    assert purchase.bonus_amount == Decimal(135)
+    assert purchase.amount == Decimal(865)
+
+
+# --- The product card
+
+
+async def test_an_invited_buyer_sees_the_discounted_price_on_the_card(
+    shop: Shop,
+) -> None:
+    """The list price is struck through beside what this visitor will pay."""
+    await _buyers(shop, INVITER, INVITED)
+    await _invite(shop, INVITER, INVITED)
+    product = await _product(shop, price_stars=1000, price_usdt=None)
+
+    card = await shop.purchases.open_card(INVITED, product.slug)
+
+    assert card.is_discounted
+    assert card.discount_percent == 10
+    option = card.options[0]
+    assert option.amount == 1000
+    assert option.discounted_amount == Decimal(900)
+
+
+async def test_an_ordinary_buyer_sees_the_card_unchanged(shop: Shop) -> None:
+    """The regression that protects every existing buyer."""
+    await _buyers(shop, LONER)
+    product = await _product(shop, price_stars=1000, price_usdt=None)
+
+    card = await shop.purchases.open_card(LONER, product.slug)
+
+    assert not card.is_discounted
+    assert card.discount_percent == 0
+    assert card.options[0].discounted_amount is None
+
+
+async def test_the_card_stops_showing_a_discount_once_it_is_used(shop: Shop) -> None:
+    await _buyers(shop, INVITER, INVITED)
+    await _invite(shop, INVITER, INVITED)
+    await _buy(shop, INVITED, await _product(shop))
+    later = await _product(shop, price_stars=1000, price_usdt=None)
+
+    card = await shop.purchases.open_card(INVITED, later.slug)
+
+    assert not card.is_discounted
+    assert card.options[0].discounted_amount is None
+
+
+async def test_the_card_shows_no_discount_while_the_programme_is_off(
+    live_uow_factory: SqlAlchemyUnitOfWorkFactory,
+    live_locks: RedisLockManager,
+) -> None:
+    enabled = _build_shop(
+        live_uow_factory,
+        live_locks,
+        referral=ReferralSettings(enabled=True),
+    )
+    await _buyers(enabled, INVITER, INVITED)
+    await _invite(enabled, INVITER, INVITED)
+
+    disabled = _build_shop(
+        live_uow_factory,
+        live_locks,
+        referral=ReferralSettings(enabled=False),
+    )
+    product = await _product(disabled, price_stars=1000, price_usdt=None)
+    card = await disabled.purchases.open_card(INVITED, product.slug)
+
+    assert not card.is_discounted
+    assert card.options[0].discounted_amount is None

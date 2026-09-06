@@ -42,9 +42,9 @@ from app.infrastructure.db.base import Base, TimestampMixin
 USDT_PRECISION: Final = 12
 USDT_SCALE: Final = 2
 
-USDT_RATE_PRECISION: Final = 18
-USDT_RATE_SCALE: Final = 6
-"""Width of the recorded bonus conversion rate. Wide enough to never round it."""
+STARS_RATE_PRECISION: Final = 18
+STARS_RATE_SCALE: Final = 6
+"""Width of the recorded Stars-per-USDT rate. Wide enough to never round it."""
 
 _ACCESS_STATUS_SQL: Final = "status IN ('paid', 'delivered')"
 
@@ -337,11 +337,15 @@ class BonusTransactionModel(Base):
         ForeignKey("purchases.id", ondelete="RESTRICT"),
         nullable=True,
     )
-    rate_units_per_usdt: Mapped[Decimal | None] = mapped_column(
-        Numeric(USDT_RATE_PRECISION, USDT_RATE_SCALE),
+    stars_per_usdt: Mapped[Decimal | None] = mapped_column(
+        Numeric(STARS_RATE_PRECISION, STARS_RATE_SCALE),
         nullable=True,
     )
-    """Rate in force when a USDT amount was converted, so history stays readable."""
+    """Stars-per-USDT rate used for this entry, so history stays readable.
+
+    Taken from the product's own two prices at the moment of the sale. Set only
+    on entries produced by a USDT purchase; a Stars purchase needs no rate.
+    """
 
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"), nullable=False)
 
@@ -358,7 +362,7 @@ class BonusTransactionModel(Base):
         ),
         CheckConstraint("amount <> 0", name="amount_not_zero"),
         CheckConstraint(
-            "rate_units_per_usdt IS NULL OR rate_units_per_usdt > 0",
+            "stars_per_usdt IS NULL OR stars_per_usdt > 0",
             name="rate_positive",
         ),
         Index("ix_bonus_transactions_user_id_created_at", "user_id", "created_at"),

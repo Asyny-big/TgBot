@@ -486,7 +486,7 @@ class FakeBonusRepository:
             type=draft.type,
             referral_id=draft.referral_id,
             purchase_id=draft.purchase_id,
-            rate_units_per_usdt=draft.rate_units_per_usdt,
+            stars_per_usdt=draft.stars_per_usdt,
             created_at=NOW,
         )
         self.entries.append(entry)

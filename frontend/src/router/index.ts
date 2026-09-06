@@ -13,6 +13,7 @@ import DashboardView from "@/views/DashboardView.vue";
 import LoginView from "@/views/LoginView.vue";
 import ProductsView from "@/views/ProductsView.vue";
 import PurchasesView from "@/views/PurchasesView.vue";
+import ReferralsView from "@/views/ReferralsView.vue";
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -21,6 +22,7 @@ export const router = createRouter({
     { path: "/", name: "dashboard", component: DashboardView },
     { path: "/products", name: "products", component: ProductsView },
     { path: "/purchases", name: "purchases", component: PurchasesView },
+    { path: "/referrals", name: "referrals", component: ReferralsView },
     { path: "/:pathMatch(.*)*", redirect: "/" },
   ],
 });

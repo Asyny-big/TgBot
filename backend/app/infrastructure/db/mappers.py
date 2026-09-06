@@ -79,7 +79,7 @@ def to_bonus_transaction(model: BonusTransactionModel) -> BonusTransaction:
         type=model.type,
         referral_id=model.referral_id,
         purchase_id=model.purchase_id,
-        rate_units_per_usdt=model.rate_units_per_usdt,
+        stars_per_usdt=model.stars_per_usdt,
         created_at=model.created_at,
     )
 

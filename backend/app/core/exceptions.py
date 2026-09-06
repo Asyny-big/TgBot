@@ -169,6 +169,18 @@ class InsufficientBonusBalanceError(ConflictError):
     message = "Not enough bonuses to cover this purchase"
 
 
+class BonusesNotAvailableError(ValidationError):
+    """Bonuses were requested on a rail that cannot spend them.
+
+    One bonus is one Telegram Star, so bonuses reduce a Stars invoice and
+    nothing else. The bot never offers the choice on a crypto card, so this
+    surfaces only for a hand-crafted callback.
+    """
+
+    code = "bonuses_not_available"
+    message = "Bonuses can only be spent on a Telegram Stars purchase"
+
+
 class DeliveryError(AppError):
     """Base class for delivery transport failures."""
 

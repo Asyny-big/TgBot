@@ -123,4 +123,4 @@ class BonusTransactionDraft:
     type: BonusTransactionType
     referral_id: UUID | None = None
     purchase_id: UUID | None = None
-    rate_units_per_usdt: Decimal | None = None
+    stars_per_usdt: Decimal | None = None

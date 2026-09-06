@@ -87,7 +87,7 @@ class SqlAlchemyBonusRepository:
             type=draft.type,
             referral_id=draft.referral_id,
             purchase_id=draft.purchase_id,
-            rate_units_per_usdt=draft.rate_units_per_usdt,
+            stars_per_usdt=draft.stars_per_usdt,
         )
         try:
             async with self._session.begin_nested():
@@ -165,7 +165,7 @@ class SqlAlchemyBonusRepository:
                 type=BonusTransactionType.BONUS_RESERVE_RELEASED,
                 purchase_id=purchase_id,
                 referral_id=model.referral_id,
-                rate_units_per_usdt=model.rate_units_per_usdt,
+                stars_per_usdt=model.stars_per_usdt,
             )
         )
 
