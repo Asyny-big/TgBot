@@ -691,6 +691,112 @@
         }
       }
     },
+    "/api/v1/referrals/settings": {
+      "get": {
+        "tags": [
+          "referrals"
+        ],
+        "summary": "Referral programme configuration",
+        "description": "The numbers this process is running with.\n\nChanging them is a deploy, not a form: they are validated once on start-up,\nwhich is what keeps a bad value from surfacing in the middle of a checkout.",
+        "operationId": "read_settings_api_v1_referrals_settings_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReferralSettingsResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/referrals": {
+      "get": {
+        "tags": [
+          "referrals"
+        ],
+        "summary": "List referral relationships",
+        "description": "Relationships newest first. ``search`` matches either party.",
+        "operationId": "list_referrals_api_v1_referrals_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 255
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Search"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageResponse_ReferralRecordResponse_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/stats/overview": {
       "get": {
         "tags": [
@@ -1019,6 +1125,27 @@
           "meta"
         ],
         "title": "PageResponse[PurchaseRecordResponse]"
+      },
+      "PageResponse_ReferralRecordResponse_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ReferralRecordResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/PageMeta"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items",
+          "meta"
+        ],
+        "title": "PageResponse[ReferralRecordResponse]"
       },
       "PaymentProvider": {
         "type": "string",
@@ -1535,6 +1662,138 @@
         ],
         "title": "ReadinessResponse",
         "description": "Aggregated availability of every infrastructure dependency."
+      },
+      "ReferralPartyResponse": {
+        "properties": {
+          "buyer": {
+            "$ref": "#/components/schemas/BuyerResponse"
+          },
+          "bonus_balance": {
+            "type": "integer",
+            "title": "Bonus Balance"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "buyer",
+          "bonus_balance"
+        ],
+        "title": "ReferralPartyResponse",
+        "description": "One side of a referral relationship, with their bonus balance."
+      },
+      "ReferralRecordResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "referrer": {
+            "$ref": "#/components/schemas/ReferralPartyResponse"
+          },
+          "referred": {
+            "$ref": "#/components/schemas/ReferralPartyResponse"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "discount_used_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discount Used At"
+          },
+          "discount_purchase_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discount Purchase Id"
+          },
+          "referred_purchase_count": {
+            "type": "integer",
+            "title": "Referred Purchase Count"
+          },
+          "reward_total": {
+            "type": "integer",
+            "title": "Reward Total"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "referrer",
+          "referred",
+          "created_at",
+          "discount_used_at",
+          "discount_purchase_id",
+          "referred_purchase_count",
+          "reward_total"
+        ],
+        "title": "ReferralRecordResponse",
+        "description": "One relationship: who invited whom, and what it has produced."
+      },
+      "ReferralSettingsResponse": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "discount_percent": {
+            "type": "integer",
+            "title": "Discount Percent"
+          },
+          "reward_percent": {
+            "type": "integer",
+            "title": "Reward Percent"
+          },
+          "max_bonus_payment_percent": {
+            "type": "integer",
+            "title": "Max Bonus Payment Percent"
+          },
+          "bonus_units_per_usdt": {
+            "type": "number",
+            "title": "Bonus Units Per Usdt"
+          },
+          "preview_directory_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preview Directory Url"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "enabled",
+          "discount_percent",
+          "reward_percent",
+          "max_bonus_payment_percent",
+          "bonus_units_per_usdt",
+          "preview_directory_url"
+        ],
+        "title": "ReferralSettingsResponse",
+        "description": "The referral programme's configured numbers, as the shop is running them."
       },
       "RefreshRequest": {
         "properties": {

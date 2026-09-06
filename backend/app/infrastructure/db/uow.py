@@ -5,8 +5,10 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
+from app.infrastructure.db.repositories.bonuses import SqlAlchemyBonusRepository
 from app.infrastructure.db.repositories.products import SqlAlchemyProductRepository
 from app.infrastructure.db.repositories.purchases import SqlAlchemyPurchaseRepository
+from app.infrastructure.db.repositories.referrals import SqlAlchemyReferralRepository
 from app.infrastructure.db.repositories.stats import SqlAlchemyStatsRepository
 from app.infrastructure.db.repositories.users import SqlAlchemyUserRepository
 
@@ -26,6 +28,8 @@ class SqlAlchemyUnitOfWork:
         self._products = SqlAlchemyProductRepository(session)
         self._users = SqlAlchemyUserRepository(session)
         self._purchases = SqlAlchemyPurchaseRepository(session)
+        self._referrals = SqlAlchemyReferralRepository(session)
+        self._bonuses = SqlAlchemyBonusRepository(session)
         self._stats = SqlAlchemyStatsRepository(session)
 
     @property
@@ -43,6 +47,14 @@ class SqlAlchemyUnitOfWork:
     @property
     def purchases(self) -> SqlAlchemyPurchaseRepository:
         return self._purchases
+
+    @property
+    def referrals(self) -> SqlAlchemyReferralRepository:
+        return self._referrals
+
+    @property
+    def bonuses(self) -> SqlAlchemyBonusRepository:
+        return self._bonuses
 
     @property
     def stats(self) -> SqlAlchemyStatsRepository:

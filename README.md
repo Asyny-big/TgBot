@@ -49,13 +49,15 @@ nginx with the compiled admin panel baked in.
 
 ## Data model
 
-Three tables; money-critical rules are database constraints, not conventions.
+Five tables; money-critical rules are database constraints, not conventions.
 
 | Table | Purpose | Key invariants |
 | --- | --- | --- |
 | `products` | one digital good per deep-link slug | unique `slug` matching Telegram's payload rules, at least one price set, prices strictly positive |
-| `users` | Telegram profile snapshot | `telegram_id` as primary key, case-insensitive username index for admin search |
-| `purchases` | one attempt to buy one product | unique `(provider, external_id)`, partial unique `(user_id, product_id)` while paid or delivered, unique Telegram charge id, delivered rows must carry a link and a timestamp |
+| `users` | Telegram profile snapshot | `telegram_id` as primary key, case-insensitive username index for admin search, unique `referral_code`, `bonus_balance >= 0` |
+| `purchases` | one attempt to buy one product | unique `(provider, external_id)`, partial unique `(user_id, product_id)` while paid or delivered, unique Telegram charge id, delivered rows must carry a link and a timestamp, the stored price breakdown must add up |
+| `referrals` | one buyer, attributed to whoever invited them | unique `referred_user_id` (one referrer for life), `referrer_user_id <> referred_user_id`, the one-time discount is consumed by at most one purchase |
+| `bonus_transactions` | every movement of every bonus balance | partial unique `(purchase_id, type)` — one entry of each kind per purchase, which is what makes a replayed webhook credit a reward once |
 
 Prices are independent per rail: `price_stars` (integer XTR) and `price_usdt`
 (`NUMERIC(12,2)`). A rail without a price is simply not offered on the card.
@@ -137,6 +139,10 @@ payment notification   confirm_payment → deliver_purchase → mark_delivered
 An invoice exists only because a buyer pressed a payment button. Opening a card
 records the visitor's Telegram profile and nothing else.
 
+With bonuses available, one question comes between the button and the invoice —
+"spend them on this purchase?" — and that question is a message, not an invoice.
+A buyer with no bonuses never sees it.
+
 ### Resilience
 
 | Situation | Behaviour |
@@ -148,6 +154,91 @@ records the visitor's Telegram profile and nothing else.
 | Two payment buttons pressed at once | one invoice: the second press is refused by the lock |
 | Stars and USDT invoices both paid | the database allows exactly one paid copy; the loser is reported, not delivered |
 | An invoice is never paid | housekeeping expires it, and it stops being polled |
+| A referral reward is credited twice | it cannot be: `(purchase_id, type)` is unique, so five replayed webhooks leave one reward |
+| The process dies between delivery and the ledger write | housekeeping credits the missed reward on its next pass |
+| An unpaid invoice reserved bonus units | housekeeping releases them; a reservation is not a charge |
+| The inviter blocked the bot | the reward is stored anyway; the notice is a courtesy, not the money |
+| The referral lookup fails at checkout | it cannot fail separately — pricing runs in the same transaction as the purchase |
+
+## Referrals and bonuses
+
+An addition around the shop, not a change to it. The concept is untouched: there
+is no catalogue, no product list, no search and no list of preview channels
+inside the bot. A sale still starts at a deep link to one specific product.
+
+```
+🎁 Мои бонусы           /bonus, or the button after a purchase
+                        → mints a permanent invitation link, buys nothing
+ref_<code> opened       B is attributed to A, for life. No product is shown.
+                        → [📣 Смотреть preview] → the ordinary deep link
+/start <slug>           B's first purchase: -10%, applied automatically
+payment + delivery      A is credited 15% of what B actually paid
+```
+
+**Anyone may invite.** A user does not have to buy anything to get a link — the
+bonus screen mints one on first open.
+
+**An attribution is permanent.** If A invited B, no later link moves B to C.
+That is `uq_referrals_referred_user_id`, not a check in Python.
+
+**A referral link carries no product.** It records the relationship and points at
+the preview directory. B can then open any product deep link, on any later day,
+and the discount still applies: eligibility is evaluated when the purchase is
+created, never when the link was opened.
+
+**Eligibility is purchase history.** A buyer who has bought here before is not a
+new buyer, however new their Telegram account looks. A refunded purchase counts
+as history too — otherwise a buyer could refund their way back to "new" and
+harvest the discount again.
+
+**Only the direct referrer earns.** A earns from B, and B earns from C. A earns
+nothing from C: there is no second level.
+
+### Bonuses
+
+A single pool of integer units, where one unit is worth one Telegram Star.
+Purchases settled in USDT join the same pool at `REFERRAL_BONUS_UNITS_PER_USDT`,
+and the rate in force is stored on every converted ledger entry, so changing it
+later never rewrites history.
+
+Bonuses are not Telegram Stars, cannot be withdrawn and cannot be transferred —
+they only reduce a future price in this shop, which is why the bot shows them as
+a plain `Баланс` and never as `⭐ Telegram Stars`.
+
+| Rule | Where it is enforced |
+| --- | --- |
+| At most half a price may be paid with bonuses | `REFERRAL_MAX_BONUS_PAYMENT_PERCENT`, and the price maths always leaves at least one chargeable step |
+| A product can never be bought for nothing | the existing `amount > 0` check on `purchases` |
+| The same units cannot fund two checkouts | a Redis lock on the balance, `SELECT … FOR UPDATE` on the row, and `bonus_balance >= 0` |
+| The balance is always explained by the ledger | both move in the same transaction; `recompute_balance` can prove it |
+| A first referral purchase never combines the discount with bonuses | the pricing function refuses to; the discount wins |
+
+Units are **reserved** when the invoice is issued, not debited when it is paid.
+Between the two there can be half an hour, and without a reservation a second
+checkout could promise the same units again. A reservation becomes a spend when
+the payment lands, and housekeeping releases it if the invoice is never paid.
+
+### Rewards are final
+
+A refund does **not** reverse a credited reward. There is no reversal, no debt
+and no negative balance, and the existing refund flow is untouched: the purchase
+becomes `refunded` and the bonus ledger does not move. Bonuses that were spent
+on a purchase that is later refunded are not returned either.
+
+### The preview directory
+
+The bot knows exactly one URL, `REFERRAL_PREVIEW_DIRECTORY_URL`, and stores no
+channel ids, no channel usernames and no channel list. That one hop channel
+holds the links to the current preview channels and is managed outside the bot,
+so changing which channels exist never requires a redeploy. Leave the variable
+empty and the button is simply absent.
+
+### Switching it off
+
+`REFERRAL_ENABLED=false` returns the shop to exactly what it was before this
+feature existed: no invitation payload is recognised, no discount is applied,
+and nothing is accrued or spent. The migration stays in place; only behaviour
+changes.
 
 ## Admin API
 
@@ -395,6 +486,15 @@ Values that must change from the development defaults:
 | `REDIS_PASSWORD` | a real secret | the production stack starts Redis with `--requirepass` and refuses to come up without it |
 | `API_WORKERS` | `2` | keep `API_WORKERS × (POSTGRES_POOL_SIZE + POSTGRES_MAX_OVERFLOW)` below PostgreSQL's `max_connections` |
 
+The referral programme needs no changes to run — every `REFERRAL_*` variable has
+a working default. Two are worth a decision before launch:
+
+| Variable | Default | Why you might change it |
+| --- | --- | --- |
+| `REFERRAL_PREVIEW_DIRECTORY_URL` | *(empty)* | the one hop channel invited users are sent to. Empty hides the button, so set it or invited users see no next step |
+| `REFERRAL_BONUS_UNITS_PER_USDT` | `500` | how many bonus units 1 USDT is worth. Only matters if you sell through CryptoBot; it is recorded on every converted ledger entry, so changing it later does not rewrite history |
+| `REFERRAL_ENABLED` | `true` | set to `false` to deploy the schema without switching the feature on |
+
 Then check the whole file, including the cross-component agreements the
 application cannot see for itself:
 
@@ -578,7 +678,8 @@ and the previous containers keep running.
 One note about migration `0002`, which builds the search indexes: `CREATE INDEX`
 takes a lock that blocks writes to the table while it runs. On a table that
 already holds millions of purchases, apply it during a quiet minute. It took 1.6
-seconds on 200 000 rows.
+seconds on 200 000 rows. Migration `0003` adds one more index to `purchases` and
+carries the same caveat.
 
 To roll back to the previous release:
 
@@ -589,6 +690,19 @@ make prod-build && make prod-up
 
 A rollback across a migration that dropped a column needs the dump:
 `alembic downgrade` handles the schema, but only a restore brings the data back.
+
+Migration `0003` (referrals and bonuses) is **additive only** — two new tables
+and five nullable-or-defaulted columns. The previous release runs unchanged
+against it, so rolling back the application is enough and the schema can stay:
+
+```bash
+git checkout <previous-tag>
+make prod-build && make prod-up      # the schema is left alone
+```
+
+Do **not** `alembic downgrade` once bonuses have been accrued. The downgrade
+drops `bonus_transactions`, and a credited reward exists nowhere else — only a
+restore from a dump would bring it back.
 
 ## Backups
 

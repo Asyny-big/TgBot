@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from app.core.config import DeliverySettings
+    from app.domain.bonuses import SaleCompletion
     from app.domain.delivery import DeliveryGateway
     from app.domain.entities import Product, Purchase, User
     from app.domain.locks import LockManager
@@ -76,6 +77,14 @@ class DeliveryService:
     # rather than bound methods.
     sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep)
     jitter: Callable[[], float] = field(default=random.random)
+    sale_completion: SaleCompletion | None = None
+    """Optional referral reward accrual, invoked once a sale is complete.
+
+    Deliberately last in the sequence and deliberately unable to fail the
+    delivery: the buyer's link is the promise this service exists to keep, and
+    a bonus ledger hiccup must not break it. Housekeeping repairs what is
+    missed, exactly as reconciliation repairs a lost payment webhook.
+    """
 
     async def deliver_purchase(self, purchase_id: UUID) -> DeliveryResult:
         """Deliver a freshly paid purchase.
@@ -141,7 +150,8 @@ class DeliveryService:
             if not outcome.succeeded:
                 return outcome
 
-            if purchase.status is not PurchaseStatus.DELIVERED:
+            newly_delivered = purchase.status is not PurchaseStatus.DELIVERED
+            if newly_delivered:
                 await self.purchases.mark_delivered(purchase_id, delivered_url=delivery_url)
 
         logger.info(
@@ -150,7 +160,30 @@ class DeliveryService:
             attempts=outcome.attempts,
             is_repeat=is_repeat,
         )
+        if newly_delivered:
+            # Only the transition into "delivered" completes a sale — a
+            # re-delivery of something the buyer already owns must not pay a
+            # reward twice, nor pester them a second time.
+            await self._complete_sale(purchase_id, context.user.telegram_id)
         return outcome
+
+    async def _complete_sale(self, purchase_id: UUID, user_id: int) -> None:
+        """Report a completed sale to the bonus feature. Never raises.
+
+        Deliberately after the delivery and deliberately unable to break it: the
+        buyer's link is the promise this service exists to keep.
+        """
+        if self.sale_completion is None:
+            return
+        try:
+            await self.sale_completion.accrue(purchase_id)
+            await self.sale_completion.invite_buyer(user_id)
+        except Exception as error:
+            logger.error(  # noqa: TRY400 — a bonus problem is not a delivery failure
+                "sale_completion_not_reported",
+                purchase_id=str(purchase_id),
+                error=str(error),
+            )
 
     async def _load_context(self, purchase_id: UUID) -> _DeliveryContext:
         """Read the purchase, product and buyer, then close the transaction."""

@@ -21,6 +21,7 @@ from app.domain.payments import PaymentState
 if TYPE_CHECKING:
     from app.core.config import BotSettings
     from app.domain.payments import CryptoInvoiceGateway
+    from app.services.bonuses import BonusService
     from app.services.checkout import CheckoutService
     from app.services.purchases import PurchaseService
 
@@ -101,15 +102,55 @@ class ReconciliationWorker:
 
 
 class HousekeepingWorker:
-    """Expires pending purchases whose invoice lifetime has passed."""
+    """Expires pending purchases, and repairs whatever the bonus ledger missed.
 
-    def __init__(self, *, purchases: PurchaseService, settings: BotSettings) -> None:
+    Three jobs, in an order that matters: expiring an invoice is what makes the
+    units it reserved releasable, so the release pass runs after it.
+    """
+
+    def __init__(
+        self,
+        *,
+        purchases: PurchaseService,
+        settings: BotSettings,
+        bonuses: BonusService | None = None,
+    ) -> None:
         self._purchases = purchases
         self._settings = settings
+        self._bonuses = bonuses
 
     async def run_once(self) -> int:
-        """Expire stale invoices once; return how many were expired."""
-        return await self._purchases.expire_stale()
+        """Expire stale invoices once; return how many were expired.
+
+        The bonus repairs deliberately do not affect the return value or raise:
+        this loop exists to keep the shop tidy, and a bonus hiccup must not stop
+        invoices from expiring.
+        """
+        expired = await self._purchases.expire_stale()
+        await self._tidy_bonuses()
+        return expired
+
+    async def _tidy_bonuses(self) -> None:
+        """Release dead reservations and credit rewards that were missed.
+
+        The safety net behind reward accrual: a process that died between
+        marking a sale delivered and writing the ledger entry is repaired here,
+        exactly as reconciliation repairs a lost payment webhook.
+        """
+        if self._bonuses is None:
+            return
+        try:
+            await self._bonuses.release_stale_holds(
+                limit=self._settings.reconciliation_batch_size,
+            )
+            await self._bonuses.accrue_missing(
+                limit=self._settings.reconciliation_batch_size,
+            )
+        except AppError as error:
+            logger.error(  # noqa: TRY400 — one bad row must not stop the loop
+                "bonus_housekeeping_failed",
+                error=str(error),
+            )
 
     async def run_forever(self) -> None:
         """Expire on a fixed interval until cancelled."""

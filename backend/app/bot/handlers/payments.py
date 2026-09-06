@@ -7,15 +7,22 @@ below starts with the buyer pressing ⭐ or 💎.
 from __future__ import annotations
 
 from contextlib import suppress
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
 
-from app.bot.keyboards import PayCallback, crypto_pay_keyboard
+from app.bot.keyboards import (
+    BonusChoiceCallback,
+    PayCallback,
+    bonus_choice_keyboard,
+    crypto_pay_keyboard,
+)
 from app.bot.middlewares import BotServices
 from app.bot.texts import (
     ALREADY_PURCHASED,
+    BONUS_BALANCE_CHANGED,
     CARD_UNAVAILABLE,
     CRYPTO_INVOICE_CREATED,
     DELIVERY_FAILED,
@@ -25,9 +32,13 @@ from app.bot.texts import (
     PRE_CHECKOUT_UNAVAILABLE,
     PRE_CHECKOUT_UNKNOWN,
     REFUND_NOTICE,
+    bonus_prompt,
 )
 from app.core.exceptions import (
+    AppError,
+    ConflictError,
     DuplicatePurchaseError,
+    InsufficientBonusBalanceError,
     LockBusyError,
     PaymentGatewayError,
     ProductInactiveError,
@@ -41,6 +52,9 @@ from app.domain.enums import PaymentProvider, PurchaseStatus
 if TYPE_CHECKING:
     from aiogram.types import PreCheckoutQuery
 
+    from app.domain.entities import Product
+    from app.services.bonuses import BonusOffer
+
 logger = get_logger(__name__)
 
 
@@ -49,7 +63,13 @@ async def handle_pay_pressed(
     callback_data: PayCallback,
     shop: BotServices,
 ) -> None:
-    """The buyer pressed a payment button: create the purchase and the invoice."""
+    """The buyer pressed a payment button.
+
+    One question may come between the button and the invoice: if the buyer has
+    bonuses that could reduce *this* price, they are asked first. Everything
+    else — and every buyer without bonuses — goes straight to checkout exactly
+    as before.
+    """
     user = callback.from_user
     try:
         product = await shop.purchases.product_for_checkout(callback_data.product_id)
@@ -57,14 +77,124 @@ async def handle_pay_pressed(
         await callback.answer(CARD_UNAVAILABLE, show_alert=True)
         return
 
+    offer = await _bonus_offer(
+        shop, user_id=user.id, product=product, provider=callback_data.provider
+    )
+    if offer is not None:
+        await callback.answer()
+        await _ask_about_bonuses(
+            callback, product=product, provider=callback_data.provider, offer=offer
+        )
+        return
+
+    await _start_checkout(
+        callback,
+        shop,
+        product=product,
+        provider=callback_data.provider,
+        use_bonus=False,
+    )
+
+
+async def handle_bonus_choice(
+    callback: CallbackQuery,
+    callback_data: BonusChoiceCallback,
+    shop: BotServices,
+) -> None:
+    """The buyer answered "spend your bonuses?" — now issue the invoice."""
     try:
-        if callback_data.provider is PaymentProvider.STARS:
-            await shop.checkout.start_stars_checkout(user_id=user.id, product=product)
+        product = await shop.purchases.product_for_checkout(callback_data.product_id)
+    except (ProductNotFoundError, ProductInactiveError):
+        await callback.answer(CARD_UNAVAILABLE, show_alert=True)
+        return
+
+    await _start_checkout(
+        callback,
+        shop,
+        product=product,
+        provider=callback_data.provider,
+        use_bonus=callback_data.use_bonus,
+    )
+
+
+async def _bonus_offer(
+    shop: BotServices,
+    *,
+    user_id: int,
+    product: Product,
+    provider: PaymentProvider,
+) -> BonusOffer | None:
+    """The bonus question worth asking, or ``None`` to skip straight to paying.
+
+    Never raises: a bonus lookup that fails must not stop a sale. The buyer
+    simply is not offered bonuses and pays the ordinary price.
+    """
+    price = product.price_for(provider)
+    if price is None:  # pragma: no cover — the button only exists with a price
+        return None
+    try:
+        offer = await shop.bonuses.offer_for(
+            user_id=user_id,
+            base_amount=Decimal(price),
+            currency=provider.currency,
+        )
+    except AppError as error:
+        logger.error(  # noqa: TRY400 — bonuses are optional, the sale is not
+            "bonus_offer_unavailable",
+            user_id=user_id,
+            product_id=str(product.id),
+            error=str(error),
+        )
+        return None
+    return offer if offer.available else None
+
+
+async def _ask_about_bonuses(
+    callback: CallbackQuery,
+    *,
+    product: Product,
+    provider: PaymentProvider,
+    offer: BonusOffer,
+) -> None:
+    """Show the arithmetic before anything is charged or held."""
+    priced = offer.quote_with_bonus
+    if priced is None or callback.bot is None:  # pragma: no cover — guarded upstream
+        return
+    await callback.bot.send_message(
+        chat_id=callback.from_user.id,
+        text=bonus_prompt(
+            balance=offer.balance,
+            base_amount=priced.base_amount,
+            bonus_amount=priced.bonus_amount,
+            charged_amount=priced.charged_amount,
+        ),
+        reply_markup=bonus_choice_keyboard(provider=provider, product_id=product.id),
+    )
+
+
+async def _start_checkout(
+    callback: CallbackQuery,
+    shop: BotServices,
+    *,
+    product: Product,
+    provider: PaymentProvider,
+    use_bonus: bool,
+) -> None:
+    """Create the purchase and the invoice. The original payment path."""
+    user = callback.from_user
+    try:
+        if provider is PaymentProvider.STARS:
+            await shop.checkout.start_stars_checkout(
+                user_id=user.id,
+                product=product,
+                use_bonus=use_bonus,
+            )
             await callback.answer()
         else:
             checkout = await shop.checkout.start_crypto_checkout(
                 user_id=user.id,
                 product=product,
+                use_bonus=use_bonus,
             )
             await callback.answer()
             if callback.bot is not None:
@@ -75,6 +205,10 @@ async def handle_pay_pressed(
                 )
     except LockBusyError:
         await callback.answer(PAYMENT_IN_PROGRESS, show_alert=False)
+    except InsufficientBonusBalanceError:
+        # The balance moved between the question and the answer. Refusing is
+        # safer than silently charging a price the buyer never agreed to.
+        await callback.answer(BONUS_BALANCE_CHANGED, show_alert=True)
     except DuplicatePurchaseError:
         # Already paid for: no new invoice, just hand the link over again.
         await callback.answer(ALREADY_PURCHASED, show_alert=True)
@@ -85,6 +219,10 @@ async def handle_pay_pressed(
                 await shop.checkout.redeliver(owned.id)
     except ProviderNotSupportedError:
         await callback.answer(CARD_UNAVAILABLE, show_alert=True)
+    except ConflictError:
+        # The price moved while the provider invoice was being created; the
+        # orphaned invoice expires unpaid and the buyer simply retries.
+        await callback.answer(PAYMENT_UNAVAILABLE, show_alert=True)
     except PaymentGatewayError:
         await callback.answer(PAYMENT_UNAVAILABLE, show_alert=True)
 
@@ -164,6 +302,7 @@ def build_router() -> Router:
     """A fresh router; aiogram allows one parent dispatcher per router instance."""
     router = Router(name="payments")
     router.callback_query(PayCallback.filter())(handle_pay_pressed)
+    router.callback_query(BonusChoiceCallback.filter())(handle_bonus_choice)
     router.pre_checkout_query()(handle_pre_checkout)
     router.message(F.successful_payment)(handle_successful_payment)
     router.message(F.refunded_payment)(handle_refunded_payment)

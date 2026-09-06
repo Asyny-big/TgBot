@@ -22,6 +22,7 @@ from app.core.config import (
     LogFormat,
     PostgresSettings,
     RedisSettings,
+    ReferralSettings,
     SecuritySettings,
     Settings,
     TelegramSettings,
@@ -45,6 +46,7 @@ _PLACEHOLDER = Settings(
     cryptobot=CryptoBotSettings(api_token=SecretStr("1:schema")),
     bot=BotSettings(),
     delivery=DeliverySettings(),
+    referral=ReferralSettings(),
     security=SecuritySettings(
         jwt_secret=SecretStr("s" * 48),
         admin_username="schema",

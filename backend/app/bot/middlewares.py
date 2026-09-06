@@ -16,8 +16,10 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from app.domain.locks import LockManager
+    from app.services.bonuses import BonusService
     from app.services.checkout import CheckoutService
     from app.services.purchases import PurchaseService
+    from app.services.referrals import ReferralService
 
 logger = get_logger(__name__)
 
@@ -28,9 +30,17 @@ _THROTTLE_KEY_TEMPLATE: Final = "throttle:{user_id}"
 class BotServices:
     """The services a handler is allowed to use."""
 
-    def __init__(self, purchases: PurchaseService, checkout: CheckoutService) -> None:
+    def __init__(
+        self,
+        purchases: PurchaseService,
+        checkout: CheckoutService,
+        referrals: ReferralService,
+        bonuses: BonusService,
+    ) -> None:
         self.purchases = purchases
         self.checkout = checkout
+        self.referrals = referrals
+        self.bonuses = bonuses
 
 
 class ServicesMiddleware(BaseMiddleware):

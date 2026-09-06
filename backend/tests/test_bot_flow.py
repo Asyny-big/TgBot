@@ -35,6 +35,7 @@ from pydantic import SecretStr
 from app.bot.factory import create_checkout, create_dispatcher
 from app.bot.texts import (
     ALREADY_PURCHASED,
+    BONUS_SECTION_BUTTON,
     CARD_NOT_FOUND,
     CARD_UNAVAILABLE,
     CRYPTO_INVOICE_CREATED,
@@ -45,6 +46,8 @@ from app.bot.texts import (
     PRE_CHECKOUT_ALREADY_OWNED,
     PRE_CHECKOUT_UNKNOWN,
     REFUND_NOTICE,
+    bonus_section,
+    referral_welcome,
 )
 from app.bot.webhooks import register_cryptobot_webhook
 from app.bot.workers import HousekeepingWorker, ReconciliationWorker
@@ -59,19 +62,23 @@ from app.core.config import (
     TelegramSettings,
 )
 from app.core.container import Container
-from app.core.exceptions import PaymentGatewayError
-from app.domain.commands import ProductDraft
+from app.core.exceptions import InvalidSlugError, PaymentGatewayError
+from app.domain.commands import ProductDraft, UserDraft
 from app.domain.enums import PaymentProvider, PurchaseStatus
 from app.infrastructure.cache.rate_limit import RedisRateLimiter
 from app.infrastructure.payments.cryptobot import SIGNATURE_HEADER, CryptoBotClient
 from app.infrastructure.telegram.gateways import TelegramDeliveryGateway
 from tests.bot_harness import (
     RecordingBot,
+    bonus_button_update,
+    bonus_choice_update,
+    bonus_command_update,
     make_user,
     pay_button_update,
     pre_checkout_update,
     refunded_payment_update,
     start_update,
+    successful_payment_update,
 )
 from tests.settings_factory import build_settings
 
@@ -79,6 +86,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
     from aiogram import Dispatcher
+    from aiogram.types import User as TelegramUser
     from redis.asyncio import Redis
 
     from app.domain.entities import Product
@@ -244,8 +252,10 @@ def _container(
     """A container using the live infrastructure and the fake payment provider."""
     from app.infrastructure.db.uow import SqlAlchemyUnitOfWorkFactory  # noqa: PLC0415
     from app.services.auth import AuthService  # noqa: PLC0415
+    from app.services.bonuses import BonusService  # noqa: PLC0415
     from app.services.products import ProductService  # noqa: PLC0415
     from app.services.purchases import PurchaseService  # noqa: PLC0415
+    from app.services.referrals import ReferralService  # noqa: PLC0415
     from app.services.stats import StatsService  # noqa: PLC0415
     from tests.fakes import FakeRevocationStore  # noqa: PLC0415
 
@@ -257,6 +267,11 @@ def _container(
             transport=httpx.MockTransport(crypto_pay.handler),
         ),
     )
+    bonuses = BonusService(
+        uow_factory=uow_factory,
+        locks=locks,
+        settings=settings.referral,
+    )
     return Container(
         settings=settings,
         uow_factory=uow_factory,
@@ -264,7 +279,13 @@ def _container(
         rate_limiter=RedisRateLimiter(redis),
         crypto_payments=crypto_client,
         products=ProductService(uow_factory=uow_factory, telegram=settings.telegram),
-        purchases=PurchaseService(uow_factory=uow_factory, locks=locks),
+        purchases=PurchaseService(uow_factory=uow_factory, locks=locks, pricing=bonuses),
+        referrals=ReferralService(
+            uow_factory=uow_factory,
+            telegram=settings.telegram,
+            settings=settings.referral,
+        ),
+        bonuses=bonuses,
         stats=StatsService(uow_factory=uow_factory),
         auth=AuthService(settings.security, FakeRevocationStore()),
     )
@@ -395,7 +416,10 @@ async def test_stars_purchase_end_to_end(harness: BotHarness) -> None:
     assert settled is not None
     assert settled.status is PurchaseStatus.DELIVERED
     assert settled.telegram_charge_id == "charge-1"
-    assert DELIVERY_URL in harness.bot.last_text()
+    # The delivery is followed by a one-line referral invitation, so assert the
+    # link was handed over rather than that it was the very last message. This
+    # is the same style the repeat-delivery assertions in this file already use.
+    assert [text for text in harness.bot.texts() if DELIVERY_URL in text]
 
     overview = await harness.container.stats.overview()
     assert overview.total.purchases_count == 1
@@ -519,7 +543,10 @@ async def test_crypto_purchase_end_to_end_via_webhook(harness: BotHarness) -> No
     )
     assert purchase is not None
     assert purchase.status is PurchaseStatus.DELIVERED
-    assert DELIVERY_URL in harness.bot.last_text()
+    # The delivery is followed by a one-line referral invitation, so assert the
+    # link was handed over rather than that it was the very last message. This
+    # is the same style the repeat-delivery assertions in this file already use.
+    assert [text for text in harness.bot.texts() if DELIVERY_URL in text]
 
 
 async def test_a_webhook_with_a_bad_signature_is_rejected(harness: BotHarness) -> None:
@@ -593,7 +620,10 @@ async def test_a_lost_webhook_is_recovered_by_reconciliation(harness: BotHarness
     )
     assert purchase is not None
     assert purchase.status is PurchaseStatus.DELIVERED
-    assert DELIVERY_URL in harness.bot.last_text()
+    # The delivery is followed by a one-line referral invitation, so assert the
+    # link was handed over rather than that it was the very last message. This
+    # is the same style the repeat-delivery assertions in this file already use.
+    assert [text for text in harness.bot.texts() if DELIVERY_URL in text]
 
     # A second sweep must not deliver again.
     assert await worker.run_once() == 0
@@ -1213,3 +1243,305 @@ async def test_a_rotated_link_is_what_a_re_delivery_sends(harness: BotHarness) -
     # No second charge for any of it.
     overview = await harness.container.stats.overview()
     assert overview.total.purchases_count == 1
+
+
+# --------------------------- Referral and bonuses --------------------------- #
+#
+# The bot's side of the feature: an invitation link never opens a product, the
+# bonus section is reachable without one, and the shop's own deep-link path is
+# untouched by any of it.
+
+
+async def _referral_link_payload(harness: BotHarness, user: TelegramUser) -> str:
+    """Open the bonus section as this user and take their invitation payload."""
+    summary = await harness.container.referrals.summary(
+        UserDraft(telegram_id=user.id, username=user.username),
+    )
+    return f"ref_{summary.referral_code}"
+
+
+async def test_an_invitation_link_does_not_open_a_product(harness: BotHarness) -> None:
+    """The core concept: a referral link records a relationship, nothing more.
+
+    No card, no price, no payment button — and no product list either.
+    """
+    inviter = make_user(telegram_id=5101, username="inviter")
+    invited = make_user(telegram_id=5102, username="invited")
+    payload = await _referral_link_payload(harness, inviter)
+
+    await harness.feed(start_update(payload, user=invited, update_id=90))
+
+    assert harness.bot.methods(SendInvoice) == []
+    assert harness.bot.last_text() == referral_welcome(
+        discount_percent=harness.settings.referral.discount_percent,
+        preview_available=False,
+    )
+    referral = await harness.container.referrals.referral_of(invited.id)
+    assert referral is not None
+    assert referral.referrer_user_id == inviter.id
+
+
+async def test_an_invitation_offers_the_preview_directory_only(
+    harness: BotHarness,
+) -> None:
+    """One configured URL, and no channel list anywhere in the bot."""
+    inviter = make_user(telegram_id=5103, username="inviter3")
+    invited = make_user(telegram_id=5104, username="invited4")
+    payload = await _referral_link_payload(harness, inviter)
+
+    await harness.feed(start_update(payload, user=invited, update_id=91))
+
+    sent = harness.bot.methods(SendMessage)[-1]
+    buttons = [
+        button
+        for row in (sent.reply_markup.inline_keyboard if sent.reply_markup else [])
+        for button in row
+    ]
+    # No preview URL is configured in the test settings, so the button is absent
+    # rather than broken — exactly the documented fallback.
+    assert [button.url for button in buttons if button.url] == []
+    assert [button.text for button in buttons] == [BONUS_SECTION_BUTTON]
+
+
+async def test_an_unknown_referral_code_falls_through_to_the_product_lookup(
+    harness: BotHarness,
+) -> None:
+    """A slug that happens to start with "ref_" must keep working.
+
+    This is why an unresolvable code is not an error: the payload continues down
+    the ordinary path, and a legacy product stays reachable. The row is written
+    through the repository rather than the service, because that is the real
+    situation being covered — a slug that predates the reservation rule.
+    """
+    async with harness.container.uow_factory() as uow:
+        product = await uow.products.create(
+            ProductDraft(
+                slug="ref_legacy",
+                title="Legacy item",
+                description="Predates the referral feature",
+                delivery_url=DELIVERY_URL,
+                price_stars=STARS_PRICE,
+            )
+        )
+    user = make_user(telegram_id=5105, username="legacy")
+
+    await harness.feed(start_update("ref_legacy", user=user, update_id=92))
+
+    assert product.title in harness.bot.last_text()
+
+
+async def test_a_product_can_no_longer_be_created_in_the_referral_namespace(
+    harness: BotHarness,
+) -> None:
+    """New slugs may not collide with an invitation payload."""
+    with pytest.raises(InvalidSlugError):
+        await _product(harness, slug="ref_newthing")
+
+
+async def test_the_bonus_section_is_reachable_without_a_product_link(
+    harness: BotHarness,
+) -> None:
+    """``/bonus`` works for somebody who has never bought anything.
+
+    Anyone may invite, so the link must not be gated behind a purchase.
+    """
+    user = make_user(telegram_id=5106, username="curious")
+
+    await harness.feed(bonus_command_update(user=user, update_id=93))
+
+    summary = await harness.container.referrals.summary(
+        UserDraft(telegram_id=user.id, username=user.username),
+    )
+    assert summary.balance == 0
+    assert harness.bot.last_text() == bonus_section(
+        balance=0,
+        invited_count=0,
+        referral_purchase_count=0,
+        referral_link=harness.container.referrals.link_for(summary.referral_code),
+        reward_percent=harness.settings.referral.reward_percent,
+    )
+
+
+async def test_the_bonus_section_never_calls_a_balance_telegram_stars(
+    harness: BotHarness,
+) -> None:
+    """Bonuses are an internal balance, and the wording must not promise Stars."""
+    user = make_user(telegram_id=5107, username="wording")
+
+    await harness.feed(bonus_command_update(user=user, update_id=94))
+
+    assert "Telegram Stars" not in harness.bot.last_text()
+
+
+async def test_the_bonus_button_opens_the_section(harness: BotHarness) -> None:
+    user = make_user(telegram_id=5108, username="presser")
+
+    await harness.feed(bonus_button_update(user=user, update_id=95))
+
+    assert "?start=ref_" in harness.bot.last_text()
+
+
+async def test_a_bare_start_still_refuses_to_be_a_catalogue(harness: BotHarness) -> None:
+    """The no-deep-link answer is unchanged; only a bonus button is offered."""
+    user = make_user(telegram_id=5109, username="wanderer")
+
+    await harness.feed(start_update(None, user=user, update_id=96))
+
+    sent = harness.bot.methods(SendMessage)[-1]
+    assert sent.text == NO_DEEP_LINK
+    buttons = [
+        button
+        for row in (sent.reply_markup.inline_keyboard if sent.reply_markup else [])
+        for button in row
+    ]
+    assert len(buttons) == 1
+
+
+async def test_an_invited_buyer_pays_the_discounted_price_through_the_bot(
+    harness: BotHarness,
+) -> None:
+    """The whole invited-buyer journey, driven through real updates."""
+    inviter = make_user(telegram_id=5110, username="inviter10")
+    invited = make_user(telegram_id=5111, username="invited11")
+    payload = await _referral_link_payload(harness, inviter)
+    await harness.feed(start_update(payload, user=invited, update_id=97))
+
+    product = await _product(harness, price_stars=1000, price_usdt=None)
+    await harness.feed(start_update(product.slug, user=invited, update_id=98))
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=invited,
+            update_id=99,
+        )
+    )
+
+    invoice = harness.bot.methods(SendInvoice)[-1]
+    assert invoice.prices[0].amount == 900
+
+
+async def test_a_buyer_with_bonuses_is_asked_before_an_invoice_exists(
+    harness: BotHarness,
+) -> None:
+    """The question comes first, and pressing ⭐ alone bills nothing.
+
+    The invariant the shop already had — an invoice exists only because a button
+    was pressed — is preserved: the bonus prompt is a message, not an invoice.
+    """
+    inviter = make_user(telegram_id=5112, username="inviter12")
+    invited = make_user(telegram_id=5113, username="invited13")
+    payload = await _referral_link_payload(harness, inviter)
+    await harness.feed(start_update(payload, user=invited, update_id=100))
+
+    # The invited buyer buys once, which credits the inviter.
+    earner = await _product(harness, price_stars=1000, price_usdt=None)
+    await harness.feed(start_update(earner.slug, user=invited, update_id=101))
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=earner.id,
+            user=invited,
+            update_id=102,
+        )
+    )
+    payload_id = harness.bot.methods(SendInvoice)[-1].payload
+    await harness.feed(
+        successful_payment_update(
+            payload=payload_id,
+            amount=900,
+            charge_id="charge-referral-1",
+            user=invited,
+            update_id=103,
+        )
+    )
+    assert await harness.container.bonuses.balance_of(inviter.id) == 135
+
+    # Now the inviter buys, and is asked about their balance first.
+    product = await _product(harness, price_stars=1000, price_usdt=None)
+    await harness.feed(start_update(product.slug, user=inviter, update_id=104))
+    invoices_before = len(harness.bot.methods(SendInvoice))
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=inviter,
+            update_id=105,
+        )
+    )
+
+    assert len(harness.bot.methods(SendInvoice)) == invoices_before
+    prompt = harness.bot.last_text()
+    assert "135" in prompt
+    assert "865" in prompt
+
+    # Answering "use them" issues an invoice for the reduced amount.
+    await harness.feed(
+        bonus_choice_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            use_bonus=True,
+            user=inviter,
+            update_id=106,
+        )
+    )
+    assert harness.bot.methods(SendInvoice)[-1].prices[0].amount == 865
+
+
+async def test_declining_bonuses_bills_the_full_price(harness: BotHarness) -> None:
+    inviter = make_user(telegram_id=5114, username="inviter14")
+    invited = make_user(telegram_id=5115, username="invited15")
+    payload = await _referral_link_payload(harness, inviter)
+    await harness.feed(start_update(payload, user=invited, update_id=110))
+    earner = await _product(harness, price_stars=1000, price_usdt=None)
+    await harness.feed(start_update(earner.slug, user=invited, update_id=111))
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=earner.id,
+            user=invited,
+            update_id=112,
+        )
+    )
+    await harness.feed(
+        successful_payment_update(
+            payload=harness.bot.methods(SendInvoice)[-1].payload,
+            amount=900,
+            charge_id="charge-referral-2",
+            user=invited,
+            update_id=113,
+        )
+    )
+
+    product = await _product(harness, price_stars=1000, price_usdt=None)
+    await harness.feed(start_update(product.slug, user=inviter, update_id=114))
+    await harness.feed(
+        bonus_choice_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            use_bonus=False,
+            user=inviter,
+            update_id=115,
+        )
+    )
+
+    assert harness.bot.methods(SendInvoice)[-1].prices[0].amount == 1000
+    assert await harness.container.bonuses.balance_of(inviter.id) == 135
+
+
+async def test_a_buyer_without_bonuses_is_never_asked(harness: BotHarness) -> None:
+    """No balance, no extra question: the original two-tap flow is preserved."""
+    user = make_user(telegram_id=5116, username="plain")
+    product = await _product(harness, price_stars=1000, price_usdt=None)
+    await harness.feed(start_update(product.slug, user=user, update_id=120))
+
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=user,
+            update_id=121,
+        )
+    )
+
+    assert harness.bot.methods(SendInvoice)[-1].prices[0].amount == 1000

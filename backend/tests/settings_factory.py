@@ -5,6 +5,7 @@ Lives outside ``conftest`` so harnesses can import it without a circular import.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 from pydantic import SecretStr
@@ -18,6 +19,7 @@ from app.core.config import (
     LogFormat,
     PostgresSettings,
     RedisSettings,
+    ReferralSettings,
     SecuritySettings,
     Settings,
     TelegramSettings,
@@ -55,6 +57,16 @@ def build_settings(**overrides: Any) -> Settings:
         ),
         "bot": BotSettings(throttle_seconds=0.0),
         "delivery": DeliverySettings(max_attempts=2, initial_backoff_seconds=0.01),
+        # The referral programme is on by default in tests so the feature is
+        # actually exercised; the tests that assert the shop is unchanged
+        # override this group with enabled=False.
+        "referral": ReferralSettings(
+            enabled=True,
+            discount_percent=10,
+            reward_percent=15,
+            max_bonus_payment_percent=50,
+            bonus_units_per_usdt=Decimal(500),
+        ),
         "security": SecuritySettings(
             jwt_secret=SecretStr("a" * 48),
             admin_username="administrator",

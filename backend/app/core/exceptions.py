@@ -78,6 +78,13 @@ class UserNotFoundError(NotFoundError):
     message = "User not found"
 
 
+class ReferralNotFoundError(NotFoundError):
+    """No referral relationship matches the given identifier."""
+
+    code = "referral_not_found"
+    message = "Referral not found"
+
+
 class SlugAlreadyExistsError(ConflictError):
     """Another product already occupies this deep-link slug."""
 
@@ -132,6 +139,34 @@ class InvalidDeliveryUrlError(ValidationError):
 
     code = "invalid_delivery_url"
     message = "Delivery URL must start with http:// or https://"
+
+
+class SelfReferralError(ValidationError):
+    """A user opened their own invitation link."""
+
+    code = "self_referral"
+    message = "You cannot invite yourself"
+
+
+class ReferralAlreadySetError(ConflictError):
+    """This buyer already has a referrer, and it is never overwritten."""
+
+    code = "referral_already_set"
+    message = "This user already has a referrer"
+
+
+class ReferralNotEligibleError(ConflictError):
+    """The buyer already has purchase history, so no relationship is created."""
+
+    code = "referral_not_eligible"
+    message = "Only a buyer without purchase history can be invited"
+
+
+class InsufficientBonusBalanceError(ConflictError):
+    """The bonus balance moved between showing the price and pressing pay."""
+
+    code = "insufficient_bonus_balance"
+    message = "Not enough bonuses to cover this purchase"
 
 
 class DeliveryError(AppError):

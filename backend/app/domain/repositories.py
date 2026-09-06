@@ -10,13 +10,35 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from datetime import datetime
     from uuid import UUID
 
-    from app.domain.commands import ProductDraft, ProductUpdate, PurchaseDraft, UserDraft
-    from app.domain.entities import Product, Purchase, PurchaseRecord, User
-    from app.domain.enums import PaymentProvider
-    from app.domain.pagination import Page, PageRequest, ProductFilters, PurchaseFilters
+    from app.domain.commands import (
+        BonusTransactionDraft,
+        ProductDraft,
+        ProductUpdate,
+        PurchaseDraft,
+        ReferralDraft,
+        UserDraft,
+    )
+    from app.domain.entities import (
+        BonusTransaction,
+        Product,
+        Purchase,
+        PurchaseRecord,
+        Referral,
+        ReferralRecord,
+        User,
+    )
+    from app.domain.enums import BonusTransactionType, PaymentProvider, PurchaseStatus
+    from app.domain.pagination import (
+        Page,
+        PageRequest,
+        ProductFilters,
+        PurchaseFilters,
+        ReferralFilters,
+    )
     from app.domain.stats import RevenueSummary, StatsPeriod, TopProduct
 
 
@@ -81,6 +103,23 @@ class UserRepository(Protocol):
         """Total number of known users."""
         ...
 
+    async def get_by_referral_code(self, code: str) -> User | None:
+        """Return the owner of this referral code, or ``None``."""
+        ...
+
+    async def ensure_referral_code(self, telegram_id: int, *, candidate: str) -> str:
+        """Return the user's permanent referral code, assigning one if needed.
+
+        A user has exactly one code for life. ``candidate`` is used only when
+        the user has none yet; a collision with an existing code is reported so
+        the caller can offer another candidate.
+
+        Raises:
+            UserNotFoundError: the user was never recorded.
+            ConflictError: ``candidate`` is already taken by somebody else.
+        """
+        ...
+
 
 class PurchaseRepository(Protocol):
     """Persistence contract for purchases."""
@@ -112,6 +151,19 @@ class PurchaseRepository(Protocol):
 
     async def find_access_granting(self, user_id: int, product_id: UUID) -> Purchase | None:
         """Return the paid or delivered purchase of this product by this user."""
+        ...
+
+    async def has_history(
+        self,
+        user_id: int,
+        *,
+        statuses: Sequence[PurchaseStatus],
+    ) -> bool:
+        """Whether this buyer has ever reached one of these statuses.
+
+        Used to decide referral eligibility: a buyer with purchase history is
+        not a new buyer, however new their Telegram account looks.
+        """
         ...
 
     async def mark_paid(
@@ -169,6 +221,134 @@ class PurchaseRepository(Protocol):
 
     async def search(self, filters: PurchaseFilters, page: PageRequest) -> Page[PurchaseRecord]:
         """Search purchases by user, product, invoice or transaction id."""
+        ...
+
+
+class ReferralRepository(Protocol):
+    """Persistence contract for referral relationships."""
+
+    async def create(self, draft: ReferralDraft) -> Referral:
+        """Attribute a buyer to their inviter, permanently.
+
+        Raises:
+            SelfReferralError: both sides are the same account.
+            ReferralAlreadySetError: this buyer already has a referrer.
+        """
+        ...
+
+    async def get(self, referral_id: UUID) -> Referral | None:
+        """Return the relationship with this id, or ``None``."""
+        ...
+
+    async def get_by_referred(self, referred_user_id: int) -> Referral | None:
+        """Return the relationship that owns this buyer, or ``None``."""
+        ...
+
+    async def mark_discount_used(
+        self,
+        referral_id: UUID,
+        *,
+        purchase_id: UUID,
+        used_at: datetime | None = None,
+    ) -> Referral:
+        """Burn the one-time first-purchase discount. Idempotent.
+
+        A second call with the *same* purchase is a replayed notification and
+        changes nothing. A call with a different purchase is rejected: the
+        discount exists once.
+
+        Raises:
+            ConflictError: the discount was already used by another purchase.
+        """
+        ...
+
+    async def count_invited(self, referrer_user_id: int) -> int:
+        """How many buyers this user has invited."""
+        ...
+
+    async def count_referral_purchases(self, referrer_user_id: int) -> int:
+        """How many settled purchases this user's invitees have made."""
+        ...
+
+    async def search(self, filters: ReferralFilters, page: PageRequest) -> Page[ReferralRecord]:
+        """Referral relationships with both parties, for the admin panel."""
+        ...
+
+
+class BonusRepository(Protocol):
+    """Persistence contract for the bonus ledger and the cached balance.
+
+    The ledger is the truth and the ``users.bonus_balance`` column is a cache of
+    its sum. Both are written in the same transaction, so they cannot drift, and
+    ``recompute_balance`` can always prove it.
+    """
+
+    async def balance(self, user_id: int) -> int:
+        """Cached balance of this user, or ``0`` for an unknown user."""
+        ...
+
+    async def lock_balance(self, user_id: int) -> int:
+        """Read the balance with ``SELECT ... FOR UPDATE``.
+
+        Serialises concurrent spending inside the database, so two checkouts
+        cannot both be told the same units are available.
+
+        Raises:
+            UserNotFoundError: the user was never recorded.
+        """
+        ...
+
+    async def add(self, draft: BonusTransactionDraft) -> BonusTransaction | None:
+        """Append an entry and move the cached balance in the same statement.
+
+        Returns ``None`` when an entry of this type already exists for this
+        purchase: that is a replayed notification, not an error.
+
+        Raises:
+            InsufficientBonusBalanceError: the entry would drive the balance
+                below zero.
+        """
+        ...
+
+    async def find_for_purchase(
+        self,
+        purchase_id: UUID,
+        *types: BonusTransactionType,
+    ) -> BonusTransaction | None:
+        """Return the first matching entry recorded against this purchase."""
+        ...
+
+    async def settle_hold(self, purchase_id: UUID) -> BonusTransaction | None:
+        """Turn a reservation into a spend. Idempotent, and never re-debits."""
+        ...
+
+    async def release_hold(self, purchase_id: UUID) -> BonusTransaction | None:
+        """Give back a reservation for an invoice that was never paid.
+
+        Idempotent: a reservation is released at most once, which the unique
+        constraint on ``(purchase_id, type)`` guarantees.
+        """
+        ...
+
+    async def recompute_balance(self, user_id: int) -> int:
+        """Sum the ledger from scratch, ignoring the cache."""
+        ...
+
+    async def reward_total(self, user_id: int) -> int:
+        """Total bonus units this user has ever earned from referrals."""
+        ...
+
+    async def purchases_awaiting_reward(self, *, limit: int = 100) -> tuple[UUID, ...]:
+        """Delivered purchases by invited buyers that carry no reward yet.
+
+        The safety net behind reward accrual: a process that died between
+        marking a sale delivered and crediting the inviter is repaired here,
+        the same way a lost payment webhook is repaired by reconciliation.
+        """
+        ...
+
+    async def stale_holds(self, *, limit: int = 100) -> tuple[UUID, ...]:
+        """Purchases holding bonus units that can no longer be paid for."""
         ...
 
 

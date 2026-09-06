@@ -21,6 +21,7 @@ from app.infrastructure.db.mappers import to_purchase, to_record
 from app.infrastructure.db.models import ProductModel, PurchaseModel, UserModel
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from uuid import UUID
 
     from sqlalchemy import ColumnElement, Select
@@ -47,6 +48,9 @@ class SqlAlchemyPurchaseRepository:
             provider=draft.provider,
             status=draft.status or PurchaseStatus.PENDING,
             amount=draft.amount,
+            base_amount=draft.base_amount,
+            discount_amount=draft.discount_amount,
+            bonus_amount=draft.bonus_amount,
             currency=draft.currency,
             external_id=draft.external_id,
         )
@@ -92,6 +96,27 @@ class SqlAlchemyPurchaseRepository:
         )
         model = (await self._session.execute(statement)).scalar_one_or_none()
         return to_purchase(model) if model is not None else None
+
+    async def has_history(
+        self,
+        user_id: int,
+        *,
+        statuses: Sequence[PurchaseStatus],
+    ) -> bool:
+        """Whether this buyer has ever reached one of these statuses.
+
+        ``EXISTS`` rather than a count: the answer is a boolean and the query
+        can stop at the first matching row.
+        """
+        statement = select(
+            select(PurchaseModel.id)
+            .where(
+                PurchaseModel.user_id == user_id,
+                PurchaseModel.status.in_(statuses),
+            )
+            .exists()
+        )
+        return bool(await self._session.scalar(statement))
 
     async def mark_paid(
         self,

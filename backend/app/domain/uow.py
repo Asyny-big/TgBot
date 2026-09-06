@@ -14,8 +14,10 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
     from app.domain.repositories import (
+        BonusRepository,
         ProductRepository,
         PurchaseRepository,
+        ReferralRepository,
         StatsRepository,
         UserRepository,
     )
@@ -37,6 +39,16 @@ class UnitOfWork(Protocol):
     @property
     def purchases(self) -> PurchaseRepository:
         """Purchase repository bound to this transaction."""
+        ...
+
+    @property
+    def referrals(self) -> ReferralRepository:
+        """Referral repository bound to this transaction."""
+        ...
+
+    @property
+    def bonuses(self) -> BonusRepository:
+        """Bonus ledger repository bound to this transaction."""
         ...
 
     @property

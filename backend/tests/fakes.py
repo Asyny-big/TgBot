@@ -18,24 +18,54 @@ from uuid import UUID, uuid4
 from app.core.exceptions import (
     ConflictError,
     DuplicatePurchaseError,
+    InsufficientBonusBalanceError,
     LockBusyError,
     ProductNotFoundError,
     PurchaseNotFoundError,
+    ReferralAlreadySetError,
+    ReferralNotFoundError,
+    SelfReferralError,
     SlugAlreadyExistsError,
+    UserNotFoundError,
 )
-from app.domain.entities import Product, Purchase, PurchaseRecord, User
-from app.domain.enums import ACCESS_GRANTING_STATUSES, PurchaseStatus
+from app.domain.commands import BonusTransactionDraft
+from app.domain.entities import (
+    BonusTransaction,
+    Product,
+    Purchase,
+    PurchaseRecord,
+    Referral,
+    ReferralRecord,
+    User,
+)
+from app.domain.enums import (
+    ACCESS_GRANTING_STATUSES,
+    BONUS_HOLD_TYPES,
+    BonusTransactionType,
+    PurchaseStatus,
+)
 from app.domain.pagination import Page
 from app.domain.patch import is_set
 from app.domain.stats import RevenueSummary, StatsPeriod
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Sequence
 
-    from app.domain.commands import ProductDraft, ProductUpdate, PurchaseDraft, UserDraft
+    from app.domain.commands import (
+        ProductDraft,
+        ProductUpdate,
+        PurchaseDraft,
+        ReferralDraft,
+        UserDraft,
+    )
     from app.domain.delivery import DeliveryMessage
     from app.domain.enums import PaymentProvider
-    from app.domain.pagination import PageRequest, ProductFilters, PurchaseFilters
+    from app.domain.pagination import (
+        PageRequest,
+        ProductFilters,
+        PurchaseFilters,
+        ReferralFilters,
+    )
     from app.domain.stats import TopProduct
 
 NOW = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
@@ -135,12 +165,50 @@ class FakeUserRepository:
             language_code=draft.language_code,
             created_at=existing.created_at if existing else moment,
             last_seen_at=moment,
+            # An upsert refreshes the Telegram profile snapshot only: it must
+            # never clobber the referral code or the balance, exactly like the
+            # ON CONFLICT clause in the real repository.
+            referral_code=existing.referral_code if existing else None,
+            bonus_balance=existing.bonus_balance if existing else 0,
         )
         self.items[user.telegram_id] = user
         return user
 
     async def count(self) -> int:
         return len(self.items)
+
+    async def get_by_referral_code(self, code: str) -> User | None:
+        for user in self.items.values():
+            if user.referral_code == code:
+                return user
+        return None
+
+    async def ensure_referral_code(self, telegram_id: int, *, candidate: str) -> str:
+        user = self.items.get(telegram_id)
+        if user is None:
+            raise UserNotFoundError(telegram_id=telegram_id)
+        if user.referral_code:
+            return user.referral_code
+        if await self.get_by_referral_code(candidate) is not None:
+            message = "This referral code is already taken"
+            raise ConflictError(message, candidate=candidate)
+        self.items[telegram_id] = replace(user, referral_code=candidate)
+        return candidate
+
+    def move_balance(self, telegram_id: int, delta: int) -> int:
+        """Apply a delta to the cached balance, refusing to go negative.
+
+        Mirrors ``ck_users_bonus_balance_non_negative``: the fake enforces the
+        constraint so a service test cannot pass by ignoring it.
+        """
+        user = self.items.get(telegram_id)
+        if user is None:
+            raise UserNotFoundError(telegram_id=telegram_id)
+        updated = user.bonus_balance + delta
+        if updated < 0:
+            raise InsufficientBonusBalanceError(user_id=telegram_id, requested=abs(delta))
+        self.items[telegram_id] = replace(user, bonus_balance=updated)
+        return updated
 
 
 class FakePurchaseRepository:
@@ -161,6 +229,9 @@ class FakePurchaseRepository:
             provider=draft.provider,
             status=draft.status or PurchaseStatus.PENDING,
             amount=draft.amount,
+            base_amount=draft.base_amount,
+            discount_amount=draft.discount_amount,
+            bonus_amount=draft.bonus_amount,
             currency=draft.currency,
             external_id=draft.external_id,
             telegram_charge_id=None,
@@ -200,6 +271,17 @@ class FakePurchaseRepository:
             ):
                 return purchase
         return None
+
+    async def has_history(
+        self,
+        user_id: int,
+        *,
+        statuses: Sequence[PurchaseStatus],
+    ) -> bool:
+        return any(
+            purchase.user_id == user_id and purchase.status in statuses
+            for purchase in self.items.values()
+        )
 
     async def mark_paid(
         self,
@@ -287,6 +369,203 @@ class FakePurchaseRepository:
         return purchase
 
 
+class FakeReferralRepository:
+    """Referrals in a dictionary, with the permanence rules enforced.
+
+    The two constraints the database carries are reproduced here on purpose: a
+    buyer has at most one referrer for life, and a discount is burned by at most
+    one purchase. A service test that violated either would fail here too.
+    """
+
+    def __init__(self) -> None:
+        self.items: dict[UUID, Referral] = {}
+        self.purchases: FakePurchaseRepository | None = None
+
+    async def create(self, draft: ReferralDraft) -> Referral:
+        if draft.referrer_user_id == draft.referred_user_id:
+            raise SelfReferralError(user_id=draft.referred_user_id)
+        if await self.get_by_referred(draft.referred_user_id) is not None:
+            raise ReferralAlreadySetError(referred_user_id=draft.referred_user_id)
+        referral = Referral(
+            id=uuid4(),
+            referrer_user_id=draft.referrer_user_id,
+            referred_user_id=draft.referred_user_id,
+            created_at=NOW,
+        )
+        self.items[referral.id] = referral
+        return referral
+
+    async def get(self, referral_id: UUID) -> Referral | None:
+        return self.items.get(referral_id)
+
+    async def get_by_referred(self, referred_user_id: int) -> Referral | None:
+        for referral in self.items.values():
+            if referral.referred_user_id == referred_user_id:
+                return referral
+        return None
+
+    async def mark_discount_used(
+        self,
+        referral_id: UUID,
+        *,
+        purchase_id: UUID,
+        used_at: datetime | None = None,
+    ) -> Referral:
+        referral = self.items.get(referral_id)
+        if referral is None:
+            raise ReferralNotFoundError(referral_id=str(referral_id))
+        if referral.discount_purchase_id is not None:
+            if referral.discount_purchase_id == purchase_id:
+                return referral
+            message = "The referral discount was already used by another purchase"
+            raise ConflictError(message, referral_id=str(referral_id))
+        updated = replace(
+            referral,
+            discount_purchase_id=purchase_id,
+            discount_used_at=used_at or NOW,
+        )
+        self.items[referral_id] = updated
+        return updated
+
+    async def count_invited(self, referrer_user_id: int) -> int:
+        return sum(
+            1 for referral in self.items.values() if referral.referrer_user_id == referrer_user_id
+        )
+
+    async def count_referral_purchases(self, referrer_user_id: int) -> int:
+        if self.purchases is None:
+            return 0
+        invited = {
+            referral.referred_user_id
+            for referral in self.items.values()
+            if referral.referrer_user_id == referrer_user_id
+        }
+        return sum(
+            1
+            for purchase in self.purchases.items.values()
+            if purchase.user_id in invited and purchase.status in ACCESS_GRANTING_STATUSES
+        )
+
+    async def search(self, filters: ReferralFilters, page: PageRequest) -> Page[ReferralRecord]:
+        del filters
+        return Page(items=(), total=0, limit=page.limit, offset=page.offset)
+
+
+class FakeBonusRepository:
+    """A bonus ledger in a list, with the idempotency rules enforced.
+
+    ``(purchase_id, type)`` is unique here as well, which is what lets a test
+    replay a payment notification five times and assert one reward.
+    """
+
+    def __init__(self, users: FakeUserRepository) -> None:
+        self.entries: list[BonusTransaction] = []
+        self.users = users
+        self.purchases: FakePurchaseRepository | None = None
+
+    async def balance(self, user_id: int) -> int:
+        user = self.users.items.get(user_id)
+        return user.bonus_balance if user is not None else 0
+
+    async def lock_balance(self, user_id: int) -> int:
+        if user_id not in self.users.items:
+            raise UserNotFoundError(telegram_id=user_id)
+        return await self.balance(user_id)
+
+    async def add(self, draft: BonusTransactionDraft) -> BonusTransaction | None:
+        if draft.purchase_id is not None and any(
+            entry.purchase_id == draft.purchase_id and entry.type is draft.type
+            for entry in self.entries
+        ):
+            return None
+        self.users.move_balance(draft.user_id, draft.amount)
+        entry = BonusTransaction(
+            id=uuid4(),
+            user_id=draft.user_id,
+            amount=draft.amount,
+            type=draft.type,
+            referral_id=draft.referral_id,
+            purchase_id=draft.purchase_id,
+            rate_units_per_usdt=draft.rate_units_per_usdt,
+            created_at=NOW,
+        )
+        self.entries.append(entry)
+        return entry
+
+    async def find_for_purchase(
+        self,
+        purchase_id: UUID,
+        *types: BonusTransactionType,
+    ) -> BonusTransaction | None:
+        for entry in self.entries:
+            if entry.purchase_id == purchase_id and (not types or entry.type in types):
+                return entry
+        return None
+
+    async def settle_hold(self, purchase_id: UUID) -> BonusTransaction | None:
+        for index, entry in enumerate(self.entries):
+            if entry.purchase_id == purchase_id and entry.type in BONUS_HOLD_TYPES:
+                if entry.type is BonusTransactionType.BONUS_SPENT:
+                    return entry
+                settled = replace(entry, type=BonusTransactionType.BONUS_SPENT)
+                self.entries[index] = settled
+                return settled
+        return None
+
+    async def release_hold(self, purchase_id: UUID) -> BonusTransaction | None:
+        held = await self.find_for_purchase(purchase_id, *BONUS_HOLD_TYPES)
+        if held is None or held.type is BonusTransactionType.BONUS_SPENT:
+            return None
+        return await self.add(
+            BonusTransactionDraft(
+                user_id=held.user_id,
+                amount=abs(held.amount),
+                type=BonusTransactionType.BONUS_RESERVE_RELEASED,
+                purchase_id=purchase_id,
+                referral_id=held.referral_id,
+            )
+        )
+
+    async def recompute_balance(self, user_id: int) -> int:
+        return sum(entry.amount for entry in self.entries if entry.user_id == user_id)
+
+    async def reward_total(self, user_id: int) -> int:
+        return sum(
+            entry.amount
+            for entry in self.entries
+            if entry.user_id == user_id and entry.type is BonusTransactionType.REFERRAL_REWARD
+        )
+
+    async def purchases_awaiting_reward(self, *, limit: int = 100) -> tuple[UUID, ...]:
+        if self.purchases is None:
+            return ()
+        rewarded = {
+            entry.purchase_id
+            for entry in self.entries
+            if entry.type is BonusTransactionType.REFERRAL_REWARD
+        }
+        pending = [
+            purchase.id
+            for purchase in self.purchases.items.values()
+            if purchase.status is PurchaseStatus.DELIVERED and purchase.id not in rewarded
+        ]
+        return tuple(pending[:limit])
+
+    async def stale_holds(self, *, limit: int = 100) -> tuple[UUID, ...]:
+        if self.purchases is None:
+            return ()
+        dead = (PurchaseStatus.EXPIRED, PurchaseStatus.REFUNDED)
+        held = [
+            entry.purchase_id
+            for entry in self.entries
+            if entry.type is BonusTransactionType.BONUS_RESERVED
+            and entry.purchase_id is not None
+            and (purchase := self.purchases.items.get(entry.purchase_id)) is not None
+            and purchase.status in dead
+        ]
+        return tuple(item for item in held[:limit] if item is not None)
+
+
 @dataclass
 class FakeStatsRepository:
     """Returns canned aggregates so the stats service can be tested alone."""
@@ -333,8 +612,12 @@ class FakeUnitOfWork:
         self._products = FakeProductRepository()
         self._users = FakeUserRepository()
         self._purchases = FakePurchaseRepository()
+        self._referrals = FakeReferralRepository()
+        self._bonuses = FakeBonusRepository(self._users)
         self._stats = FakeStatsRepository()
         self._products.purchases = self._purchases
+        self._referrals.purchases = self._purchases
+        self._bonuses.purchases = self._purchases
         self.commits = 0
         self.rollbacks = 0
 
@@ -349,6 +632,14 @@ class FakeUnitOfWork:
     @property
     def purchases(self) -> FakePurchaseRepository:
         return self._purchases
+
+    @property
+    def referrals(self) -> FakeReferralRepository:
+        return self._referrals
+
+    @property
+    def bonuses(self) -> FakeBonusRepository:
+        return self._bonuses
 
     @property
     def stats(self) -> FakeStatsRepository:

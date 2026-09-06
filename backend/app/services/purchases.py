@@ -14,6 +14,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from app.core.exceptions import (
+    ConflictError,
     DuplicatePurchaseError,
     ProductInactiveError,
     ProductNotFoundError,
@@ -22,6 +23,7 @@ from app.core.exceptions import (
     UserNotFoundError,
 )
 from app.core.logging import get_logger
+from app.domain.bonuses import plain_quote
 from app.domain.cards import PaymentOption, ProductCard
 from app.domain.commands import PurchaseDraft
 from app.domain.locks import payment_lock_key, purchase_lock_key
@@ -29,11 +31,12 @@ from app.domain.locks import payment_lock_key, purchase_lock_key
 if TYPE_CHECKING:
     from uuid import UUID
 
+    from app.domain.bonuses import CheckoutPricing, PriceQuote
     from app.domain.commands import UserDraft
     from app.domain.entities import Product, Purchase, User
-    from app.domain.enums import PaymentProvider
+    from app.domain.enums import Currency, PaymentProvider
     from app.domain.locks import LockManager
-    from app.domain.uow import UnitOfWorkFactory
+    from app.domain.uow import UnitOfWork, UnitOfWorkFactory
 
 logger = get_logger(__name__)
 
@@ -48,6 +51,14 @@ class PurchaseService:
     uow_factory: UnitOfWorkFactory
     locks: LockManager
     invoice_ttl: timedelta = timedelta(minutes=30)
+    pricing: CheckoutPricing | None = None
+    """Optional referral/bonus pricing.
+
+    ``None`` is the shop as it was before the referral feature existed: the
+    list price is charged, nothing is held and nothing is recorded. Everything
+    below therefore has exactly one extra branch, and the default path through
+    it is byte for byte the old behaviour.
+    """
 
     async def open_card(self, profile: UserDraft, slug: str) -> ProductCard:
         """Resolve a deep link into a card, remembering the visitor.
@@ -86,18 +97,30 @@ class PurchaseService:
         async with self.uow_factory() as uow:
             return await uow.users.upsert(profile)
 
-    async def start_purchase(
+    async def start_purchase(  # noqa: PLR0913 — one checkout, this many facts
         self,
         *,
         user_id: int,
         product_id: UUID,
         provider: PaymentProvider,
         external_id: str,
+        use_bonus: bool = False,
+        expected_amount: Decimal | None = None,
     ) -> Purchase:
         """Record a pending purchase for an invoice that was just created.
 
         The distributed lock (bounded by its TTL) keeps two simultaneous
         ``/start`` presses from producing two invoices for the same product.
+
+        Pricing runs inside this transaction, not before it. That is the whole
+        reason the referral feature cannot mis-bill anybody: the discount, the
+        bonus reservation and the purchase row are one commit.
+
+        ``expected_amount`` is for the rails that must create the provider
+        invoice *first* (CryptoBot assigns the id the webhook is matched on). If
+        the price computed here disagrees with the amount already invoiced, the
+        purchase is refused rather than recorded at a different number, and the
+        orphaned invoice simply expires unpaid.
 
         Raises:
             LockBusyError: another attempt for this buyer and product is running.
@@ -106,6 +129,9 @@ class PurchaseService:
             DuplicatePurchaseError: the buyer already owns the product.
             UserNotFoundError: the buyer was never recorded (the card must be
                 opened first, which is what stores the Telegram profile).
+            InsufficientBonusBalanceError: bonuses were requested but the
+                balance moved since the price was shown.
+            ConflictError: the price moved away from ``expected_amount``.
         """
         async with (
             self.locks.lock(purchase_lock_key(user_id, product_id)),
@@ -129,16 +155,31 @@ class PurchaseService:
                     user_id=user_id,
                 )
 
+            base_amount = Decimal(self._price(product, provider))
+            priced = await self._price_checkout(
+                uow,
+                user_id=user_id,
+                base_amount=base_amount,
+                currency=provider.currency,
+                use_bonus=use_bonus,
+            )
+            self._require_expected_amount(priced, expected_amount, product_id=product_id)
+
             purchase = await uow.purchases.create(
                 PurchaseDraft(
                     user_id=user_id,
                     product_id=product_id,
                     provider=provider,
-                    amount=Decimal(self._price(product, provider)),
+                    amount=priced.charged_amount,
+                    base_amount=priced.base_amount,
+                    discount_amount=priced.discount_amount,
+                    bonus_amount=priced.bonus_amount,
                     currency=provider.currency,
                     external_id=external_id,
                 )
             )
+            if self.pricing is not None:
+                await self.pricing.hold_for(uow, purchase, priced)
 
         logger.info(
             "purchase_started",
@@ -147,8 +188,81 @@ class PurchaseService:
             product_id=str(product_id),
             provider=provider.value,
             external_id=external_id,
+            amount=str(purchase.amount),
+            discount=str(purchase.discount_amount),
+            bonus=str(purchase.bonus_amount),
         )
         return purchase
+
+    async def _price_checkout(
+        self,
+        uow: UnitOfWork,
+        *,
+        user_id: int,
+        base_amount: Decimal,
+        currency: Currency,
+        use_bonus: bool,
+    ) -> PriceQuote:
+        """The list price, or whatever the referral feature makes of it."""
+        if self.pricing is None:
+            return plain_quote(base_amount, currency)
+        return await self.pricing.resolve(
+            uow,
+            user_id=user_id,
+            base_amount=base_amount,
+            currency=currency,
+            use_bonus=use_bonus,
+        )
+
+    @staticmethod
+    def _require_expected_amount(
+        priced: PriceQuote,
+        expected_amount: Decimal | None,
+        *,
+        product_id: UUID,
+    ) -> None:
+        """Refuse to record a purchase at a price other than the invoiced one."""
+        if expected_amount is None or priced.charged_amount == expected_amount:
+            return
+        logger.error(
+            "checkout_price_moved",
+            product_id=str(product_id),
+            invoiced=str(expected_amount),
+            recomputed=str(priced.charged_amount),
+        )
+        message = "The price changed while the invoice was being created"
+        raise ConflictError(
+            message,
+            product_id=str(product_id),
+            invoiced=str(expected_amount),
+            recomputed=str(priced.charged_amount),
+        )
+
+    async def quote_amount(
+        self,
+        *,
+        user_id: int,
+        product: Product,
+        provider: PaymentProvider,
+        use_bonus: bool = False,
+    ) -> Decimal:
+        """What this checkout would be billed, without recording anything.
+
+        Read only, and therefore only a *prediction*: the rails that must create
+        the provider invoice before the purchase use it to bill the provider,
+        and ``start_purchase`` then re-derives the same number under a lock and
+        refuses the sale if they disagree.
+        """
+        base_amount = Decimal(self._price(product, provider))
+        if self.pricing is None:
+            return base_amount
+        priced = await self.pricing.preview(
+            user_id=user_id,
+            base_amount=base_amount,
+            currency=provider.currency,
+            use_bonus=use_bonus,
+        )
+        return priced.charged_amount
 
     async def confirm_payment(
         self,
@@ -183,6 +297,11 @@ class PurchaseService:
                 paid_at=paid_at,
                 telegram_charge_id=telegram_charge_id,
             )
+            if self.pricing is not None:
+                # Same transaction as the payment: the discount is burned and
+                # the bonus reservation becomes a spend exactly once, however
+                # many times the provider replays this notification.
+                await self.pricing.on_payment_confirmed(uow, confirmed)
 
         logger.info(
             "payment_confirmed",

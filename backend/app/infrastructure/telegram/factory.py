@@ -17,6 +17,7 @@ from app.infrastructure.telegram.gateways import (
     TelegramDeliveryGateway,
     TelegramStarsInvoiceSender,
 )
+from app.infrastructure.telegram.notifications import TelegramBonusNotifier
 
 if TYPE_CHECKING:
     from app.core.config import Settings
@@ -38,3 +39,8 @@ def create_delivery_gateway(bot: Bot) -> TelegramDeliveryGateway:
 def create_stars_sender(bot: Bot) -> TelegramStarsInvoiceSender:
     """The Stars invoice sender for this process."""
     return TelegramStarsInvoiceSender(bot)
+
+
+def create_bonus_notifier(bot: Bot) -> TelegramBonusNotifier:
+    """The courtesy-message transport for the bonus feature."""
+    return TelegramBonusNotifier(bot)

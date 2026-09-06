@@ -28,8 +28,10 @@ from app.domain.commands import ProductDraft, PurchaseDraft, UserDraft
 from app.domain.enums import PaymentProvider, PurchaseStatus
 from app.infrastructure.cache.locks import RedisLockManager
 from app.infrastructure.db.engine import Database
+from app.infrastructure.db.repositories.bonuses import SqlAlchemyBonusRepository
 from app.infrastructure.db.repositories.products import SqlAlchemyProductRepository
 from app.infrastructure.db.repositories.purchases import SqlAlchemyPurchaseRepository
+from app.infrastructure.db.repositories.referrals import SqlAlchemyReferralRepository
 from app.infrastructure.db.repositories.stats import SqlAlchemyStatsRepository
 from app.infrastructure.db.repositories.users import SqlAlchemyUserRepository
 from app.infrastructure.db.uow import SqlAlchemyUnitOfWorkFactory
@@ -43,7 +45,15 @@ DSN_ENV_VAR = "TEST_DATABASE_DSN"
 REDIS_DSN_ENV_VAR = "TEST_REDIS_DSN"
 ALEMBIC_DSN_ENV_VAR = "ALEMBIC_DATABASE_DSN"
 
-TABLES_TO_TRUNCATE = ("purchases", "users", "products")
+# Order matters only for readability: TRUNCATE ... CASCADE handles the foreign
+# keys. The referral tables come first because they reference both of the others.
+TABLES_TO_TRUNCATE = (
+    "bonus_transactions",
+    "referrals",
+    "purchases",
+    "users",
+    "products",
+)
 
 
 def alembic_config(dsn: str) -> Config:
@@ -139,6 +149,18 @@ async def _truncate(database: Database) -> None:
     statement = text(f"TRUNCATE {', '.join(TABLES_TO_TRUNCATE)} RESTART IDENTITY CASCADE")
     async with database.engine.begin() as connection:
         await connection.execute(statement)
+
+
+@pytest.fixture
+def referrals(db_session: AsyncSession) -> SqlAlchemyReferralRepository:
+    """Referral repository bound to the rolled-back test transaction."""
+    return SqlAlchemyReferralRepository(db_session)
+
+
+@pytest.fixture
+def bonuses(db_session: AsyncSession) -> SqlAlchemyBonusRepository:
+    """Bonus ledger repository bound to the rolled-back test transaction."""
+    return SqlAlchemyBonusRepository(db_session)
 
 
 @pytest.fixture

@@ -15,8 +15,10 @@ from typing import TYPE_CHECKING
 from aiogram import F, Router
 from aiogram.filters import CommandObject, CommandStart
 
-from app.bot.keyboards import payment_keyboard
+from app.bot.handlers.bonuses import show_invitation
+from app.bot.keyboards import bonus_hint_keyboard, payment_keyboard
 from app.bot.middlewares import BotServices
+from app.bot.profile import profile_of
 from app.bot.texts import (
     ALREADY_PURCHASED,
     CARD_NOT_FOUND,
@@ -25,9 +27,14 @@ from app.bot.texts import (
     NO_DEEP_LINK,
     product_card,
 )
-from app.core.exceptions import LockBusyError, ProductInactiveError, ProductNotFoundError
+from app.core.exceptions import (
+    AppError,
+    LockBusyError,
+    ProductInactiveError,
+    ProductNotFoundError,
+)
 from app.core.logging import get_logger
-from app.domain.commands import UserDraft
+from app.domain.referrals import ReferralOutcome, is_referral_payload
 from app.domain.slug import is_valid_slug
 
 if TYPE_CHECKING:
@@ -36,18 +43,47 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _profile(user: User) -> UserDraft:
-    return UserDraft(
-        telegram_id=user.id,
-        username=user.username,
-        first_name=user.first_name,
-        language_code=user.language_code,
-    )
+async def handle_start_without_deep_link(message: Message, shop: BotServices) -> None:
+    """No payload: there is nothing to show, and nothing is recorded.
+
+    Still not a catalogue. The bonus section is offered as a button because it
+    is the one screen a user may legitimately want without a product link — it
+    lists no products and no channels.
+    """
+    keyboard = bonus_hint_keyboard() if shop.referrals.enabled else None
+    await message.answer(NO_DEEP_LINK, reply_markup=keyboard)
 
 
-async def handle_start_without_deep_link(message: Message) -> None:
-    """No payload: there is nothing to show, and nothing is recorded."""
-    await message.answer(NO_DEEP_LINK)
+async def _handle_invitation(
+    message: Message,
+    shop: BotServices,
+    payload: str,
+    user: User,
+) -> bool:
+    """Try to accept an invitation. ``False`` means "not an invitation after all".
+
+    A referral failure must never break the shop, so anything unexpected is
+    logged and treated as "not an invitation": the payload then goes down the
+    ordinary product path, which is the behaviour the bot had before.
+    """
+    try:
+        registration = await shop.referrals.register(
+            payload=payload,
+            profile=profile_of(user),
+        )
+    except AppError as error:
+        logger.error(  # noqa: TRY400 — referral is optional, the shop is not
+            "referral_registration_failed",
+            telegram_id=user.id,
+            error=str(error),
+        )
+        return False
+
+    if registration.outcome is ReferralOutcome.UNKNOWN_CODE:
+        return False
+
+    await show_invitation(message, shop, registration)
+    return True
 
 
 async def handle_deep_link(message: Message, command: CommandObject, shop: BotServices) -> None:
@@ -57,12 +93,19 @@ async def handle_deep_link(message: Message, command: CommandObject, shop: BotSe
     if user is None:  # pragma: no cover — private chats always carry a sender
         return
 
+    if is_referral_payload(payload) and await _handle_invitation(message, shop, payload, user):
+        # An invitation records a relationship and shows where to look next; it
+        # never opens a product. When the code is unknown we fall through to the
+        # ordinary lookup below, so a product whose slug happens to start with
+        # "ref_" keeps working exactly as it did.
+        return
+
     if not is_valid_slug(payload):
         await message.answer(CARD_NOT_FOUND)
         return
 
     try:
-        card = await shop.purchases.open_card(_profile(user), payload)
+        card = await shop.purchases.open_card(profile_of(user), payload)
     except ProductNotFoundError:
         await message.answer(CARD_NOT_FOUND)
         return

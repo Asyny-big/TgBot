@@ -132,6 +132,35 @@ expect_min_length POSTGRES_PASSWORD 16
 expect_present REDIS_PASSWORD
 expect_min_length REDIS_PASSWORD 16
 
+printf '\nReferral programme\n'
+referral_enabled="$(env_value REFERRAL_ENABLED)"
+if [[ "${referral_enabled}" == "false" ]]; then
+    pass "REFERRAL_ENABLED=false — the referral and bonus feature is switched off"
+else
+    pass "REFERRAL_ENABLED=${referral_enabled:-true} (default true)"
+    preview_url="$(env_value REFERRAL_PREVIEW_DIRECTORY_URL)"
+    if [[ -z "${preview_url}" ]]; then
+        flag "REFERRAL_PREVIEW_DIRECTORY_URL is empty — invited users will not see a preview button"
+    elif [[ "${preview_url}" != https://* ]]; then
+        fail "REFERRAL_PREVIEW_DIRECTORY_URL must be an absolute https:// URL"
+    else
+        pass "REFERRAL_PREVIEW_DIRECTORY_URL is set"
+    fi
+    # A 100% discount or bonus share would produce a zero invoice, which the
+    # purchases table rejects. The application refuses to start on these, so
+    # catching them here saves a failed deploy.
+    for key in REFERRAL_DISCOUNT_PERCENT REFERRAL_MAX_BONUS_PAYMENT_PERCENT; do
+        value="$(env_value "${key}")"
+        if [[ -n "${value}" ]] && [[ "${value}" =~ ^[0-9]+$ ]] && (( value >= 100 )); then
+            fail "${key}=${value} would leave nothing to charge; it must be below 100"
+        fi
+    done
+    reward="$(env_value REFERRAL_REWARD_PERCENT)"
+    if [[ -n "${reward}" ]] && [[ "${reward}" =~ ^[0-9]+$ ]] && (( reward > 100 )); then
+        fail "REFERRAL_REWARD_PERCENT=${reward} is above 100"
+    fi
+fi
+
 printf '\nSecurity\n'
 expect_min_length SECURITY_JWT_SECRET 32
 expect_not_placeholder SECURITY_JWT_SECRET
