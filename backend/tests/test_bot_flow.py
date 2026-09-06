@@ -33,6 +33,7 @@ from aiohttp import web
 from pydantic import SecretStr
 
 from app.bot.factory import create_checkout, create_dispatcher
+from app.bot.profile import profile_of
 from app.bot.texts import (
     ALREADY_PURCHASED,
     BONUS_SECTION_BUTTON,
@@ -1419,6 +1420,98 @@ async def test_an_invited_buyer_pays_the_discounted_price_through_the_bot(
 
     invoice = harness.bot.methods(SendInvoice)[-1]
     assert invoice.prices[0].amount == 900
+
+
+async def test_an_invited_buyer_can_actually_pay_the_discounted_price_with_crypto(
+    harness: BotHarness,
+) -> None:
+    """The regression that reached production, driven the way a buyer hits it.
+
+    The card offered 4.50, but the CryptoBot invoice was raised at the list
+    5.00, and ``start_purchase`` then refused to record a purchase at a price
+    other than the invoiced one. The buyer saw only "не удалось создать счёт на
+    оплату" and could not buy anything at all with crypto while their discount
+    was unspent.
+
+    The Stars rail was never affected, which is why this went unnoticed: the
+    Stars invoice is created *after* the purchase, so there are never two
+    numbers to disagree.
+    """
+    inviter = make_user(telegram_id=5130, username="inviter30")
+    invited = make_user(telegram_id=5131, username="invited31")
+    payload = await _referral_link_payload(harness, inviter)
+    await harness.feed(start_update(payload, user=invited, update_id=140))
+
+    product = await _product(harness, price_stars=500, price_usdt=Decimal("5.00"))
+    await harness.feed(start_update(product.slug, user=invited, update_id=141))
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.CRYPTO,
+            product_id=product.id,
+            user=invited,
+            update_id=142,
+        )
+    )
+
+    # The buyer is not told to come back in a minute.
+    alerts = [answer.text for answer in harness.bot.methods(AnswerCallbackQuery)]
+    assert PAYMENT_UNAVAILABLE not in alerts
+    assert CRYPTO_INVOICE_CREATED in harness.bot.texts()
+
+    # The provider was billed the discounted amount, once.
+    assert len(harness.crypto.created) == 1
+    assert harness.crypto.created[0]["amount"] == "4.50"
+
+    # And the purchase was recorded at exactly that, with the breakdown intact.
+    pending = await harness.container.purchases.list_pending(PaymentProvider.CRYPTO)
+    assert len(pending) == 1
+    assert pending[0].amount == Decimal("4.50")
+    assert pending[0].base_amount == Decimal("5.00")
+    assert pending[0].discount_amount == Decimal("0.50")
+
+
+async def test_an_invited_buyer_sees_the_same_crypto_price_on_the_card_and_the_invoice(
+    harness: BotHarness,
+) -> None:
+    """Shown, invoiced, recorded — three numbers that must be one number.
+
+    Each is computed by a different collaborator (the card by
+    ``PurchaseService``, the invoice by ``preview``, the row by ``resolve``),
+    so this is the seam where a discount can go missing.
+    """
+    inviter = make_user(telegram_id=5132, username="inviter32")
+    invited = make_user(telegram_id=5133, username="invited33")
+    payload = await _referral_link_payload(harness, inviter)
+    await harness.feed(start_update(payload, user=invited, update_id=150))
+
+    product = await _product(harness, price_stars=500, price_usdt=Decimal("12.35"))
+    card = await harness.container.purchases.open_card(
+        profile_of(invited),
+        product.slug,
+    )
+    shown = next(
+        option.discounted_amount
+        for option in card.options
+        if option.provider is PaymentProvider.CRYPTO
+    )
+
+    await harness.feed(start_update(product.slug, user=invited, update_id=151))
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.CRYPTO,
+            product_id=product.id,
+            user=invited,
+            update_id=152,
+        )
+    )
+
+    pending = await harness.container.purchases.list_pending(PaymentProvider.CRYPTO)
+    invoiced = Decimal(harness.crypto.created[0]["amount"])
+
+    # 12.35 less 10%, floored to a chargeable cent.
+    assert shown == Decimal("11.12")
+    assert invoiced == shown
+    assert pending[0].amount == shown
 
 
 async def test_a_buyer_with_bonuses_is_asked_before_an_invoice_exists(

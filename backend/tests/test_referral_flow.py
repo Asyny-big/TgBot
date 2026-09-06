@@ -811,12 +811,25 @@ async def _buy_with_crypto(
     buyer: UserDraft,
     product: Product,
 ) -> Purchase:
-    """One complete USDT sale: invoice, payment, delivery."""
+    """One complete USDT sale: invoice, payment, delivery.
+
+    ``expected_amount`` is passed because production passes it: the CryptoBot
+    invoice is raised before the purchase row exists, so the price is quoted
+    first and the purchase refuses to be recorded at any other number. A helper
+    that omitted it would quietly skip that check — which is exactly how a
+    discounted crypto checkout once shipped broken.
+    """
+    expected = await shop.purchases.quote_amount(
+        user_id=buyer.telegram_id,
+        product=product,
+        provider=PaymentProvider.CRYPTO,
+    )
     purchase = await shop.purchases.start_purchase(
         user_id=buyer.telegram_id,
         product_id=product.id,
         provider=PaymentProvider.CRYPTO,
         external_id=uuid4().hex,
+        expected_amount=expected,
     )
     await shop.purchases.confirm_payment(
         provider=PaymentProvider.CRYPTO,

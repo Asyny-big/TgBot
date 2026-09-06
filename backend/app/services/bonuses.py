@@ -245,14 +245,17 @@ class BonusService:
         """Price both branches so the bot can ask "spend your bonuses?".
 
         Read only: nothing is held until a button is actually pressed.
+
+        ``quote_without_bonus`` is the price the buyer is actually charged when
+        they do not spend bonuses, **including the referral discount**, on
+        either rail. That matters beyond the prompt: ``preview`` reads this
+        quote, and ``preview`` is what bills the CryptoBot invoice before the
+        purchase row exists. Leaving the discount out here once made every
+        discounted crypto checkout fail — the invoice was raised at the list
+        price and ``start_purchase`` then refused the mismatch.
         """
-        without = plain_quote(base_amount, currency)
         if not self.settings.enabled:
-            return BonusOffer(quote_without_bonus=without)
-        if currency is not Currency.XTR:
-            # Bonuses are a Stars discount. A crypto card is never asked about
-            # them, so the ordinary two-tap flow is preserved there.
-            return BonusOffer(quote_without_bonus=without)
+            return BonusOffer(quote_without_bonus=plain_quote(base_amount, currency))
 
         async with self.uow_factory() as uow:
             referral = await uow.referrals.get_by_referred(user_id)
@@ -267,10 +270,14 @@ class BonusService:
             referral_id=referral_id,
             discount_eligible=discount_eligible,
         )
-        if discount_eligible or balance <= 0:
-            # On a first referral purchase bonuses are not offered at all: the
-            # discount applies instead, which keeps the economics simple and
-            # removes a family of edge cases.
+        # Only the *bonus* branch is Stars-only, because a bonus is a Star. The
+        # referral discount is a percentage of the price and applies to crypto
+        # too, so it stays in ``without`` above on every rail.
+        #
+        # On a first referral purchase bonuses are not offered at all: the
+        # discount applies instead, which keeps the economics simple and
+        # removes a family of edge cases.
+        if currency is not Currency.XTR or discount_eligible or balance <= 0:
             return BonusOffer(balance=balance, quote_without_bonus=without)
 
         with_bonus = quote(
