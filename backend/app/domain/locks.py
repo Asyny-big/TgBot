@@ -57,3 +57,18 @@ def delivery_lock_key(purchase_id: UUID) -> str:
 def payment_lock_key(provider: PaymentProvider, external_id: str) -> str:
     """Serialise payment confirmations for one provider invoice."""
     return f"payment:{provider.value}:{external_id}"
+
+
+def bonus_lock_key(user_id: int) -> str:
+    """Serialise every movement of one buyer's bonus balance.
+
+    Two checkouts started at the same moment must not be able to promise the
+    same units twice. This lock is the first of three defences; the row lock on
+    the balance and the non-negative check constraint are the other two.
+    """
+    return f"bonus:{user_id}"
+
+
+def referral_reward_lock_key(purchase_id: UUID) -> str:
+    """Serialise reward accrual for one settled purchase."""
+    return f"referral-reward:{purchase_id}"

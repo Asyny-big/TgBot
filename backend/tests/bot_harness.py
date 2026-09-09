@@ -34,6 +34,8 @@ from aiogram.types import (
     User,
 )
 
+from app.bot.keyboards import BonusCallback, BonusChoiceCallback
+
 if TYPE_CHECKING:
     from uuid import UUID
 
@@ -154,6 +156,52 @@ def pay_button_update(
             chat_instance="instance-1",
             message=make_message(text="card", user=sender),
             data=f"pay:{provider.value}:{product_id}",
+        ),
+    )
+
+
+def bonus_command_update(*, user: User | None = None, update_id: int = 19) -> Update:
+    """``/bonus``: the one always-available command the bot publishes."""
+    return Update(update_id=update_id, message=make_message(text="/bonus", user=user))
+
+
+def bonus_button_update(*, user: User | None = None, update_id: int = 20) -> Update:
+    """A press on the "My bonuses" button."""
+    sender = user or make_user()
+    return Update(
+        update_id=update_id,
+        callback_query=CallbackQuery(
+            id="callback-bonus",
+            from_user=sender,
+            chat_instance="instance-1",
+            message=make_message(text="anything", user=sender),
+            data=BonusCallback().pack(),
+        ),
+    )
+
+
+def bonus_choice_update(
+    *,
+    provider: PaymentProvider,
+    product_id: UUID,
+    use_bonus: bool,
+    user: User | None = None,
+    update_id: int = 21,
+) -> Update:
+    """The answer to "spend your bonuses on this purchase?"."""
+    sender = user or make_user()
+    return Update(
+        update_id=update_id,
+        callback_query=CallbackQuery(
+            id="callback-bonus-choice",
+            from_user=sender,
+            chat_instance="instance-1",
+            message=make_message(text="prompt", user=sender),
+            data=BonusChoiceCallback(
+                provider=provider,
+                product_id=product_id,
+                use_bonus=use_bonus,
+            ).pack(),
         ),
     )
 

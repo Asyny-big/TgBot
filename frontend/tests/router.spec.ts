@@ -16,6 +16,7 @@ vi.mock("@/views/DashboardView.vue", () => ({ default: { template: "<div>dash</d
 vi.mock("@/views/LoginView.vue", () => ({ default: { template: "<div>login</div>" } }));
 vi.mock("@/views/ProductsView.vue", () => ({ default: { template: "<div>products</div>" } }));
 vi.mock("@/views/PurchasesView.vue", () => ({ default: { template: "<div>purchases</div>" } }));
+vi.mock("@/views/ReferralsView.vue", () => ({ default: { template: "<div>referrals</div>" } }));
 
 const { router: appRouter } = await import("@/router");
 
@@ -27,6 +28,21 @@ beforeEach(() => {
 });
 
 describe("router guard", () => {
+  it("guards the referral section like every other page", async () => {
+    await appRouter.push("/referrals").catch(() => undefined);
+
+    expect(appRouter.currentRoute.value.path).toBe("/login");
+    expect(appRouter.currentRoute.value.query.redirect).toBe("/referrals");
+  });
+
+  it("lets an administrator reach the referral section", async () => {
+    authState.isAuthenticated = true;
+
+    await appRouter.push("/referrals");
+
+    expect(appRouter.currentRoute.value.name).toBe("referrals");
+  });
+
   it("sends an unauthenticated visitor to the login screen and remembers the target", async () => {
     await appRouter.push("/products").catch(() => undefined);
 

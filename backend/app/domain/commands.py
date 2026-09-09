@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from app.core.exceptions import InvalidPriceError
 from app.domain.patch import UNSET, Maybe, is_set
 
 if TYPE_CHECKING:
-    from decimal import Decimal
     from uuid import UUID
 
-    from app.domain.enums import Currency, PaymentProvider, PurchaseStatus
+    from app.domain.enums import (
+        BonusTransactionType,
+        Currency,
+        PaymentProvider,
+        PurchaseStatus,
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -78,7 +83,12 @@ class UserDraft:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PurchaseDraft:
-    """A purchase in the ``pending`` state, created together with the invoice."""
+    """A purchase in the ``pending`` state, created together with the invoice.
+
+    ``amount`` is what the buyer is billed. The three optional fields record how
+    that number was reached, so a later price change cannot rewrite the history
+    of an old sale.
+    """
 
     user_id: int
     product_id: UUID
@@ -87,3 +97,30 @@ class PurchaseDraft:
     currency: Currency
     external_id: str
     status: PurchaseStatus | None = None
+    base_amount: Decimal | None = None
+    discount_amount: Decimal = Decimal(0)
+    bonus_amount: Decimal = Decimal(0)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ReferralDraft:
+    """A new, permanent attribution of one buyer to their inviter."""
+
+    referrer_user_id: int
+    referred_user_id: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BonusTransactionDraft:
+    """One entry to append to the bonus ledger.
+
+    ``purchase_id`` together with ``type`` is unique in the database, which is
+    what makes a replayed payment notification unable to credit a reward twice.
+    """
+
+    user_id: int
+    amount: int
+    type: BonusTransactionType
+    referral_id: UUID | None = None
+    purchase_id: UUID | None = None
+    stars_per_usdt: Decimal | None = None

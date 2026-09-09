@@ -79,6 +79,33 @@ def test_provider_currency_mapping() -> None:
     assert PaymentProvider.CRYPTO.currency is Currency.USDT
 
 
+def test_a_product_priced_in_both_currencies_declares_its_own_rate() -> None:
+    """This is the shop's USDT-to-Stars rate, and its only source.
+
+    Pricing an item at 700 ⭐ and 10 USDT *is* a statement that one USDT is
+    worth 70 Stars here — no external price feed is consulted, and no fixed
+    rate can go stale behind the shop's back.
+    """
+    product = _product(price_stars=700, price_usdt=Decimal("10.00"))
+    assert product.stars_per_usdt == Decimal(70)
+
+
+def test_a_product_priced_in_one_currency_declares_no_rate() -> None:
+    """One price is no equivalence, and ``None`` says so rather than guessing."""
+    assert _product(price_usdt=None).stars_per_usdt is None
+    assert _product(price_stars=None).stars_per_usdt is None
+
+
+def test_the_declared_rate_moves_with_the_prices() -> None:
+    """Repricing the product changes the rate for future sales only.
+
+    Old rewards are unaffected because the rate they used is stored on their
+    ledger entry rather than recomputed from the current prices.
+    """
+    assert _product(price_stars=700, price_usdt=Decimal("10.00")).stars_per_usdt == Decimal(70)
+    assert _product(price_stars=800, price_usdt=Decimal("10.00")).stars_per_usdt == Decimal(80)
+
+
 def test_product_draft_requires_at_least_one_price() -> None:
     with pytest.raises(InvalidPriceError):
         ProductDraft(

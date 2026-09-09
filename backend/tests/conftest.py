@@ -19,6 +19,7 @@ from app.core.config import (
     DeliverySettings,
     PostgresSettings,
     RedisSettings,
+    ReferralSettings,
     SecuritySettings,
     TelegramSettings,
 )
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
 # Database fixtures live in tests/db.py; re-exported here so pytest collects them.
 from tests.api_harness import admin_api, api  # noqa: F401  (fixture re-export)
 from tests.db import (  # noqa: F401  (fixture re-export)
+    bonuses,
     database_dsn,
     db_session,
     live_database,
@@ -45,6 +47,7 @@ from tests.db import (  # noqa: F401  (fixture re-export)
     products,
     purchases,
     redis_client,
+    referrals,
     stats,
     users,
 )
@@ -87,6 +90,7 @@ _SETTINGS_CLASSES = (
     RedisSettings,
     TelegramSettings,
     CryptoBotSettings,
+    ReferralSettings,
     SecuritySettings,
 )
 

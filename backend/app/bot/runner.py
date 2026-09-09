@@ -23,10 +23,13 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
 from app.bot.factory import create_checkout, create_dispatcher
+from app.bot.handlers.bonuses import BONUS_COMMAND
+from app.bot.texts import BONUS_SECTION_BUTTON
 from app.bot.webhooks import register_cryptobot_webhook, register_health_route
 from app.bot.workers import HousekeepingWorker, ReconciliationWorker
 from app.core.config import get_settings
@@ -71,6 +74,7 @@ def _start_workers(runtime: BotRuntime) -> list[asyncio.Task[None]]:
     housekeeping = HousekeepingWorker(
         purchases=runtime.container.purchases,
         settings=runtime.settings.bot,
+        bonuses=runtime.container.bonuses,
     )
     return [
         asyncio.create_task(reconciliation.run_forever(), name="reconciliation"),
@@ -186,6 +190,24 @@ async def run_webhook(runtime: BotRuntime, stop: asyncio.Event) -> None:
         await runner.cleanup()
 
 
+async def _publish_commands(runtime: BotRuntime) -> None:
+    """Put the bonus section in the client's Menu button.
+
+    The only always-available entry point the bot has, and deliberately the only
+    command: there is no catalogue to browse and no product list to command.
+    Failure is a cosmetic problem, so it is logged rather than raised.
+    """
+    if not runtime.settings.referral.enabled:
+        return
+    try:
+        await runtime.bot.set_my_commands(
+            [BotCommand(command=BONUS_COMMAND, description=BONUS_SECTION_BUTTON)],
+            scope=BotCommandScopeAllPrivateChats(),
+        )
+    except Exception as error:
+        logger.warning("bot_commands_not_published", error=str(error))
+
+
 async def main() -> None:
     """Build everything, run the selected mode, release everything."""
     settings = get_settings()
@@ -205,6 +227,7 @@ async def main() -> None:
 
     checks = await resources.check()
     logger.info("bot_dependencies_checked", **checks)
+    await _publish_commands(runtime)
 
     stop = asyncio.Event()
     _install_signal_handlers(stop)

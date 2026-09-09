@@ -13,7 +13,7 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Final, Literal, Self
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -28,6 +28,9 @@ _BOT_TOKEN_RE: Final = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{30,}$")
 MIN_WEBHOOK_SECRET_LENGTH: Final = 16
 MIN_JWT_SECRET_LENGTH: Final = 32
 MIN_ADMIN_PASSWORD_LENGTH: Final = 12
+
+MAX_PERCENT: Final = 100
+_PREVIEW_URL_SCHEMES: Final = frozenset({"http", "https"})
 
 CRYPTOBOT_MAINNET_API: Final = "https://pay.crypt.bot/api"
 CRYPTOBOT_TESTNET_API: Final = "https://testnet-pay.crypt.bot/api"
@@ -282,6 +285,87 @@ class DeliverySettings(BaseSettings):
         return self
 
 
+class ReferralSettings(BaseSettings):
+    """Referral programme and internal bonus balance.
+
+    Percentages and the bonus exchange rate are *configuration*, not business
+    data: they are read once on start-up and validated there, exactly like the
+    delivery retry policy. Changing them is a deploy, which is deliberate —
+    a mistyped reward percent must not be applicable through a web form while
+    money is moving.
+
+    ``enabled`` is a master switch. With it off the shop behaves exactly as it
+    did before the feature existed: no referral payload is recognised, no
+    discount is applied and no bonus is accrued or spent.
+
+    There is deliberately no exchange rate here. One bonus is one Telegram
+    Star, and a purchase settled in USDT is converted using the *product's own*
+    two prices at the moment of the sale — see ``Product.stars_per_usdt``. That
+    keeps the shop free of any external price feed, and of any fixed rate that
+    would silently go stale.
+    """
+
+    model_config = _settings_config("REFERRAL_")
+
+    enabled: bool = True
+    discount_percent: int = Field(default=10, ge=0, le=MAX_PERCENT)
+    """Discount on the invited buyer's first qualifying purchase."""
+
+    reward_percent: int = Field(default=15, ge=0, le=MAX_PERCENT)
+    """Share of every settled purchase credited to the inviter as bonuses."""
+
+    max_bonus_payment_percent: int = Field(default=50, ge=0, le=MAX_PERCENT)
+    """Largest share of a Stars price that bonuses may cover.
+
+    One bonus is one Telegram Star, so this is read directly off the price: a
+    1000 Star product accepts at most 500 bonuses at 50%.
+    """
+
+    preview_directory_url: str | None = None
+    """Single hop channel listing the current preview channels.
+
+    The bot stores no channel ids, no channel usernames and no list: it only
+    knows this one URL, so the catalogue of preview channels is managed outside
+    the bot and changing it never requires a redeploy. Empty hides the button.
+    """
+
+    @field_validator("preview_directory_url", mode="before")
+    @classmethod
+    def _blank_url_means_none(cls, value: object) -> object:
+        """Treat ``REFERRAL_PREVIEW_DIRECTORY_URL=`` in an env file as unset."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("preview_directory_url")
+    @classmethod
+    def _validate_preview_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        candidate = value.strip()
+        parsed = urlparse(candidate)
+        if parsed.scheme not in _PREVIEW_URL_SCHEMES or not parsed.netloc:
+            msg = "preview_directory_url must be an absolute http(s) URL"
+            raise ValueError(msg)
+        return candidate
+
+    @model_validator(mode="after")
+    def _keep_a_price_payable(self) -> Self:
+        """A purchase must always leave something to charge.
+
+        A 100% discount would produce a zero invoice, which the purchases table
+        rejects (``amount > 0``) — better to refuse the configuration on
+        start-up than to fail inside a checkout.
+        """
+        if self.discount_percent >= MAX_PERCENT:
+            msg = "discount_percent must leave something to charge (< 100)"
+            raise ValueError(msg)
+        if self.max_bonus_payment_percent >= MAX_PERCENT:
+            msg = "max_bonus_payment_percent must leave something to charge (< 100)"
+            raise ValueError(msg)
+        return self
+
+
 class SecuritySettings(BaseSettings):
     """Admin authentication and browser-facing security policy."""
 
@@ -340,6 +424,7 @@ class Settings(BaseModel):
     cryptobot: CryptoBotSettings
     bot: BotSettings
     delivery: DeliverySettings
+    referral: ReferralSettings
     security: SecuritySettings
 
 
@@ -359,5 +444,6 @@ def get_settings() -> Settings:
         cryptobot=_load(CryptoBotSettings),
         bot=_load(BotSettings),
         delivery=_load(DeliverySettings),
+        referral=_load(ReferralSettings),
         security=_load(SecuritySettings),
     )

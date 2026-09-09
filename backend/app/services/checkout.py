@@ -57,17 +57,28 @@ class CheckoutService:
     stars: StarsInvoiceSender
     crypto: CryptoInvoiceGateway
 
-    async def start_stars_checkout(self, *, user_id: int, product: Product) -> Purchase:
+    async def start_stars_checkout(
+        self,
+        *,
+        user_id: int,
+        product: Product,
+        use_bonus: bool = False,
+    ) -> Purchase:
         """Create a pending purchase and send the Stars invoice message.
 
         The purchase is recorded first: it is local and cheap, and its payload is
         what Telegram echoes back with the payment. If Telegram then refuses to
         send the invoice the purchase simply expires unpaid.
 
+        The invoice is issued for ``purchase.amount``, which is whatever pricing
+        decided inside that transaction — so a discount or a bonus spend can
+        never disagree with what the buyer is asked to pay.
+
         Raises:
             LockBusyError: the buyer is already checking this product out.
             DuplicatePurchaseError: the buyer already owns the product.
             ProductInactiveError, ProviderNotSupportedError: cannot be sold this way.
+            InsufficientBonusBalanceError: bonuses were requested but are gone.
             PaymentGatewayError: Telegram refused to send the invoice.
         """
         payload = uuid4().hex
@@ -76,6 +87,7 @@ class CheckoutService:
             product_id=product.id,
             provider=PaymentProvider.STARS,
             external_id=payload,
+            use_bonus=use_bonus,
         )
         await self.stars.send_invoice(
             InvoiceRequest(
@@ -96,30 +108,50 @@ class CheckoutService:
         )
         return purchase
 
-    async def start_crypto_checkout(self, *, user_id: int, product: Product) -> CryptoCheckout:
+    async def start_crypto_checkout(
+        self,
+        *,
+        user_id: int,
+        product: Product,
+        use_bonus: bool = False,
+    ) -> CryptoCheckout:
         """Create a CryptoBot invoice and the matching pending purchase.
 
         The provider assigns the invoice id that later webhooks are matched on,
         so the invoice must exist first. Ownership is checked before that call so
         a buyer who already owns the product never reaches the provider.
 
+        Because the invoice comes first, the price is computed twice: once to
+        bill the provider, then authoritatively inside the purchase transaction.
+        The second computation is handed the first one's number, and refuses the
+        purchase if they disagree. That is the safe direction: an unmatched
+        CryptoBot invoice expires unpaid, whereas a purchase recorded at a
+        different amount than the buyer was shown would be a real defect.
+
         Raises:
             LockBusyError: the buyer is already checking this product out.
             DuplicatePurchaseError: the buyer already owns the product.
             ProductInactiveError, ProviderNotSupportedError: cannot be sold this way.
+            InsufficientBonusBalanceError: bonuses were requested but are gone.
+            ConflictError: the price moved between the invoice and the purchase.
             PaymentGatewayError: Crypto Pay refused or is unreachable.
         """
         if await self.purchases.find_owned(user_id, product.id) is not None:
             raise DuplicatePurchaseError(product_id=str(product.id), user_id=user_id)
 
-        price = product.price_for(PaymentProvider.CRYPTO)
+        amount = await self.purchases.quote_amount(
+            user_id=user_id,
+            product=product,
+            provider=PaymentProvider.CRYPTO,
+            use_bonus=use_bonus,
+        )
         invoice = await self.crypto.create_invoice(
             InvoiceRequest(
                 user_id=user_id,
                 product_id=product.id,
                 title=product.title,
                 description=product.description,
-                amount=price if price is not None else 0,
+                amount=amount,
                 currency=PaymentProvider.CRYPTO.currency,
                 payload=uuid4().hex,
             )
@@ -129,6 +161,8 @@ class CheckoutService:
             product_id=product.id,
             provider=PaymentProvider.CRYPTO,
             external_id=invoice.external_id,
+            use_bonus=use_bonus,
+            expected_amount=amount,
         )
         logger.info(
             "crypto_checkout_started",
