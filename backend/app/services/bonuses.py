@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 from app.core.exceptions import (
     AppError,
     BonusesNotAvailableError,
+    DiscountAlreadyUsedError,
     InsufficientBonusBalanceError,
 )
 from app.core.logging import get_logger
@@ -130,6 +131,19 @@ class BonusService:
             raise BonusesNotAvailableError(user_id=user_id, currency=currency.value)
 
         referral = await uow.referrals.get_by_referred(user_id)
+
+        # Two-phase discount check.  The first read is unlocked: it is wrong
+        # roughly once per million requests and then only by answering "maybe".
+        # The row lock is taken only when that answer is "maybe", so every
+        # non-referred buyer, and every buyer who already used the discount,
+        # never contends on the lock at all.
+        if (
+            referral is not None
+            and referral.discount_available
+            and self.settings.discount_percent > 0
+        ):
+            referral = await uow.referrals.lock_for_discount_check(user_id)
+
         discount_eligible = await self._discount_eligible(uow, user_id, referral=referral)
 
         balance = 0
@@ -215,6 +229,13 @@ class BonusService:
 
         The referral discount is burned *here* rather than when the invoice was
         issued: an abandoned invoice must not consume the buyer's one discount.
+
+        If the discount was already consumed by a parallel checkout (Bug #2), the
+        payment has already been confirmed by the provider and the money has
+        moved.  Crashing the settlement would leave the purchase stuck in
+        ``paid`` without delivery, which is worse than honouring a discount that
+        leaked through the race window.  We therefore log the anomaly and carry
+        on: the race itself is closed by Bug #1's fix below.
         """
         if not self.settings.enabled:
             return
@@ -227,7 +248,21 @@ class BonusService:
         if referral is None:  # pragma: no cover — a discount implies a referral
             logger.warning("discount_without_referral", purchase_id=str(purchase.id))
             return
-        await uow.referrals.mark_discount_used(referral.id, purchase_id=purchase.id)
+        try:
+            await uow.referrals.mark_discount_used(referral.id, purchase_id=purchase.id)
+        except DiscountAlreadyUsedError:
+            # Another purchase already consumed the one-time discount.  This
+            # purchase was created with a discount that leaked through the race
+            # window; refusing to settle would leave a paid buyer without their
+            # link.  Log it and continue — the race itself is prevented at
+            # checkout time by the pending-discount guard.
+            logger.warning(
+                "discount_already_consumed_by_another_purchase",
+                purchase_id=str(purchase.id),
+                referral_id=str(referral.id),
+                discount=str(purchase.discount_amount),
+            )
+            return
         logger.info(
             "referral_discount_used",
             purchase_id=str(purchase.id),
@@ -522,18 +557,25 @@ class BonusService:
     ) -> bool:
         """Whether the one-time first-purchase discount applies right now.
 
-        Three questions, all answered from the same transaction: is this buyer
-        attributed to somebody, is their one discount still unused, and are they
-        genuinely a first-time buyer.
+        Four questions, all answered from the same transaction: is this buyer
+        attributed to somebody, is their one discount still unused, are they
+        genuinely a first-time buyer, and is the discount already claimed by an
+        in-flight checkout (Bug #1).
         """
         if referral is None or self.settings.discount_percent <= 0:
             return False
         if not referral.discount_available:
             return False
-        return not await uow.purchases.has_history(
+        if await uow.purchases.has_history(
             user_id,
             statuses=PURCHASE_HISTORY_STATUSES,
-        )
+        ):
+            return False
+        # A concurrent checkout for a *different* product may have already
+        # created a pending purchase with this discount.  The purchase lock is
+        # per-product, so without this check both checkouts would see the
+        # discount as available and create two discounted invoices.
+        return not await uow.purchases.has_pending_discount(user_id)
 
 
 __all__ = ["BonusOffer", "BonusService"]

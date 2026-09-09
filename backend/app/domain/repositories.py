@@ -166,6 +166,19 @@ class PurchaseRepository(Protocol):
         """
         ...
 
+    async def has_pending_discount(self, user_id: int) -> bool:
+        """Whether this buyer has a pending purchase that already carries a discount.
+
+        Closes the race window where two concurrent checkouts for different
+        products both see the one-time referral discount as available: the
+        second checkout refuses the discount when the first one already claimed
+        it, even though the first has not been paid yet.
+
+        Only ``PENDING`` is checked: paid/delivered/expired purchases are handled
+        by ``has_history`` and ``discount_available`` on the referral row.
+        """
+        ...
+
     async def mark_paid(
         self,
         purchase_id: UUID,
@@ -242,6 +255,20 @@ class ReferralRepository(Protocol):
 
     async def get_by_referred(self, referred_user_id: int) -> Referral | None:
         """Return the relationship that owns this buyer, or ``None``."""
+        ...
+
+    async def lock_for_discount_check(self, referred_user_id: int) -> Referral | None:
+        """Re-read the referral with ``SELECT ... FOR UPDATE``.
+
+        Serialises concurrent discount-eligible checkouts at the database level:
+        two transactions that both want to offer the one-time discount are forced
+        to wait for each other on this row lock, so the second one sees the first
+        one's pending purchase and refuses the discount.
+
+        Called only when a preliminary (unlocked) read showed the discount might
+        apply, so non-referred buyers and buyers who already used it never touch
+        this lock.
+        """
         ...
 
     async def mark_discount_used(

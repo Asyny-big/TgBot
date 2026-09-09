@@ -162,6 +162,18 @@ class ReferralNotEligibleError(ConflictError):
     message = "Only a buyer without purchase history can be invited"
 
 
+class DiscountAlreadyUsedError(ConflictError):
+    """The one-time referral discount was already consumed by another purchase.
+
+    Raised only by ``mark_discount_used`` when ``discount_purchase_id`` is
+    already set to a *different* purchase.  A replay with the *same* purchase
+    is idempotent and does not raise.
+    """
+
+    code = "discount_already_used"
+    message = "The referral discount was already used by another purchase"
+
+
 class InsufficientBonusBalanceError(ConflictError):
     """The bonus balance moved between showing the price and pressing pay."""
 

@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
 from app.core.exceptions import (
-    ConflictError,
+    DiscountAlreadyUsedError,
     ReferralAlreadySetError,
     ReferralNotFoundError,
     SelfReferralError,
@@ -78,6 +78,16 @@ class SqlAlchemyReferralRepository:
         model = (await self._session.execute(statement)).scalar_one_or_none()
         return to_referral(model) if model is not None else None
 
+    async def lock_for_discount_check(self, referred_user_id: int) -> Referral | None:
+        """Re-read the referral with ``FOR UPDATE``, serialising discount checks."""
+        statement = (
+            select(ReferralModel)
+            .where(ReferralModel.referred_user_id == referred_user_id)
+            .with_for_update()
+        )
+        model = (await self._session.execute(statement)).scalar_one_or_none()
+        return to_referral(model) if model is not None else None
+
     async def mark_discount_used(
         self,
         referral_id: UUID,
@@ -95,9 +105,7 @@ class SqlAlchemyReferralRepository:
             if model.discount_purchase_id == purchase_id:
                 # A replayed payment notification for the same purchase.
                 return to_referral(model)
-            message = "The referral discount was already used by another purchase"
-            raise ConflictError(
-                message,
+            raise DiscountAlreadyUsedError(
                 referral_id=str(referral_id),
                 discount_purchase_id=str(model.discount_purchase_id),
             )

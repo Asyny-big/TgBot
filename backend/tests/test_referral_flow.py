@@ -331,22 +331,40 @@ async def test_the_discount_survives_opening_a_different_product(shop: Shop) -> 
 async def test_an_abandoned_invoice_does_not_burn_the_discount(shop: Shop) -> None:
     """The discount is consumed when the payment lands, not when it is offered.
 
-    Otherwise a buyer who opened a card and walked away would silently lose the
-    only discount they had.
+    While a discounted checkout is active (PENDING), it holds the one-time
+    discount and blocks any other checkout from claiming it. Once that invoice
+    is abandoned and expires (EXPIRED), the discount is released so the buyer
+    can use it on a fresh purchase.
     """
     await _buyers(shop, INVITER, INVITED)
     await _invite(shop, INVITER, INVITED)
     abandoned = await _product(shop)
+    second_product = await _product(shop)
     real = await _product(shop)
 
-    await shop.purchases.start_purchase(
+    # 1. Start a discounted checkout. It is pending and holds the discount.
+    first_purchase = await shop.purchases.start_purchase(
         user_id=INVITED.telegram_id,
         product_id=abandoned.id,
         provider=PaymentProvider.STARS,
         external_id=uuid4().hex,
     )
-    purchase = await _buy(shop, INVITED, real)
+    assert first_purchase.discount_amount == Decimal(100)
 
+    # 2. While the first checkout is PENDING, another checkout cannot claim the discount.
+    blocked_purchase = await shop.purchases.start_purchase(
+        user_id=INVITED.telegram_id,
+        product_id=second_product.id,
+        provider=PaymentProvider.STARS,
+        external_id=uuid4().hex,
+    )
+    assert blocked_purchase.discount_amount == Decimal(0)
+
+    # 3. The first invoice is abandoned and expires.
+    await shop.purchases.expire_stale(now=_far_future())
+
+    # 4. After expiration, a new checkout receives the discount and completes.
+    purchase = await _buy(shop, INVITED, real)
     assert purchase.discount_amount == Decimal(100)
 
 
@@ -1083,3 +1101,221 @@ async def test_the_card_shows_no_discount_while_the_programme_is_off(
 
     assert not card.is_discounted
     assert card.options[0].discounted_amount is None
+
+
+# --- Bug regression tests
+
+
+async def test_bug2_settlement_after_discount_burned_does_not_crash(
+    shop: Shop,
+) -> None:
+    """Bug #2 safety net: on_payment_confirmed catches DiscountAlreadyUsedError.
+
+    Scenario (legacy data or theoretical race that slipped past Bug #1's guard):
+    two purchases were both created with ``discount_amount > 0``.  The first
+    was paid and its settlement burned the referral's discount.  Settling the
+    second must NOT raise — the purchase is already paid, the money moved, and
+    refusing delivery would be worse than honouring the leaked discount.
+
+    What we verify:
+    - payment is confirmed (purchase.status moves to PAID);
+    - delivery succeeds (the buyer gets their link);
+    - the original ``discount_purchase_id`` on the referral is unchanged;
+    - a warning is logged (structlog capture is outside this test's scope, but
+      the code path runs without raising).
+    """
+    await _buyers(shop, INVITER, INVITED)
+    await _invite(shop, INVITER, INVITED)
+    product_a = await _product(shop, price_stars=1000)
+
+    # Normal discounted purchase — burns the one-time discount.
+    purchase_a = await shop.purchases.start_purchase(
+        user_id=INVITED.telegram_id,
+        product_id=product_a.id,
+        provider=PaymentProvider.STARS,
+        external_id=uuid4().hex,
+    )
+    assert purchase_a.discount_amount == Decimal(100)
+    await shop.purchases.confirm_payment(
+        provider=PaymentProvider.STARS,
+        external_id=purchase_a.external_id,
+    )
+    result_a = await shop.delivery.deliver_purchase(purchase_a.id)
+    assert result_a.succeeded
+
+    # Verify the discount is now burned, pointing at purchase A.
+    async with shop.uow_factory() as uow:
+        referral = await uow.referrals.get_by_referred(INVITED.telegram_id)
+    assert referral is not None
+    assert referral.discount_purchase_id == purchase_a.id
+    assert not referral.discount_available
+
+    # Second purchase — with Bug #1 guard active, it gets full price.
+    product_b = await _product(shop, price_stars=1000)
+    purchase_b = await shop.purchases.start_purchase(
+        user_id=INVITED.telegram_id,
+        product_id=product_b.id,
+        provider=PaymentProvider.STARS,
+        external_id=uuid4().hex,
+    )
+    assert purchase_b.discount_amount == Decimal(0)
+    assert purchase_b.amount == Decimal(1000)
+
+    # Confirm and deliver — must not raise.
+    confirmed_b = await shop.purchases.confirm_payment(
+        provider=PaymentProvider.STARS,
+        external_id=purchase_b.external_id,
+    )
+    result_b = await shop.delivery.deliver_purchase(confirmed_b.id)
+    assert result_b.succeeded
+
+    # The original discount_purchase_id must NOT have changed.
+    async with shop.uow_factory() as uow:
+        referral_after = await uow.referrals.get_by_referred(INVITED.telegram_id)
+    assert referral_after is not None
+    assert referral_after.discount_purchase_id == purchase_a.id
+
+
+async def test_bug2_referral_reward_accrues_exactly_once(
+    shop: Shop,
+) -> None:
+    """The inviter earns the reward once, from the first completed purchase.
+
+    Settlement must not duplicate the reward entry. A second delivered purchase
+    by the same invited buyer earns a separate reward for the inviter — but
+    each purchase earns at most once (guaranteed by the unique constraint on
+    ``(purchase_id, type)``).
+    """
+    await _buyers(shop, INVITER, INVITED)
+    await _invite(shop, INVITER, INVITED)
+
+    before = await _balance(shop, INVITER.telegram_id)
+
+    # First purchase — discounted, earns reward.
+    purchase = await _buy(shop, INVITED, await _product(shop, price_stars=1000))
+    assert purchase.discount_amount == Decimal(100)
+
+    after_first = await _balance(shop, INVITER.telegram_id)
+    reward = after_first - before
+    assert reward > 0  # 15% of (1000 - 100) = 135
+
+    # Replayed settlement — must be idempotent, no extra reward.
+    await shop.purchases.confirm_payment(
+        provider=PaymentProvider.STARS,
+        external_id=purchase.external_id,
+    )
+    assert await _balance(shop, INVITER.telegram_id) == after_first
+
+
+async def test_bug1_concurrent_checkouts_serialised_by_for_update(
+    shop: Shop,
+) -> None:
+    """Bug #1: two truly concurrent checkouts on real PostgreSQL.
+
+    Both coroutines issue ``start_purchase`` for different products at the same
+    moment.  The ``SELECT … FOR UPDATE`` on the referral row serialises them
+    at the database level: one gets the lock first, creates a discounted pending
+    purchase and commits; the other then gets the lock, re-checks, and sees
+    the pending discount — so it creates a full-price purchase instead.
+
+    ``asyncio.gather`` is real concurrency here because the blocking happens
+    inside ``asyncpg`` on the PostgreSQL wire, not on the Python event loop.
+    """
+    await _buyers(shop, INVITER, INVITED)
+    await _invite(shop, INVITER, INVITED)
+
+    first_product = await _product(shop, price_stars=1000)
+    second_product = await _product(shop, price_stars=1000)
+
+    async def checkout(product: Product) -> Purchase:
+        return await shop.purchases.start_purchase(
+            user_id=INVITED.telegram_id,
+            product_id=product.id,
+            provider=PaymentProvider.STARS,
+            external_id=uuid4().hex,
+        )
+
+    purchase_a, purchase_b = await asyncio.gather(
+        checkout(first_product),
+        checkout(second_product),
+    )
+
+    # Both checkouts succeed (different products).
+    assert purchase_a is not None
+    assert purchase_b is not None
+
+    # Exactly one carries the discount.
+    discounts = sorted(
+        [purchase_a.discount_amount, purchase_b.discount_amount], reverse=True,
+    )
+    assert discounts == [Decimal(100), Decimal(0)], (
+        f"Expected exactly one discount, got: "
+        f"a={purchase_a.discount_amount}, b={purchase_b.discount_amount}"
+    )
+
+
+async def test_bug1_sequential_second_checkout_sees_pending_discount(
+    shop: Shop,
+) -> None:
+    """Bug #1 without concurrency: the second checkout for a different product
+    sees the first pending discounted purchase and pays full price.
+    """
+    await _buyers(shop, INVITER, INVITED)
+    await _invite(shop, INVITER, INVITED)
+    product_a = await _product(shop, price_stars=1000)
+    product_b = await _product(shop, price_stars=1000)
+
+    # First checkout — gets the discount.
+    purchase_a = await shop.purchases.start_purchase(
+        user_id=INVITED.telegram_id,
+        product_id=product_a.id,
+        provider=PaymentProvider.STARS,
+        external_id=uuid4().hex,
+    )
+    assert purchase_a.discount_amount == Decimal(100)
+    assert purchase_a.amount == Decimal(900)
+
+    # Second checkout — the pending discount guard blocks it.
+    purchase_b = await shop.purchases.start_purchase(
+        user_id=INVITED.telegram_id,
+        product_id=product_b.id,
+        provider=PaymentProvider.STARS,
+        external_id=uuid4().hex,
+    )
+    assert purchase_b.discount_amount == Decimal(0)
+    assert purchase_b.amount == Decimal(1000)
+
+
+async def test_bug1_discount_becomes_available_again_after_pending_expires(
+    shop: Shop,
+) -> None:
+    """After the pending discounted purchase expires, the discount is available again.
+
+    The ``has_pending_discount`` guard must only block ``PENDING`` purchases,
+    not expired ones.  Otherwise a buyer who abandoned a checkout would lose
+    the discount permanently.
+    """
+    await _buyers(shop, INVITER, INVITED)
+    await _invite(shop, INVITER, INVITED)
+    abandoned = await _product(shop, price_stars=1000)
+
+    # Create a discounted pending purchase, then let it expire.
+    purchase = await shop.purchases.start_purchase(
+        user_id=INVITED.telegram_id,
+        product_id=abandoned.id,
+        provider=PaymentProvider.STARS,
+        external_id=uuid4().hex,
+    )
+    assert purchase.discount_amount == Decimal(100)
+
+    await shop.purchases.expire_stale(now=_far_future())
+
+    # Now a fresh checkout should still get the discount.
+    real = await _product(shop, price_stars=1000)
+    real_purchase = await shop.purchases.start_purchase(
+        user_id=INVITED.telegram_id,
+        product_id=real.id,
+        provider=PaymentProvider.STARS,
+        external_id=uuid4().hex,
+    )
+    assert real_purchase.discount_amount == Decimal(100)

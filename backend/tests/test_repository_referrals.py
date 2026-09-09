@@ -15,6 +15,7 @@ import pytest
 
 from app.core.exceptions import (
     ConflictError,
+    DiscountAlreadyUsedError,
     InsufficientBonusBalanceError,
     ReferralAlreadySetError,
     ReferralNotFoundError,
@@ -169,7 +170,7 @@ async def test_a_second_purchase_cannot_claim_the_same_discount(
     second = await _paid_purchase(products, purchases, invited)
     await referrals.mark_discount_used(referral.id, purchase_id=first.id)
 
-    with pytest.raises(ConflictError):
+    with pytest.raises(DiscountAlreadyUsedError):
         await referrals.mark_discount_used(referral.id, purchase_id=second.id)
 
 

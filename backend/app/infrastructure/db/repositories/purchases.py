@@ -118,6 +118,24 @@ class SqlAlchemyPurchaseRepository:
         )
         return bool(await self._session.scalar(statement))
 
+    async def has_pending_discount(self, user_id: int) -> bool:
+        """Whether this buyer already has a pending purchase with a discount.
+
+        ``EXISTS`` with only ``PENDING``: once a purchase moves beyond pending
+        the discount is either burned (paid) or the invoice expired, neither of
+        which should block a future checkout.
+        """
+        statement = select(
+            select(PurchaseModel.id)
+            .where(
+                PurchaseModel.user_id == user_id,
+                PurchaseModel.status == PurchaseStatus.PENDING,
+                PurchaseModel.discount_amount > 0,
+            )
+            .exists()
+        )
+        return bool(await self._session.scalar(statement))
+
     async def mark_paid(
         self,
         purchase_id: UUID,

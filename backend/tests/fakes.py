@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 
 from app.core.exceptions import (
     ConflictError,
+    DiscountAlreadyUsedError,
     DuplicatePurchaseError,
     InsufficientBonusBalanceError,
     LockBusyError,
@@ -283,6 +284,14 @@ class FakePurchaseRepository:
             for purchase in self.items.values()
         )
 
+    async def has_pending_discount(self, user_id: int) -> bool:
+        return any(
+            purchase.user_id == user_id
+            and purchase.status is PurchaseStatus.PENDING
+            and purchase.discount_amount > 0
+            for purchase in self.items.values()
+        )
+
     async def mark_paid(
         self,
         purchase_id: UUID,
@@ -404,6 +413,9 @@ class FakeReferralRepository:
                 return referral
         return None
 
+    async def lock_for_discount_check(self, referred_user_id: int) -> Referral | None:
+        return await self.get_by_referred(referred_user_id)
+
     async def mark_discount_used(
         self,
         referral_id: UUID,
@@ -417,8 +429,7 @@ class FakeReferralRepository:
         if referral.discount_purchase_id is not None:
             if referral.discount_purchase_id == purchase_id:
                 return referral
-            message = "The referral discount was already used by another purchase"
-            raise ConflictError(message, referral_id=str(referral_id))
+            raise DiscountAlreadyUsedError(referral_id=str(referral_id))
         updated = replace(
             referral,
             discount_purchase_id=purchase_id,
