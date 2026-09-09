@@ -22,8 +22,12 @@ import pytest
 from pydantic import SecretStr
 
 from app.core.config import DeliverySettings, ReferralSettings, TelegramSettings
-from app.core.exceptions import BonusesNotAvailableError, InsufficientBonusBalanceError
-from app.domain.commands import ProductDraft, UserDraft
+from app.core.exceptions import (
+    BonusesNotAvailableError,
+    ConflictError,
+    InsufficientBonusBalanceError,
+)
+from app.domain.commands import BonusTransactionDraft, ProductDraft, UserDraft
 from app.domain.enums import (
     BonusTransactionType,
     Currency,
@@ -980,22 +984,82 @@ async def test_a_usdt_purchase_still_gets_the_referral_discount(shop: Shop) -> N
     assert await _balance(shop, INVITER.telegram_id) == 94
 
 
-# --- Bonuses are a Stars discount and nothing else
+# --- Spending bonuses on a USDT purchase
+#
+# A bonus is priced in Stars, but a product that also carries a Stars price has
+# declared its own Stars/USDT rate, so the balance can be spent against a USDT
+# invoice at that rate. Everything the Stars rail promises must hold here too,
+# on real PostgreSQL and Redis: reserve then settle, release on expiry,
+# idempotent replay, referral priority, and one balance per checkout. A USDT
+# product priced in dollars only has no rate, so bonuses are refused on it.
 
 
-async def test_bonuses_cannot_be_spent_on_a_crypto_purchase(shop: Shop) -> None:
-    """Explicitly refused rather than quietly ignored.
+async def _grant_bonuses(shop: Shop, user_id: int, units: int) -> None:
+    """Seed an exact balance by crediting a reward straight to the ledger.
 
-    The bot never offers the choice on a crypto card, so a request to spend
-    bonuses there is a hand-crafted callback — and charging the full price
-    silently would be the wrong answer to it.
+    The spend tests need a known starting balance to assert clean USDT
+    arithmetic; earning it through a sale would tie the number to the reward
+    formula instead. ``add`` moves the cached balance in the same transaction,
+    exactly as a real reward would, so the balance under test is a real one.
+    """
+    async with shop.uow_factory() as uow:
+        await uow.bonuses.add(
+            BonusTransactionDraft(
+                user_id=user_id,
+                amount=units,
+                type=BonusTransactionType.REFERRAL_REWARD,
+            )
+        )
+
+
+async def _buy_with_crypto_bonus(
+    shop: Shop,
+    buyer: UserDraft,
+    product: Product,
+) -> Purchase:
+    """A complete USDT sale that spends bonuses, priced the way production does.
+
+    ``use_bonus`` is carried through both the quote and the checkout, and the
+    quoted amount is handed back as ``expected_amount`` — so the CryptoBot
+    invoice and the recorded purchase are pinned to the same number, which is
+    the crypto rail's whole contract.
+    """
+    expected = await shop.purchases.quote_amount(
+        user_id=buyer.telegram_id,
+        product=product,
+        provider=PaymentProvider.CRYPTO,
+        use_bonus=True,
+    )
+    purchase = await shop.purchases.start_purchase(
+        user_id=buyer.telegram_id,
+        product_id=product.id,
+        provider=PaymentProvider.CRYPTO,
+        external_id=uuid4().hex,
+        use_bonus=True,
+        expected_amount=expected,
+    )
+    await shop.purchases.confirm_payment(
+        provider=PaymentProvider.CRYPTO,
+        external_id=purchase.external_id,
+    )
+    result = await shop.delivery.deliver_purchase(purchase.id)
+    assert result.succeeded
+    return await shop.purchases.get(purchase.id)
+
+
+async def test_bonuses_cannot_be_spent_on_a_usdt_only_product(shop: Shop) -> None:
+    """No Stars price means no declared rate, so there is nothing to value.
+
+    The bot never offers the choice on such a card, so a request to spend
+    bonuses there is a hand-crafted callback — refused explicitly rather than
+    quietly charging the full price, and without touching the balance.
     """
     await _buyers(shop, INVITER, INVITED)
     await _invite(shop, INVITER, INVITED)
     await _buy(shop, INVITED, await _product(shop))
     assert await _balance(shop, INVITER.telegram_id) == 135
 
-    product = await _product(shop, price_stars=1000, price_usdt=Decimal("10.00"))
+    product = await _product(shop, price_stars=None, price_usdt=Decimal("10.00"))
     with pytest.raises(BonusesNotAvailableError):
         await shop.purchases.start_purchase(
             user_id=INVITER.telegram_id,
@@ -1007,7 +1071,8 @@ async def test_bonuses_cannot_be_spent_on_a_crypto_purchase(shop: Shop) -> None:
     assert await _balance(shop, INVITER.telegram_id) == 135
 
 
-async def test_no_bonus_offer_is_made_on_a_crypto_card(shop: Shop) -> None:
+async def test_no_bonus_offer_is_made_on_a_usdt_only_card(shop: Shop) -> None:
+    """A USDT-only product has no rate, so the prompt is never shown."""
     await _buyers(shop, INVITER, INVITED)
     await _invite(shop, INVITER, INVITED)
     await _buy(shop, INVITED, await _product(shop))
@@ -1020,6 +1085,254 @@ async def test_no_bonus_offer_is_made_on_a_crypto_card(shop: Shop) -> None:
 
     assert not offer.available
     assert offer.quote_without_bonus.charged_amount == Decimal("10.00")
+
+
+async def test_a_usdt_card_offers_bonuses_when_a_rate_is_declared(shop: Shop) -> None:
+    """With a Stars price the card values the balance and offers to spend it.
+
+    700 ⭐ / 10 USDT is 70 ⭐ per USDT, so a balance of 22 is worth 0.31 USDT
+    (floored to the cent) and the card shows 10.00 falling to 9.69.
+    """
+    await _buyers(shop, INVITER)
+    await _grant_bonuses(shop, INVITER.telegram_id, 22)
+
+    offer = await shop.bonuses.offer_for(
+        user_id=INVITER.telegram_id,
+        base_amount=Decimal("10.00"),
+        currency=Currency.USDT,
+        stars_per_usdt=Decimal(70),
+    )
+
+    assert offer.available
+    assert offer.units == 22
+    assert offer.quote_with_bonus is not None
+    assert offer.quote_with_bonus.charged_amount == Decimal("9.69")
+    assert offer.quote_without_bonus.charged_amount == Decimal("10.00")
+
+
+async def test_bonuses_reduce_a_usdt_purchase(shop: Shop) -> None:
+    """The specification's worked example, end to end on the crypto rail.
+
+    A balance of 22 against a 700 ⭐ / 10 USDT product is worth 22 / 70 = 0.31
+    USDT (floored), so 10.00 becomes 9.69 and the balance is spent to nothing.
+    """
+    await _buyers(shop, INVITER)
+    await _grant_bonuses(shop, INVITER.telegram_id, 22)
+    product = await _product(shop, price_stars=700, price_usdt=Decimal("10.00"))
+
+    purchase = await _buy_with_crypto_bonus(shop, INVITER, product)
+
+    assert purchase.base_amount == Decimal("10.00")
+    assert purchase.bonus_amount == Decimal("0.31")
+    assert purchase.amount == Decimal("9.69")
+    assert await _balance(shop, INVITER.telegram_id) == 0
+
+
+async def test_a_usdt_bonus_spend_becomes_a_settled_ledger_entry(shop: Shop) -> None:
+    """A USDT reservation turns into a spend when the crypto payment lands."""
+    await _buyers(shop, INVITER)
+    await _grant_bonuses(shop, INVITER.telegram_id, 100)
+    product = await _product(shop, price_stars=700, price_usdt=Decimal("10.00"))
+
+    purchase = await _buy_with_crypto_bonus(shop, INVITER, product)
+
+    assert await _ledger_types(shop, purchase.id) == [BonusTransactionType.BONUS_SPENT.value]
+    assert await _balance(shop, INVITER.telegram_id) == 0
+
+
+async def test_a_usdt_bonus_spend_never_exceeds_half_the_price(shop: Shop) -> None:
+    """The cap is a property of the price, so it holds on the crypto rail too.
+
+    350 ⭐ funds exactly half of a 700 ⭐ / 10 USDT product (5.00 USDT); a far
+    larger balance still cannot push the discount past that half.
+    """
+    await _buyers(shop, INVITER)
+    await _grant_bonuses(shop, INVITER.telegram_id, 100_000)
+    product = await _product(shop, price_stars=700, price_usdt=Decimal("10.00"))
+
+    purchase = await _buy_with_crypto_bonus(shop, INVITER, product)
+
+    assert purchase.bonus_amount == Decimal("5.00")
+    assert purchase.amount == Decimal("5.00")
+    # Only the 350 units the cap allowed were spent; the rest stays on the balance.
+    assert await _balance(shop, INVITER.telegram_id) == 100_000 - 350
+
+
+async def test_an_expired_usdt_invoice_gives_reserved_bonuses_back(shop: Shop) -> None:
+    """A crypto reservation is not a charge, so an unpaid invoice returns it."""
+    await _buyers(shop, INVITER)
+    await _grant_bonuses(shop, INVITER.telegram_id, 100)
+    product = await _product(shop, price_stars=700, price_usdt=Decimal("10.00"))
+
+    expected = await shop.purchases.quote_amount(
+        user_id=INVITER.telegram_id,
+        product=product,
+        provider=PaymentProvider.CRYPTO,
+        use_bonus=True,
+    )
+    await shop.purchases.start_purchase(
+        user_id=INVITER.telegram_id,
+        product_id=product.id,
+        provider=PaymentProvider.CRYPTO,
+        external_id=uuid4().hex,
+        use_bonus=True,
+        expected_amount=expected,
+    )
+    assert await _balance(shop, INVITER.telegram_id) == 0
+
+    await shop.purchases.expire_stale(now=_far_future())
+    released = await shop.bonuses.release_stale_holds()
+
+    assert released == 1
+    assert await _balance(shop, INVITER.telegram_id) == 100
+
+
+@pytest.mark.parametrize("replays", [2, 4])
+async def test_a_replayed_usdt_webhook_spends_bonuses_once(
+    shop: Shop,
+    replays: int,
+) -> None:
+    """The idempotency guarantee, on the crypto rail: reserved units settle once.
+
+    The unique index on (purchase, type) means the reservation can become a
+    spend exactly once, whatever the number of confirmations replayed.
+    """
+    await _buyers(shop, INVITER)
+    await _grant_bonuses(shop, INVITER.telegram_id, 100)
+    product = await _product(shop, price_stars=700, price_usdt=Decimal("10.00"))
+
+    expected = await shop.purchases.quote_amount(
+        user_id=INVITER.telegram_id,
+        product=product,
+        provider=PaymentProvider.CRYPTO,
+        use_bonus=True,
+    )
+    purchase = await shop.purchases.start_purchase(
+        user_id=INVITER.telegram_id,
+        product_id=product.id,
+        provider=PaymentProvider.CRYPTO,
+        external_id=uuid4().hex,
+        use_bonus=True,
+        expected_amount=expected,
+    )
+    for _ in range(replays):
+        await shop.purchases.confirm_payment(
+            provider=PaymentProvider.CRYPTO,
+            external_id=purchase.external_id,
+        )
+        await shop.delivery.deliver_purchase(purchase.id)
+
+    assert await _balance(shop, INVITER.telegram_id) == 0
+    assert await _ledger_types(shop, purchase.id) == [BonusTransactionType.BONUS_SPENT.value]
+
+
+async def test_releasing_a_usdt_reservation_twice_credits_it_once(shop: Shop) -> None:
+    """Housekeeping is idempotent for a USDT hold as well."""
+    await _buyers(shop, INVITER)
+    await _grant_bonuses(shop, INVITER.telegram_id, 100)
+    product = await _product(shop, price_stars=700, price_usdt=Decimal("10.00"))
+
+    expected = await shop.purchases.quote_amount(
+        user_id=INVITER.telegram_id,
+        product=product,
+        provider=PaymentProvider.CRYPTO,
+        use_bonus=True,
+    )
+    await shop.purchases.start_purchase(
+        user_id=INVITER.telegram_id,
+        product_id=product.id,
+        provider=PaymentProvider.CRYPTO,
+        external_id=uuid4().hex,
+        use_bonus=True,
+        expected_amount=expected,
+    )
+    await shop.purchases.expire_stale(now=_far_future())
+
+    await shop.bonuses.release_stale_holds()
+    await shop.bonuses.release_stale_holds()
+
+    assert await _balance(shop, INVITER.telegram_id) == 100
+
+
+async def test_a_first_referral_usdt_purchase_takes_the_discount_not_bonuses(
+    shop: Shop,
+) -> None:
+    """Referral > Bonus holds on the crypto rail too.
+
+    B has both a pending discount and a balance; the discount wins, the balance
+    is left untouched, and no rate is needed because the discount is a percentage.
+    """
+    await _buyers(shop, INVITER, INVITED, THIRD)
+    await _invite(shop, INVITER, INVITED)
+    await _invite(shop, INVITED, THIRD)
+    # THIRD buys, which credits INVITED with a balance of their own.
+    await _buy(shop, THIRD, await _product(shop))
+    assert await _balance(shop, INVITED.telegram_id) == 135
+
+    product = await _product(shop, price_stars=700, price_usdt=Decimal("10.00"))
+    purchase = await _buy_with_crypto_bonus(shop, INVITED, product)
+
+    assert purchase.discount_amount == Decimal("1.00")
+    assert purchase.bonus_amount == Decimal(0)
+    assert purchase.amount == Decimal("9.00")
+    assert await _balance(shop, INVITED.telegram_id) == 135
+
+
+async def test_the_same_balance_cannot_fund_two_usdt_checkouts(shop: Shop) -> None:
+    """One balance, two simultaneous USDT checkouts: exactly one is funded.
+
+    350 ⭐ funds the whole half-price cap of a single 700 ⭐ / 10 USDT product,
+    so it cannot fund two. The row lock on the users row and the non-negative
+    check constraint stand behind the assertion that the balance never goes
+    below zero and only one sale reserves anything.
+    """
+    await _buyers(shop, INVITER)
+    await _grant_bonuses(shop, INVITER.telegram_id, 350)
+    first = await _product(shop, price_stars=700, price_usdt=Decimal("10.00"))
+    second = await _product(shop, price_stars=700, price_usdt=Decimal("10.00"))
+
+    async def checkout(product: Product) -> Purchase | None:
+        try:
+            return await shop.purchases.start_purchase(
+                user_id=INVITER.telegram_id,
+                product_id=product.id,
+                provider=PaymentProvider.CRYPTO,
+                external_id=uuid4().hex,
+                use_bonus=True,
+            )
+        except Exception:
+            return None
+
+    results = await asyncio.gather(checkout(first), checkout(second))
+
+    funded = [purchase for purchase in results if purchase and purchase.bonus_amount > 0]
+    assert len(funded) == 1
+    assert await _balance(shop, INVITER.telegram_id) >= 0
+    assert await _balance(shop, INVITER.telegram_id) == 0
+
+
+async def test_a_moved_price_refuses_a_usdt_bonus_checkout(shop: Shop) -> None:
+    """``expected_amount`` still guards the crypto rail when bonuses are spent.
+
+    If the price computed under the lock disagrees with the invoiced amount the
+    checkout is refused, and — because the guard fires before anything is
+    reserved — the balance is left exactly as it was.
+    """
+    await _buyers(shop, INVITER)
+    await _grant_bonuses(shop, INVITER.telegram_id, 100)
+    product = await _product(shop, price_stars=700, price_usdt=Decimal("10.00"))
+
+    with pytest.raises(ConflictError):
+        await shop.purchases.start_purchase(
+            user_id=INVITER.telegram_id,
+            product_id=product.id,
+            provider=PaymentProvider.CRYPTO,
+            external_id=uuid4().hex,
+            use_bonus=True,
+            expected_amount=Decimal("9.99"),  # not the price the bonus spend yields
+        )
+
+    assert await _balance(shop, INVITER.telegram_id) == 100
 
 
 async def test_one_bonus_buys_exactly_one_star(shop: Shop) -> None:

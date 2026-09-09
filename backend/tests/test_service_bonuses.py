@@ -16,7 +16,7 @@ from uuid import uuid4
 import pytest
 
 from app.core.config import ReferralSettings
-from app.core.exceptions import ServiceUnavailableError
+from app.core.exceptions import BonusesNotAvailableError, ServiceUnavailableError
 from app.domain.commands import (
     BonusTransactionDraft,
     ProductDraft,
@@ -512,11 +512,15 @@ async def test_the_offer_reports_the_price_the_card_shows(
     assert offer.quote_without_bonus.discount_amount > 0
 
 
-async def test_bonuses_are_still_never_offered_on_a_crypto_card(
+async def test_no_bonus_is_offered_on_usdt_without_a_declared_rate(
     uow_factory: FakeUnitOfWorkFactory,
     unit: FakeUnitOfWork,
 ) -> None:
-    """A bonus is a Star. Fixing the discount must not have loosened that."""
+    """A bonus is a Star; a product priced in USDT only cannot value one.
+
+    The balance is still reported honestly — it simply cannot be spent here
+    because the shop has declared no Stars/USDT equivalence for this product.
+    """
     await _grant(unit, INVITED, 5000)
     service = _service(uow_factory)
 
@@ -529,4 +533,85 @@ async def test_bonuses_are_still_never_offered_on_a_crypto_card(
     assert not offer.available
     assert offer.units == 0
     assert offer.quote_with_bonus is None
-    assert offer.balance == 5000, "the balance is reported honestly, it just cannot be spent here"
+    assert offer.balance == 5000
+
+
+async def test_bonuses_are_offered_on_usdt_with_a_declared_rate(
+    uow_factory: FakeUnitOfWorkFactory,
+    unit: FakeUnitOfWork,
+) -> None:
+    """With a rate a USDT card offers bonuses, capped at half the price.
+
+    150 ⭐ / 1.50 USDT is 100 ⭐ per USDT, so 50% of 1.50 (0.75) is 75 units,
+    and the card shows 1.50 falling to 0.75.
+    """
+    await _grant(unit, INVITED, 5000)
+    service = _service(uow_factory)
+
+    offer = await service.offer_for(
+        user_id=INVITED,
+        base_amount=CRYPTO_PRICE,
+        currency=Currency.USDT,
+        stars_per_usdt=Decimal(100),
+    )
+
+    assert offer.available
+    assert offer.balance == 5000
+    assert offer.units == 75
+    assert offer.quote_with_bonus is not None
+    assert offer.quote_with_bonus.charged_amount == Decimal("0.75")
+
+
+async def test_a_usdt_bonus_spend_previews_and_resolves_to_the_same_price(
+    uow_factory: FakeUnitOfWorkFactory,
+    unit: FakeUnitOfWork,
+) -> None:
+    """The two pricing paths must agree on a USDT bonus spend too.
+
+    ``preview`` bills the CryptoBot invoice; ``resolve`` records the purchase
+    under a lock. If they disagreed the buyer could not pay — so this pins them
+    together for the USDT bonus branch, exactly as the parametrised test above
+    does for the discount.
+    """
+    await _grant(unit, INVITED, 5000)
+    service = _service(uow_factory)
+    rate = Decimal(100)
+
+    previewed = await service.preview(
+        user_id=INVITED,
+        base_amount=CRYPTO_PRICE,
+        currency=Currency.USDT,
+        use_bonus=True,
+        stars_per_usdt=rate,
+    )
+    resolved = await service.resolve(
+        unit,
+        user_id=INVITED,
+        base_amount=CRYPTO_PRICE,
+        currency=Currency.USDT,
+        use_bonus=True,
+        stars_per_usdt=rate,
+    )
+
+    assert previewed.charged_amount == resolved.charged_amount == Decimal("0.75")
+    assert previewed.bonus_units == resolved.bonus_units == 75
+    assert resolved.bonus_amount == Decimal("0.75")
+
+
+async def test_resolve_refuses_usdt_bonuses_without_a_rate(
+    uow_factory: FakeUnitOfWorkFactory,
+    unit: FakeUnitOfWork,
+) -> None:
+    """Reaching ``resolve`` for a rate-less USDT product is a hand-crafted
+    callback — refuse it rather than quietly charge the full price."""
+    await _grant(unit, INVITED, 5000)
+    service = _service(uow_factory)
+
+    with pytest.raises(BonusesNotAvailableError):
+        await service.resolve(
+            unit,
+            user_id=INVITED,
+            base_amount=CRYPTO_PRICE,
+            currency=Currency.USDT,
+            use_bonus=True,
+        )

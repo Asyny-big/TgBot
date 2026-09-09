@@ -23,7 +23,7 @@ from app.bot.middlewares import BotServices
 from app.bot.texts import (
     ALREADY_PURCHASED,
     BONUS_BALANCE_CHANGED,
-    BONUS_STARS_ONLY,
+    BONUS_NOT_FOR_PRODUCT,
     CARD_UNAVAILABLE,
     CRYPTO_INVOICE_CREATED,
     DELIVERY_FAILED,
@@ -139,6 +139,7 @@ async def _bonus_offer(
             user_id=user_id,
             base_amount=Decimal(price),
             currency=provider.currency,
+            stars_per_usdt=product.stars_per_usdt,
         )
     except AppError as error:
         logger.error(  # noqa: TRY400 — bonuses are optional, the sale is not
@@ -212,14 +213,15 @@ async def _start_checkout(
         # safer than silently charging a price the buyer never agreed to.
         await callback.answer(BONUS_BALANCE_CHANGED, show_alert=True)
     except BonusesNotAvailableError:
-        # Bonuses are a Stars discount; the bot never offers them on a crypto
-        # card, so this is a hand-crafted callback rather than a real buyer.
+        # A bonus is a Star, valued on USDT at the product's own rate. This
+        # product declares no such rate (it is priced in USDT only), so the bot
+        # never offers the choice — reaching here is a hand-crafted callback.
         logger.warning(
             "bonus_spend_refused_for_provider",
             user_id=user.id,
             provider=provider.value,
         )
-        await callback.answer(BONUS_STARS_ONLY, show_alert=True)
+        await callback.answer(BONUS_NOT_FOR_PRODUCT, show_alert=True)
     except DuplicatePurchaseError:
         # Already paid for: no new invoice, just hand the link over again.
         await callback.answer(ALREADY_PURCHASED, show_alert=True)

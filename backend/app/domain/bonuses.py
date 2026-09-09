@@ -102,21 +102,38 @@ class PriceQuote:
     """Referral discount, in the purchase currency."""
 
     bonus_units: int = 0
-    """Bonuses spent. Only ever non-zero on a Stars purchase."""
+    """Bonuses spent. Non-zero on a Stars purchase, or a USDT one with a rate."""
 
     currency: Currency = Currency.XTR
     referral_id: UUID | None = None
     """The relationship the discount came from, if any."""
 
+    bonus_rate: Decimal | None = None
+    """Stars-per-USDT rate that values the bonus units on a USDT sale.
+
+    ``None`` on a Stars purchase, where one bonus is one Star and no rate is
+    needed. On a USDT purchase it is the product's own ``stars_per_usdt`` at the
+    moment of checkout, so the money value of the units is *derived* from the
+    same declared equivalence the reward already uses — never a fixed or
+    external rate that could go stale.
+    """
+
     @property
     def bonus_amount(self) -> Decimal:
-        """Money value of the bonuses spent.
+        """Money value of the bonuses spent, in the purchase currency.
 
-        Derived, not stored: one bonus is one Star, so the count *is* the
-        amount. Making it a property is what makes that invariant impossible to
-        violate by constructing an inconsistent quote.
+        Derived, not stored, so it can never disagree with the unit count. On
+        Stars one bonus is one Star. On USDT the units are converted at the
+        product's own rate and floored to a chargeable cent — rounding down, so
+        a fraction of a cent can never vanish between the quote and the invoice.
         """
-        return Decimal(self.bonus_units)
+        if self.bonus_units <= 0:
+            return Decimal(0)
+        if self.currency is Currency.XTR:
+            return Decimal(self.bonus_units)
+        if self.bonus_rate is None or self.bonus_rate <= 0:  # pragma: no cover — guarded upstream
+            return Decimal(0)
+        return floor_to_step(Decimal(self.bonus_units) / self.bonus_rate, self.currency)
 
     @property
     def charged_amount(self) -> Decimal:
@@ -213,24 +230,47 @@ def spendable_bonuses(
     *,
     balance: int,
     policy: BonusPolicy,
+    stars_per_usdt: Decimal | None = None,
 ) -> int:
     """Bonuses the buyer may spend on this price.
 
-    Bounded by three things at once: the balance, the configured share of the
-    price, and the requirement that something is still left to charge — the
-    purchases table refuses a zero amount, and an invoice for nothing is not a
-    sale.
+    Bounded by the same three things on every rail: the balance, the configured
+    share of the price, and the requirement that something is still left to
+    charge — the purchases table refuses a zero amount, and an invoice for
+    nothing is not a sale.
 
-    Always ``0`` outside Telegram Stars: bonuses are a Stars discount, and
-    spending them on a crypto invoice is not a thing the shop offers.
+    On Telegram Stars one bonus is one Star, so the cap is read straight off the
+    price. On USDT a bonus is still one Star, but the price is in dollars: the
+    units are valued at the product's own ``stars_per_usdt`` rate, so the cap is
+    the number of one-Star units whose floored dollar value stays within the
+    allowed share of the price. Without a rate — a product priced in USDT only —
+    there is no declared equivalence, and nothing can be spent.
     """
-    if currency is not Currency.XTR or balance <= 0:
+    if balance <= 0 or policy.max_bonus_payment_percent <= 0:
         return 0
 
-    payable = min(balance, max_bonus_payment(base_amount, policy))
-    # Leave at least one Star to actually charge.
-    payable = min(payable, int(base_amount) - 1)
-    return max(payable, 0)
+    if currency is Currency.XTR:
+        payable = min(balance, max_bonus_payment(base_amount, policy))
+        # Leave at least one Star to actually charge.
+        payable = min(payable, int(base_amount) - 1)
+        return max(payable, 0)
+
+    if stars_per_usdt is None or stars_per_usdt <= 0:
+        return 0
+
+    # The most a bonus discount may be worth here, as a chargeable dollar
+    # amount — and never the whole price, so at least one cent is always billed.
+    max_discount = floor_to_step(
+        base_amount * Decimal(policy.max_bonus_payment_percent) / _PERCENT,
+        currency,
+    )
+    max_discount = min(max_discount, base_amount - price_step(currency))
+    if max_discount <= 0:
+        return 0
+
+    # …then the whole number of one-Star units that dollar amount buys.
+    max_units = int((max_discount * stars_per_usdt).to_integral_value(rounding=ROUND_FLOOR))
+    return max(min(balance, max_units), 0)
 
 
 def quote(  # noqa: PLR0913 — pricing genuinely depends on this many inputs
@@ -242,6 +282,7 @@ def quote(  # noqa: PLR0913 — pricing genuinely depends on this many inputs
     discount_eligible: bool = False,
     balance: int = 0,
     use_bonus: bool = False,
+    stars_per_usdt: Decimal | None = None,
 ) -> PriceQuote:
     """Price one checkout.
 
@@ -250,6 +291,9 @@ def quote(  # noqa: PLR0913 — pricing genuinely depends on this many inputs
     purchase bonuses are not offered at all. That keeps the economics simple and
     removes a whole family of edge cases — after the first purchase the discount
     is gone for good and bonuses apply from then on.
+
+    ``stars_per_usdt`` is the product's own rate, needed only to value bonuses on
+    a USDT sale; it is ignored on Stars and when no bonuses are spent.
     """
     if discount_eligible:
         discount = discount_for(base_amount, currency, policy)
@@ -262,12 +306,19 @@ def quote(  # noqa: PLR0913 — pricing genuinely depends on this many inputs
             )
 
     if use_bonus:
-        spent = spendable_bonuses(base_amount, currency, balance=balance, policy=policy)
+        spent = spendable_bonuses(
+            base_amount,
+            currency,
+            balance=balance,
+            policy=policy,
+            stars_per_usdt=stars_per_usdt,
+        )
         if spent > 0:
             return PriceQuote(
                 base_amount=base_amount,
                 bonus_units=spent,
                 currency=currency,
+                bonus_rate=stars_per_usdt if currency is not Currency.XTR else None,
             )
 
     return plain_quote(base_amount, currency)
@@ -282,7 +333,7 @@ class CheckoutPricing(Protocol):
     amount whose funding was never recorded.
     """
 
-    async def resolve(
+    async def resolve(  # noqa: PLR0913 — one checkout, this many pricing facts
         self,
         uow: UnitOfWork,
         *,
@@ -290,15 +341,19 @@ class CheckoutPricing(Protocol):
         base_amount: Decimal,
         currency: Currency,
         use_bonus: bool,
+        stars_per_usdt: Decimal | None = None,
     ) -> PriceQuote:
         """Price a checkout and hold whatever it needs to be funded.
+
+        ``stars_per_usdt`` is the product's own rate, passed so bonuses can be
+        valued on a USDT sale; it is ignored on Stars.
 
         Raises:
             InsufficientBonusBalanceError: the buyer asked to spend bonuses they
                 no longer have — the balance moved between the prompt and the
                 button press.
             BonusesNotAvailableError: bonuses were requested on a rail that
-                cannot spend them.
+                cannot spend them (a USDT product with no declared rate).
         """
         ...
 
@@ -309,6 +364,7 @@ class CheckoutPricing(Protocol):
         base_amount: Decimal,
         currency: Currency,
         use_bonus: bool,
+        stars_per_usdt: Decimal | None = None,
     ) -> PriceQuote:
         """Price a checkout without holding anything. Read only.
 

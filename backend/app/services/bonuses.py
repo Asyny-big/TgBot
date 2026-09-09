@@ -103,7 +103,7 @@ class BonusService:
 
     # ------------------------------------------------------------------ pricing
 
-    async def resolve(
+    async def resolve(  # noqa: PLR0913 — one checkout, this many pricing facts
         self,
         uow: UnitOfWork,
         *,
@@ -111,23 +111,34 @@ class BonusService:
         base_amount: Decimal,
         currency: Currency,
         use_bonus: bool,
+        stars_per_usdt: Decimal | None = None,
     ) -> PriceQuote:
         """Price a checkout and hold whatever funds it, in the caller's transaction.
+
+        A bonus is a Star, so on a USDT sale it is valued at the product's own
+        ``stars_per_usdt`` rate. A USDT product that declares no rate — it is
+        priced in dollars only — cannot express what a bonus is worth, so
+        spending bonuses on it is refused rather than guessed.
 
         Raises:
             InsufficientBonusBalanceError: the buyer asked to spend bonuses they
                 no longer have. Refusing is deliberate: silently charging the
                 full price would surprise somebody who just saw a lower one.
-            BonusesNotAvailableError: bonuses were requested on a rail that
-                cannot spend them.
+            BonusesNotAvailableError: bonuses were requested on a USDT product
+                with no declared Stars/USDT equivalence to value them.
         """
         if not self.settings.enabled:
             return plain_quote(base_amount, currency)
 
-        if use_bonus and currency is not Currency.XTR:
-            # A bonus is a Star, so it can only reduce a Stars invoice. The bot
-            # never offers the choice on a crypto card, so reaching this means a
-            # hand-crafted callback — refuse it rather than quietly ignore it.
+        if (
+            use_bonus
+            and currency is not Currency.XTR
+            and (stars_per_usdt is None or stars_per_usdt <= 0)
+        ):
+            # A USDT product priced in dollars only has no declared equivalence
+            # to value a bonus with. The bot never offers the choice there, so
+            # reaching this is a hand-crafted callback — refuse it rather than
+            # quietly charge the full price.
             raise BonusesNotAvailableError(user_id=user_id, currency=currency.value)
 
         referral = await uow.referrals.get_by_referred(user_id)
@@ -160,6 +171,7 @@ class BonusService:
             discount_eligible=discount_eligible,
             balance=balance,
             use_bonus=use_bonus and not discount_eligible,
+            stars_per_usdt=stars_per_usdt,
         )
 
         if use_bonus and not discount_eligible and not priced.uses_bonus:
@@ -173,12 +185,14 @@ class BonusService:
         base_amount: Decimal,
         currency: Currency,
         use_bonus: bool,
+        stars_per_usdt: Decimal | None = None,
     ) -> PriceQuote:
         """Price a checkout without holding anything. Read only."""
         offer = await self.offer_for(
             user_id=user_id,
             base_amount=base_amount,
             currency=currency,
+            stars_per_usdt=stars_per_usdt,
         )
         if use_bonus and offer.available and offer.quote_with_bonus is not None:
             return offer.quote_with_bonus
@@ -210,8 +224,10 @@ class BonusService:
                 amount=-priced.bonus_units,
                 type=BonusTransactionType.BONUS_RESERVED,
                 purchase_id=purchase.id,
-                # No rate: bonuses are only ever spent on a Stars invoice, and
-                # one bonus is one Star.
+                # The rate that valued these units, on a USDT sale — ``None`` on
+                # Stars, where one bonus is one Star. Kept on the reservation so
+                # a later release or spend carries the same rate the invoice used.
+                stars_per_usdt=priced.bonus_rate,
             )
         )
         if entry is None:  # pragma: no cover — a fresh purchase id cannot collide
@@ -276,6 +292,7 @@ class BonusService:
         user_id: int,
         base_amount: Decimal,
         currency: Currency,
+        stars_per_usdt: Decimal | None = None,
     ) -> BonusOffer:
         """Price both branches so the bot can ask "spend your bonuses?".
 
@@ -305,14 +322,18 @@ class BonusService:
             referral_id=referral_id,
             discount_eligible=discount_eligible,
         )
-        # Only the *bonus* branch is Stars-only, because a bonus is a Star. The
-        # referral discount is a percentage of the price and applies to crypto
-        # too, so it stays in ``without`` above on every rail.
-        #
         # On a first referral purchase bonuses are not offered at all: the
-        # discount applies instead, which keeps the economics simple and
-        # removes a family of edge cases.
-        if currency is not Currency.XTR or discount_eligible or balance <= 0:
+        # discount applies instead (Referral > Bonus), which keeps the economics
+        # simple and removes a family of edge cases. The discount is a
+        # percentage of the price, so it stays in ``without`` above on every
+        # rail — it is only the *bonus* branch that needs a rate on USDT.
+        #
+        # A USDT product priced in dollars only has no declared Stars/USDT
+        # equivalence to value a bonus with, so none is offered there either.
+        no_usdt_rate = currency is not Currency.XTR and (
+            stars_per_usdt is None or stars_per_usdt <= 0
+        )
+        if discount_eligible or balance <= 0 or no_usdt_rate:
             return BonusOffer(balance=balance, quote_without_bonus=without)
 
         with_bonus = quote(
@@ -321,6 +342,7 @@ class BonusService:
             policy=self.policy,
             balance=balance,
             use_bonus=True,
+            stars_per_usdt=stars_per_usdt,
         )
         if not with_bonus.uses_bonus:
             return BonusOffer(balance=balance, quote_without_bonus=without)

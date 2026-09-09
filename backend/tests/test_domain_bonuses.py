@@ -175,9 +175,28 @@ def test_an_empty_balance_spends_nothing() -> None:
     assert spendable_bonuses(Decimal(1000), STARS, balance=0, policy=POLICY) == 0
 
 
-def test_bonuses_cannot_be_spent_on_a_usdt_purchase() -> None:
-    """A bonus is a Star, so it reduces a Stars invoice and nothing else."""
+def test_usdt_bonuses_need_a_declared_rate_to_be_spent() -> None:
+    """A bonus is a Star; on USDT it needs the product's own rate to be valued.
+
+    A product priced in USDT only declares no such rate, so nothing is spendable.
+    """
     assert spendable_bonuses(Decimal("10.00"), USDT, balance=5000, policy=POLICY) == 0
+
+
+def test_a_small_usdt_balance_is_spent_in_full() -> None:
+    """700 ⭐ / 10 USDT is 70 ⭐ per USDT; 22 units are all spendable here."""
+    spent = spendable_bonuses(
+        Decimal("10.00"), USDT, balance=22, policy=POLICY, stars_per_usdt=Decimal(70)
+    )
+    assert spent == 22
+
+
+def test_a_huge_usdt_balance_is_capped_at_half_the_price() -> None:
+    """50% of 10.00 is 5.00 USDT, which at 70 ⭐/USDT is 350 one-Star units."""
+    spent = spendable_bonuses(
+        Decimal("10.00"), USDT, balance=5000, policy=POLICY, stars_per_usdt=Decimal(70)
+    )
+    assert spent == 350
 
 
 def test_something_is_always_left_to_charge() -> None:
@@ -256,10 +275,72 @@ def test_asking_for_bonuses_without_a_balance_changes_nothing() -> None:
     assert priced.charged_amount == Decimal(1000)
 
 
-def test_asking_for_bonuses_on_a_usdt_price_changes_nothing() -> None:
+def test_asking_for_bonuses_on_a_usdt_price_without_a_rate_changes_nothing() -> None:
+    """No declared rate means bonuses cannot be valued, so the price stands."""
     priced = quote(Decimal("10.00"), USDT, policy=POLICY, balance=500, use_bonus=True)
     assert priced.is_plain
     assert priced.charged_amount == Decimal("10.00")
+
+
+def test_usdt_bonuses_convert_at_the_products_own_rate() -> None:
+    """The specification's example: 22 bonuses at 70 ⭐/USDT take 0.31 off 10.00.
+
+    22 / 70 = 0.314..., floored to a chargeable cent is 0.31, so 10.00 - 0.31 = 9.69.
+    """
+    priced = quote(
+        Decimal("10.00"),
+        USDT,
+        policy=POLICY,
+        balance=22,
+        use_bonus=True,
+        stars_per_usdt=Decimal(70),
+    )
+    assert priced.bonus_units == 22
+    assert priced.bonus_amount == Decimal("0.31")
+    assert priced.charged_amount == Decimal("9.69")
+
+
+def test_a_usdt_bonus_discount_is_floored_to_a_cent() -> None:
+    """25 / 70 = 0.357…, floored to 0.35 — rounding favours the shop."""
+    priced = quote(
+        Decimal("10.00"),
+        USDT,
+        policy=POLICY,
+        balance=25,
+        use_bonus=True,
+        stars_per_usdt=Decimal(70),
+    )
+    assert priced.bonus_amount == Decimal("0.35")
+    assert priced.charged_amount == Decimal("9.65")
+
+
+def test_a_usdt_bonus_payment_cannot_exceed_half_the_price() -> None:
+    """A huge balance still leaves at least half of 10.00 to charge."""
+    priced = quote(
+        Decimal("10.00"),
+        USDT,
+        policy=POLICY,
+        balance=5000,
+        use_bonus=True,
+        stars_per_usdt=Decimal(70),
+    )
+    assert priced.bonus_units == 350
+    assert priced.bonus_amount == Decimal("5.00")
+    assert priced.charged_amount == Decimal("5.00")
+
+
+def test_a_one_cent_usdt_product_accepts_no_bonuses() -> None:
+    """Half a cent is not chargeable, so a 0.01 product takes no bonus discount."""
+    priced = quote(
+        Decimal("0.01"),
+        USDT,
+        policy=POLICY,
+        balance=5000,
+        use_bonus=True,
+        stars_per_usdt=Decimal(100),
+    )
+    assert priced.is_plain
+    assert priced.charged_amount == Decimal("0.01")
 
 
 def test_the_breakdown_always_explains_the_charge() -> None:

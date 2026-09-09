@@ -211,6 +211,7 @@ class PurchaseService:
                 base_amount=base_amount,
                 currency=provider.currency,
                 use_bonus=use_bonus,
+                stars_per_usdt=product.stars_per_usdt,
             )
             self._require_expected_amount(priced, expected_amount, product_id=product_id)
 
@@ -243,7 +244,7 @@ class PurchaseService:
         )
         return purchase
 
-    async def _price_checkout(
+    async def _price_checkout(  # noqa: PLR0913 — one checkout, this many pricing facts
         self,
         uow: UnitOfWork,
         *,
@@ -251,6 +252,7 @@ class PurchaseService:
         base_amount: Decimal,
         currency: Currency,
         use_bonus: bool,
+        stars_per_usdt: Decimal | None = None,
     ) -> PriceQuote:
         """The list price, or whatever the referral feature makes of it."""
         if self.pricing is None:
@@ -261,6 +263,7 @@ class PurchaseService:
             base_amount=base_amount,
             currency=currency,
             use_bonus=use_bonus,
+            stars_per_usdt=stars_per_usdt,
         )
 
     @staticmethod
@@ -310,6 +313,7 @@ class PurchaseService:
             base_amount=base_amount,
             currency=provider.currency,
             use_bonus=use_bonus,
+            stars_per_usdt=product.stars_per_usdt,
         )
         return priced.charged_amount
 

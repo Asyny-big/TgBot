@@ -114,7 +114,7 @@ BONUS_UNAVAILABLE: Final = "Не удалось открыть раздел бо
 BONUS_BALANCE_CHANGED: Final = (
     "Баланс бонусов изменился. Откройте товар заново, чтобы увидеть актуальную цену."
 )
-BONUS_STARS_ONLY: Final = "Бонусами можно оплачивать только покупки за Telegram Stars."
+BONUS_NOT_FOR_PRODUCT: Final = "Бонусы недоступны для этого товара."
 PURCHASE_COMPLETE_HINT: Final = "🎁 Приглашай друзей и получай бонусы с их покупок."
 
 
