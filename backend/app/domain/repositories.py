@@ -385,17 +385,26 @@ class BonusRepository(Protocol):
         """Total bonus units this user has ever earned from referrals."""
         ...
 
-    async def purchases_awaiting_reward(self, *, limit: int = 100) -> tuple[UUID, ...]:
+    async def purchases_awaiting_reward(
+        self,
+        *,
+        reward_percent: int,
+        limit: int = 100,
+    ) -> tuple[UUID, ...]:
         """Delivered purchases by invited buyers that carry no reward yet.
 
         The safety net behind reward accrual: a process that died between
         marking a sale delivered and crediting the inviter is repaired here,
         the same way a lost payment webhook is repaired by reconciliation.
+
+        Only purchases that earn at least one bonus at ``reward_percent`` are
+        returned: one that earns nothing never gets an entry, and must not be
+        offered again on every pass.
         """
         ...
 
     async def stale_holds(self, *, limit: int = 100) -> tuple[UUID, ...]:
-        """Purchases holding bonus units that can no longer be paid for."""
+        """Purchases whose reservation is dead and not yet released."""
         ...
 
 

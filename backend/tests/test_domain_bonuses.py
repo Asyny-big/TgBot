@@ -16,6 +16,7 @@ import pytest
 from app.domain.bonuses import (
     BonusPolicy,
     discount_for,
+    floor_to_step,
     max_bonus_payment,
     plain_quote,
     quote,
@@ -360,3 +361,128 @@ def test_the_breakdown_always_explains_the_charge() -> None:
         )
         expected = priced.base_amount - priced.discount_amount - priced.bonus_amount
         assert priced.charged_amount == expected
+
+
+# --- Bonuses worth less than a cent (Stage 2, defect a)
+
+
+def test_a_bonus_worth_less_than_a_cent_is_not_spent() -> None:
+    """At 200 ⭐/USDT one bonus is worth 0.005, which floors to 0.00.
+
+    Before the fix the unit was still taken: reserved, then spent, for nothing.
+    """
+    assert (
+        spendable_bonuses(
+            Decimal("5.00"), USDT, balance=1, policy=POLICY, stars_per_usdt=Decimal(200)
+        )
+        == 0
+    )
+    priced = quote(
+        Decimal("5.00"),
+        USDT,
+        policy=POLICY,
+        balance=1,
+        use_bonus=True,
+        stars_per_usdt=Decimal(200),
+    )
+    assert priced.bonus_units == 0
+    assert priced.bonus_amount == 0
+    assert priced.is_plain
+    assert priced.charged_amount == Decimal("5.00")
+
+
+def test_only_the_bonuses_the_discount_needs_are_spent() -> None:
+    """Three bonuses at 200 ⭐/USDT buy 0.015 → 0.01; two already buy that cent."""
+    priced = quote(
+        Decimal("5.00"),
+        USDT,
+        policy=POLICY,
+        balance=3,
+        use_bonus=True,
+        stars_per_usdt=Decimal(200),
+    )
+    assert priced.bonus_units == 2
+    assert priced.bonus_amount == Decimal("0.01")
+    assert priced.charged_amount == Decimal("4.99")
+
+
+@pytest.mark.parametrize(
+    ("rate", "expected"),
+    [
+        (Decimal(100), Decimal("0.01")),  # exactly a cent
+        (Decimal(70), Decimal("0.01")),  # 0.0142… floors to a cent
+        (Decimal(1), Decimal("1.00")),  # a whole dollar
+    ],
+)
+def test_one_bonus_worth_a_cent_or_more_is_still_spent(rate: Decimal, expected: Decimal) -> None:
+    """The normal case is untouched: a bonus that buys a discount is used."""
+    priced = quote(
+        Decimal("10.00"),
+        USDT,
+        policy=POLICY,
+        balance=1,
+        use_bonus=True,
+        stars_per_usdt=rate,
+    )
+    assert priced.bonus_units == 1
+    assert priced.bonus_amount == expected
+    assert priced.charged_amount == Decimal("10.00") - expected
+
+
+def test_cheap_bonuses_are_still_capped_at_half_the_price() -> None:
+    """A huge balance at 200 ⭐/USDT: 50% of 5.00 is 2.50, i.e. 500 bonuses."""
+    priced = quote(
+        Decimal("5.00"),
+        USDT,
+        policy=POLICY,
+        balance=10**6,
+        use_bonus=True,
+        stars_per_usdt=Decimal(200),
+    )
+    assert priced.bonus_units == 500
+    assert priced.bonus_amount == Decimal("2.50")
+    assert priced.charged_amount == Decimal("2.50")
+
+
+def test_a_stars_balance_of_one_is_still_one_star_off() -> None:
+    """Stars has no rounding to a cent: one bonus is always one Star."""
+    assert spendable_bonuses(Decimal(1000), STARS, balance=1, policy=POLICY) == 1
+
+
+@pytest.mark.parametrize(
+    ("price_stars", "price_usdt"),
+    [
+        (1000, Decimal("5.00")),
+        (1000, Decimal("24.00")),
+        (1000, Decimal("3.00")),
+        (2500, Decimal("7.77")),
+        (150, Decimal("2.99")),
+        (700, Decimal("10.00")),
+    ],
+)
+def test_every_bonus_spent_on_usdt_buys_part_of_the_discount(
+    price_stars: int,
+    price_usdt: Decimal,
+) -> None:
+    """Over every balance: no unit without a discount, and none beyond what it needs.
+
+    One unit fewer must always buy less — otherwise that unit was taken for
+    nothing. The discount itself is never smaller than before the fix.
+    """
+    rate = Decimal(price_stars) / price_usdt
+    for balance in range(400):
+        priced = quote(
+            price_usdt,
+            USDT,
+            policy=POLICY,
+            balance=balance,
+            use_bonus=True,
+            stars_per_usdt=rate,
+        )
+        assert priced.charged_amount > 0
+        assert priced.bonus_units <= balance
+        if priced.bonus_units == 0:
+            continue
+        assert priced.bonus_amount > 0
+        one_fewer = floor_to_step(Decimal(priced.bonus_units - 1) / rate, USDT)
+        assert one_fewer < priced.bonus_amount

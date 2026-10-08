@@ -17,25 +17,31 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, literal, or_, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import aliased
 
 from app.core.exceptions import InsufficientBonusBalanceError, UserNotFoundError
 from app.core.logging import get_logger
+from app.domain.bonuses import BonusPolicy, reward_bonuses
 from app.domain.commands import BonusTransactionDraft
-from app.domain.enums import BONUS_HOLD_TYPES, BonusTransactionType, PurchaseStatus
+from app.domain.enums import BONUS_HOLD_TYPES, BonusTransactionType, Currency, PurchaseStatus
 from app.infrastructure.db.errors import violated_constraint
-from app.infrastructure.db.mappers import to_bonus_transaction
+from app.infrastructure.db.mappers import to_bonus_transaction, to_product
 from app.infrastructure.db.models import (
     BonusTransactionModel,
+    ProductModel,
     PurchaseModel,
     ReferralModel,
     UserModel,
 )
 
 if TYPE_CHECKING:
+    from datetime import datetime
+    from decimal import Decimal
     from uuid import UUID
 
+    from sqlalchemy import Select
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from app.domain.entities import BonusTransaction
@@ -47,6 +53,8 @@ _UNPAYABLE_STATUSES = (
     PurchaseStatus.REFUNDED,
 )
 """Statuses after which an invoice can no longer be paid, so a hold is dead."""
+
+_PERCENT = 100
 
 
 class SqlAlchemyBonusRepository:
@@ -183,37 +191,151 @@ class SqlAlchemyBonusRepository:
         )
         return int((await self._session.scalar(statement)) or 0)
 
-    async def purchases_awaiting_reward(self, *, limit: int = 100) -> tuple[UUID, ...]:
+    async def purchases_awaiting_reward(
+        self,
+        *,
+        reward_percent: int,
+        limit: int = 100,
+    ) -> tuple[UUID, ...]:
         """Delivered purchases by invited buyers that carry no reward yet.
 
         The safety net behind reward accrual. A process that died between
         marking a sale delivered and crediting the inviter is repaired from
         here, the same way a lost payment webhook is repaired by reconciliation.
+
+        Only purchases that earn at least one bonus are returned. One that earns
+        nothing — a USDT product with no declared Stars price, or a sale too
+        small for ``reward_percent`` to reach one bonus — never gets a reward
+        entry, because a zero entry does not exist in this ledger. Left in, such
+        purchases came back on every pass, oldest first, until they filled the
+        batch and hid the purchases that genuinely missed a reward.
+
+        "Earns at least one bonus" is decided by ``reward_bonuses`` itself, the
+        function that credits the reward, so the two cannot disagree. The
+        database only narrows the candidates first, with the same formula in
+        exact arithmetic (``amount * pct >= 100`` on Stars; on USDT
+        ``amount * price_stars * pct >= 100 * price_usdt``). That pre-filter
+        never drops a purchase ``reward_bonuses`` would reward — see
+        ``_reward_candidates`` — but at the exact threshold it may keep one that
+        Python rounds to zero, which the final check then removes. Candidates
+        are read page by page, so removed rows can never fill a batch.
+        """
+        if reward_percent <= 0:
+            return ()
+        policy = BonusPolicy(reward_percent=reward_percent)
+        awaiting: list[UUID] = []
+        after: tuple[datetime, UUID] | None = None
+        while len(awaiting) < limit:
+            statement = self._reward_candidates(reward_percent, after=after).limit(limit)
+            rows = (await self._session.execute(statement)).all()
+            for row in rows:
+                if self._earns_a_bonus(row.amount, row.currency, row.ProductModel, policy):
+                    awaiting.append(row.id)
+                    if len(awaiting) == limit:
+                        break
+            if len(rows) < limit:
+                break
+            after = (rows[-1].delivered_at, rows[-1].id)
+        return tuple(awaiting)
+
+    @staticmethod
+    def _reward_candidates(
+        reward_percent: int,
+        *,
+        after: tuple[datetime, UUID] | None,
+    ) -> Select[tuple[UUID, datetime | None, Decimal, Currency, ProductModel]]:
+        """Unrewarded delivered sales whose exact reward reaches one bonus.
+
+        Why this never drops a sale ``reward_bonuses`` rewards: written with the
+        stored scales (amount ``a / 10**6``, USDT price ``b / 100``), the exact
+        reward on USDT is ``a * price_stars * pct / (10**6 * b)``. Unless it is
+        exactly 1 it is at least ``1 / (10**6 * b)`` — over ``10**-18`` for any
+        storable price — away from 1. ``reward_bonuses`` works in 28-digit
+        ``Decimal`` and is off by about ``10**-27``, so it can only land on the
+        other side of 1 when the exact value *is* 1. Those rows pass this
+        filter and are settled by ``_earns_a_bonus``. On Stars nothing is
+        rounded at all: ``amount * pct / 100`` is exact in 28 digits.
         """
         recorded = select(BonusTransactionModel.purchase_id).where(
             BonusTransactionModel.type == BonusTransactionType.REFERRAL_REWARD,
             BonusTransactionModel.purchase_id.is_not(None),
         )
+        earns_on_stars = and_(
+            PurchaseModel.currency == Currency.XTR,
+            PurchaseModel.amount * reward_percent >= _PERCENT,
+        )
+        earns_on_usdt = and_(
+            PurchaseModel.currency == Currency.USDT,
+            ProductModel.price_stars.is_not(None),
+            ProductModel.price_usdt > 0,
+            PurchaseModel.amount * ProductModel.price_stars * reward_percent
+            >= ProductModel.price_usdt * _PERCENT,
+        )
         statement = (
-            select(PurchaseModel.id)
+            select(
+                PurchaseModel.id,
+                PurchaseModel.delivered_at,
+                PurchaseModel.amount,
+                PurchaseModel.currency,
+                ProductModel,
+            )
             .join(ReferralModel, ReferralModel.referred_user_id == PurchaseModel.user_id)
+            .join(ProductModel, ProductModel.id == PurchaseModel.product_id)
             .where(
                 PurchaseModel.status == PurchaseStatus.DELIVERED,
                 PurchaseModel.id.not_in(recorded),
+                or_(earns_on_stars, earns_on_usdt),
             )
-            .order_by(PurchaseModel.delivered_at.asc())
-            .limit(limit)
+            .order_by(PurchaseModel.delivered_at.asc(), PurchaseModel.id.asc())
         )
-        return tuple((await self._session.execute(statement)).scalars().all())
+        if after is not None:
+            delivered_at, purchase_id = after
+            statement = statement.where(
+                tuple_(PurchaseModel.delivered_at, PurchaseModel.id)
+                > tuple_(
+                    literal(delivered_at, PurchaseModel.delivered_at.type),
+                    literal(purchase_id, PurchaseModel.id.type),
+                )
+            )
+        return statement
+
+    @staticmethod
+    def _earns_a_bonus(
+        amount: Decimal,
+        currency: Currency,
+        product: ProductModel,
+        policy: BonusPolicy,
+    ) -> bool:
+        """``BonusService._reward_for``'s own arithmetic, applied to one candidate."""
+        rate = None if currency is Currency.XTR else to_product(product).stars_per_usdt
+        return reward_bonuses(amount, currency, policy=policy, stars_per_usdt=rate) > 0
 
     async def stale_holds(self, *, limit: int = 100) -> tuple[UUID, ...]:
-        """Purchases holding reserved units that can no longer be paid for."""
+        """Purchases holding reserved units that can no longer be paid for.
+
+        Releasing appends a ``bonus_reserve_released`` entry and leaves the
+        reservation row as it is, so a released hold must be excluded here
+        explicitly. Without that, every hold ever released kept coming back,
+        oldest first, until they filled the whole batch and a new dead hold was
+        never reached. A settled hold needs no such check: settling changes the
+        row's own type to ``bonus_spent``.
+        """
+        released = aliased(BonusTransactionModel, name="released")
+        already_released = (
+            select(released.id)
+            .where(
+                released.purchase_id == BonusTransactionModel.purchase_id,
+                released.type == BonusTransactionType.BONUS_RESERVE_RELEASED,
+            )
+            .exists()
+        )
         statement = (
             select(BonusTransactionModel.purchase_id)
             .join(PurchaseModel, PurchaseModel.id == BonusTransactionModel.purchase_id)
             .where(
                 BonusTransactionModel.type == BonusTransactionType.BONUS_RESERVED,
                 PurchaseModel.status.in_(_UNPAYABLE_STATUSES),
+                ~already_released,
             )
             .order_by(BonusTransactionModel.created_at.asc())
             .limit(limit)

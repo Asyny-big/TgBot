@@ -31,7 +31,7 @@ between the quote and the invoice.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import ROUND_FLOOR, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import TYPE_CHECKING, Final, Protocol
 
 from app.domain.enums import Currency
@@ -270,7 +270,31 @@ def spendable_bonuses(
 
     # …then the whole number of one-Star units that dollar amount buys.
     max_units = int((max_discount * stars_per_usdt).to_integral_value(rounding=ROUND_FLOOR))
-    return max(min(balance, max_units), 0)
+    units = max(min(balance, max_units), 0)
+    return _units_worth_charging(units, currency, stars_per_usdt)
+
+
+def _units_worth_charging(units: int, currency: Currency, stars_per_usdt: Decimal) -> int:
+    """The fewest of ``units`` that still buy the same chargeable discount.
+
+    The money value of bonuses on USDT is floored to a cent, and when a Star is
+    worth less than a cent (more than 100 Stars per USDT) some units buy
+    nothing: one unit at 200 ⭐/USDT is worth 0.005, which floors to 0.00. Those
+    units must not be taken. Units whose value floors to zero are not spent at
+    all, and otherwise only as many are spent as the floored discount needs —
+    never more than ``units``, so the balance and the cap above still bound it.
+    """
+    if units <= 0:
+        return 0
+    discount = floor_to_step(Decimal(units) / stars_per_usdt, currency)
+    if discount <= 0:
+        return 0
+    needed = int((discount * stars_per_usdt).to_integral_value(rounding=ROUND_CEILING))
+    if 0 < needed < units and floor_to_step(Decimal(needed) / stars_per_usdt, currency) == discount:
+        return needed
+    # The rate cannot be represented exactly and the trimmed count would buy one
+    # cent less; keep the original count rather than shortchange the buyer.
+    return units
 
 
 def quote(  # noqa: PLR0913 — pricing genuinely depends on this many inputs

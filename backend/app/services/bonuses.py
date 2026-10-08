@@ -432,7 +432,10 @@ class BonusService:
         if not self.settings.enabled:
             return 0
         async with self.uow_factory() as uow:
-            pending = await uow.bonuses.purchases_awaiting_reward(limit=limit)
+            pending = await uow.bonuses.purchases_awaiting_reward(
+                reward_percent=self.policy.reward_percent,
+                limit=limit,
+            )
 
         accrued = 0
         for purchase_id in pending:

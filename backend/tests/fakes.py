@@ -30,6 +30,7 @@ from app.core.exceptions import (
     SlugAlreadyExistsError,
     UserNotFoundError,
 )
+from app.domain.bonuses import BonusPolicy, reward_bonuses
 from app.domain.commands import BonusTransactionDraft
 from app.domain.entities import (
     BonusTransaction,
@@ -44,6 +45,7 @@ from app.domain.enums import (
     ACCESS_GRANTING_STATUSES,
     BONUS_HOLD_TYPES,
     BonusTransactionType,
+    Currency,
     PaymentProvider,
     PurchaseStatus,
 )
@@ -508,6 +510,7 @@ class FakeBonusRepository:
         self.entries: list[BonusTransaction] = []
         self.users = users
         self.purchases: FakePurchaseRepository | None = None
+        self.products: FakeProductRepository | None = None
 
     async def balance(self, user_id: int) -> int:
         user = self.users.items.get(user_id)
@@ -582,8 +585,13 @@ class FakeBonusRepository:
             if entry.user_id == user_id and entry.type is BonusTransactionType.REFERRAL_REWARD
         )
 
-    async def purchases_awaiting_reward(self, *, limit: int = 100) -> tuple[UUID, ...]:
-        if self.purchases is None:
+    async def purchases_awaiting_reward(
+        self,
+        *,
+        reward_percent: int,
+        limit: int = 100,
+    ) -> tuple[UUID, ...]:
+        if self.purchases is None or reward_percent <= 0:
             return ()
         rewarded = {
             entry.purchase_id
@@ -593,19 +601,39 @@ class FakeBonusRepository:
         pending = [
             purchase.id
             for purchase in self.purchases.items.values()
-            if purchase.status is PurchaseStatus.DELIVERED and purchase.id not in rewarded
+            if purchase.status is PurchaseStatus.DELIVERED
+            and purchase.id not in rewarded
+            and self._earns_a_reward(purchase, reward_percent)
         ]
         return tuple(pending[:limit])
+
+    def _earns_a_reward(self, purchase: Purchase, reward_percent: int) -> bool:
+        """The reward formula itself, standing in for the SQL predicate."""
+        product = self.products.items.get(purchase.product_id) if self.products else None
+        rate = product.stars_per_usdt if product is not None else None
+        units = reward_bonuses(
+            purchase.amount,
+            purchase.currency,
+            policy=BonusPolicy(reward_percent=reward_percent),
+            stars_per_usdt=None if purchase.currency is Currency.XTR else rate,
+        )
+        return units > 0
 
     async def stale_holds(self, *, limit: int = 100) -> tuple[UUID, ...]:
         if self.purchases is None:
             return ()
         dead = (PurchaseStatus.EXPIRED, PurchaseStatus.REFUNDED)
+        released = {
+            entry.purchase_id
+            for entry in self.entries
+            if entry.type is BonusTransactionType.BONUS_RESERVE_RELEASED
+        }
         held = [
             entry.purchase_id
             for entry in self.entries
             if entry.type is BonusTransactionType.BONUS_RESERVED
             and entry.purchase_id is not None
+            and entry.purchase_id not in released
             and (purchase := self.purchases.items.get(entry.purchase_id)) is not None
             and purchase.status in dead
         ]
@@ -664,6 +692,7 @@ class FakeUnitOfWork:
         self._products.purchases = self._purchases
         self._referrals.purchases = self._purchases
         self._bonuses.purchases = self._purchases
+        self._bonuses.products = self._products
         self.commits = 0
         self.rollbacks = 0
 
