@@ -286,6 +286,24 @@ class BonusService:
             discount=str(purchase.discount_amount),
         )
 
+    async def on_checkout_expired(self, uow: UnitOfWork, purchase: Purchase) -> None:
+        """Release the bonus reservation of an invoice a checkout just expired.
+
+        The referral discount needs nothing: it is only burned on payment, and
+        the pending-discount guard stops counting this purchase once it is no
+        longer pending.
+        """
+        if not self.settings.enabled:
+            return
+        released = await uow.bonuses.release_hold(purchase.id)
+        if released is not None:
+            logger.info(
+                "bonus_reserve_released_on_reissue",
+                purchase_id=str(purchase.id),
+                user_id=purchase.user_id,
+                units=released.amount,
+            )
+
     async def offer_for(
         self,
         *,

@@ -223,6 +223,26 @@ class PurchaseRepository(Protocol):
         """Mark stale pending purchases as expired; return how many changed."""
         ...
 
+    async def expire(self, purchase_id: UUID) -> Purchase:
+        """Move one pending purchase to ``expired``, under a row lock.
+
+        Any other status is returned unchanged: an invoice that was paid in the
+        meantime must never be expired by this call.
+
+        Raises:
+            PurchaseNotFoundError: no purchase with this id.
+        """
+        ...
+
+    async def pending_checkouts(
+        self,
+        user_id: int,
+        product_id: UUID,
+        provider: PaymentProvider,
+    ) -> tuple[Purchase, ...]:
+        """This buyer's pending purchases of one product on one rail, newest first."""
+        ...
+
     async def list_pending(
         self,
         provider: PaymentProvider,

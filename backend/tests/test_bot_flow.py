@@ -40,6 +40,7 @@ from app.bot.texts import (
     CARD_NOT_FOUND,
     CARD_UNAVAILABLE,
     CRYPTO_INVOICE_CREATED,
+    CRYPTO_INVOICE_RESUMED,
     DELIVERY_FAILED,
     NO_DEEP_LINK,
     PAYMENT_IN_PROGRESS,
@@ -63,12 +64,17 @@ from app.core.config import (
     TelegramSettings,
 )
 from app.core.container import Container
-from app.core.exceptions import InvalidSlugError, PaymentGatewayError
-from app.domain.commands import ProductDraft, UserDraft
+from app.core.exceptions import (
+    CheckoutAlreadyPendingError,
+    InvalidSlugError,
+    PaymentGatewayError,
+)
+from app.domain.commands import ProductDraft, ProductUpdate, UserDraft
 from app.domain.enums import PaymentProvider, PurchaseStatus
 from app.infrastructure.cache.rate_limit import RedisRateLimiter
 from app.infrastructure.payments.cryptobot import SIGNATURE_HEADER, CryptoBotClient
 from app.infrastructure.telegram.gateways import TelegramDeliveryGateway
+from app.services.checkout import CheckoutService
 from tests.bot_harness import (
     RecordingBot,
     bonus_button_update,
@@ -93,7 +99,6 @@ if TYPE_CHECKING:
     from app.domain.entities import Product
     from app.infrastructure.cache.locks import RedisLockManager
     from app.infrastructure.db.engine import Database
-    from app.services.checkout import CheckoutService
 
 CRYPTO_TOKEN = "12345:cryptobot-test-token"  # noqa: S105
 CRYPTO_INVOICE_ID = "770001"
@@ -112,6 +117,7 @@ class FakeCryptoPay:
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
         self.states: dict[str, str] = {}
+        self.lookups: list[list[str]] = []
         self.next_invoice_id = int(CRYPTO_INVOICE_ID)
         self.fail_create = False
 
@@ -137,10 +143,15 @@ class FakeCryptoPay:
             )
         if request.url.path.endswith("/getInvoices"):
             requested = str(payload.get("invoice_ids", "")).split(",")
+            self.lookups.append(requested)
             items = [
-                {"invoice_id": int(invoice_id), "status": self.states.get(invoice_id, "active")}
+                {
+                    "invoice_id": int(invoice_id),
+                    "status": self.states[invoice_id],
+                    "bot_invoice_url": CRYPTO_PAY_URL,
+                }
                 for invoice_id in requested
-                if invoice_id
+                if invoice_id in self.states
             ]
             return httpx.Response(200, json={"ok": True, "result": {"items": items}})
         message = f"unexpected Crypto Pay call: {request.url.path}"
@@ -148,6 +159,9 @@ class FakeCryptoPay:
 
     def mark_paid(self, invoice_id: str) -> None:
         self.states[invoice_id] = "paid"
+
+    def mark_expired(self, invoice_id: str) -> None:
+        self.states[invoice_id] = "expired"
 
     def webhook_body(self, invoice_id: str) -> bytes:
         return json.dumps(
@@ -644,6 +658,134 @@ async def test_a_failing_provider_is_reported_to_the_buyer(harness: BotHarness) 
     answers = harness.bot.methods(AnswerCallbackQuery)
     assert answers[-1].text == PAYMENT_UNAVAILABLE
     assert await harness.container.purchases.list_pending(PaymentProvider.CRYPTO) == ()
+
+
+async def test_pressing_crypto_again_hands_back_the_same_invoice(harness: BotHarness) -> None:
+    """Bug #3: fifteen presses used to make fifteen invoices."""
+    product = await _product(harness)
+    user = make_user()
+    await harness.feed(start_update(product.slug, user=user))
+
+    for update_id in (31, 32, 33):
+        await harness.feed(
+            pay_button_update(
+                provider=PaymentProvider.CRYPTO,
+                product_id=product.id,
+                user=user,
+                update_id=update_id,
+            )
+        )
+
+    assert len(harness.crypto.created) == 1
+    assert len(await harness.container.purchases.list_pending(PaymentProvider.CRYPTO)) == 1
+    assert harness.bot.texts().count(CRYPTO_INVOICE_CREATED) == 1
+    assert harness.bot.texts().count(CRYPTO_INVOICE_RESUMED) == 2
+    for sent in harness.bot.methods(SendMessage)[-3:]:
+        assert sent.reply_markup.inline_keyboard[0][0].url == CRYPTO_PAY_URL
+
+
+async def test_an_invoice_at_an_old_price_is_explained_not_doubled(harness: BotHarness) -> None:
+    product = await _product(harness)
+    user = make_user()
+    await harness.feed(start_update(product.slug, user=user))
+    await harness.feed(
+        pay_button_update(provider=PaymentProvider.CRYPTO, product_id=product.id, user=user)
+    )
+    await harness.container.products.update(
+        product.id,
+        ProductUpdate(price_usdt=Decimal("7.00")),
+    )
+
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.CRYPTO,
+            product_id=product.id,
+            user=user,
+            update_id=41,
+        )
+    )
+
+    assert len(harness.crypto.created) == 1
+    notice = harness.bot.methods(SendMessage)[-1]
+    assert "уже есть неоплаченный счёт" in notice.text
+    assert "5 USDT" in notice.text
+    assert notice.reply_markup.inline_keyboard[0][0].url == CRYPTO_PAY_URL
+
+
+async def test_a_paid_but_unsettled_invoice_is_not_followed_by_another(
+    harness: BotHarness,
+) -> None:
+    product = await _product(harness)
+    user = make_user()
+    await harness.feed(start_update(product.slug, user=user))
+    await harness.feed(
+        pay_button_update(provider=PaymentProvider.CRYPTO, product_id=product.id, user=user)
+    )
+    (pending,) = await harness.container.purchases.list_pending(PaymentProvider.CRYPTO)
+    harness.crypto.mark_paid(pending.external_id)
+
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.CRYPTO,
+            product_id=product.id,
+            user=user,
+            update_id=61,
+        )
+    )
+
+    assert len(harness.crypto.created) == 1
+    assert harness.bot.methods(AnswerCallbackQuery)[-1].text == PAYMENT_IN_PROGRESS
+
+
+async def test_a_checkout_refused_by_the_database_is_answered_not_crashed(
+    harness: BotHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """uq_purchases_user_product_pending_crypto surfaces as "in progress", never a 500."""
+    product = await _product(harness)
+    user = make_user()
+    await harness.feed(start_update(product.slug, user=user))
+
+    async def lost_the_race(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise CheckoutAlreadyPendingError
+
+    monkeypatch.setattr(CheckoutService, "start_crypto_checkout", lost_the_race)
+    sent_before = len(harness.bot.methods(SendMessage))
+
+    await harness.feed(
+        pay_button_update(provider=PaymentProvider.CRYPTO, product_id=product.id, user=user)
+    )
+
+    assert harness.bot.methods(AnswerCallbackQuery)[-1].text == PAYMENT_IN_PROGRESS
+    # No invoice link, no error text: just the short "in progress" answer.
+    assert len(harness.bot.methods(SendMessage)) == sent_before
+
+
+async def test_an_invoice_expired_at_crypto_pay_is_replaced(harness: BotHarness) -> None:
+    product = await _product(harness)
+    user = make_user()
+    await harness.feed(start_update(product.slug, user=user))
+    await harness.feed(
+        pay_button_update(provider=PaymentProvider.CRYPTO, product_id=product.id, user=user)
+    )
+    (first,) = await harness.container.purchases.list_pending(PaymentProvider.CRYPTO)
+    harness.crypto.mark_expired(first.external_id)
+
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.CRYPTO,
+            product_id=product.id,
+            user=user,
+            update_id=51,
+        )
+    )
+
+    assert len(harness.crypto.created) == 2
+    assert (await harness.container.purchases.get(first.id)).status is PurchaseStatus.EXPIRED
+    (second,) = await harness.container.purchases.list_pending(PaymentProvider.CRYPTO)
+    assert second.id != first.id
+    assert harness.bot.texts().count(CRYPTO_INVOICE_CREATED) == 2
 
 
 async def test_housekeeping_expires_unpaid_invoices(harness: BotHarness) -> None:

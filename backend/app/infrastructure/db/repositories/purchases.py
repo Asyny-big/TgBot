@@ -13,7 +13,12 @@ from sqlalchemy import func, or_, select, union, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
-from app.core.exceptions import ConflictError, DuplicatePurchaseError, PurchaseNotFoundError
+from app.core.exceptions import (
+    CheckoutAlreadyPendingError,
+    ConflictError,
+    DuplicatePurchaseError,
+    PurchaseNotFoundError,
+)
 from app.domain.enums import ACCESS_GRANTING_STATUSES, PurchaseStatus
 from app.domain.pagination import Page
 from app.infrastructure.db.errors import LIKE_ESCAPE, like_pattern, violated_constraint
@@ -218,6 +223,35 @@ class SqlAlchemyPurchaseRepository:
         expired = (await self._session.execute(statement)).scalars().all()
         return len(expired)
 
+    async def expire(self, purchase_id: UUID) -> Purchase:
+        model = await self._lock(purchase_id)
+        if model.status is not PurchaseStatus.PENDING:
+            # Paid, delivered or already expired in the meantime: not ours to touch.
+            return to_purchase(model)
+        model.status = PurchaseStatus.EXPIRED
+        await self._session.flush()
+        await self._session.refresh(model)
+        return to_purchase(model)
+
+    async def pending_checkouts(
+        self,
+        user_id: int,
+        product_id: UUID,
+        provider: PaymentProvider,
+    ) -> tuple[Purchase, ...]:
+        statement = (
+            select(PurchaseModel)
+            .where(
+                PurchaseModel.user_id == user_id,
+                PurchaseModel.product_id == product_id,
+                PurchaseModel.provider == provider,
+                PurchaseModel.status == PurchaseStatus.PENDING,
+            )
+            .order_by(PurchaseModel.created_at.desc(), PurchaseModel.id.desc())
+        )
+        models = (await self._session.execute(statement)).scalars().all()
+        return tuple(to_purchase(model) for model in models)
+
     async def list_pending(
         self,
         provider: PaymentProvider,
@@ -279,6 +313,8 @@ class SqlAlchemyPurchaseRepository:
         constraint = violated_constraint(error)
         if constraint == "uq_purchases_user_product_paid":
             return DuplicatePurchaseError()
+        if constraint == "uq_purchases_user_product_pending_crypto":
+            return CheckoutAlreadyPendingError(constraint=constraint, external_id=external_id)
         if constraint == "uq_purchases_provider_external_id":
             message = "This invoice is already recorded"
             return ConflictError(message, constraint=constraint, external_id=external_id)

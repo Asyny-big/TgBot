@@ -34,6 +34,10 @@ DELIVERY_FAILED: Final = (
 CRYPTO_INVOICE_CREATED: Final = (
     "Счёт создан. Оплатите его в CryptoBot — доступ придёт сюда автоматически."
 )
+CRYPTO_INVOICE_RESUMED: Final = (
+    "У вас уже есть неоплаченный счёт на этот товар — новый не создаётся. "
+    "Оплатите его в CryptoBot — доступ придёт сюда автоматически."
+)
 CRYPTO_PAY_BUTTON: Final = "💎 Оплатить в CryptoBot"
 PRE_CHECKOUT_UNAVAILABLE: Final = "Товар больше недоступен, оплата отменена."
 PRE_CHECKOUT_ALREADY_OWNED: Final = "Этот товар уже куплен — оплата не нужна."
@@ -174,6 +178,18 @@ def bonus_section(
 def referral_share_text(*, referral_link: str, discount_percent: int) -> str:
     """Message the buyer forwards to a friend. Deliberately two lines."""
     return f"🎁 Тебе доступна скидка {discount_percent}% на первую покупку:\n{referral_link}"
+
+
+def pending_invoice_exists(*, amount: int | Decimal, currency: str) -> str:
+    """The buyer's existing unpaid invoice differs from what they would pay now."""
+    return "\n".join(
+        [
+            f"У вас уже есть неоплаченный счёт на этот товар: {_money(amount)} {currency}.",
+            "Его сумма отличается от текущей цены, поэтому новый счёт не создан.",
+            "",
+            "Оплатите существующий счёт или дождитесь, пока он истечёт, и попробуйте снова.",
+        ]
+    )
 
 
 def bonus_prompt(

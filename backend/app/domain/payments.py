@@ -52,6 +52,16 @@ class PaymentState(StrEnum):
     EXPIRED = "expired"
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InvoiceSnapshot:
+    """What the provider currently says about one invoice it issued."""
+
+    external_id: str
+    state: PaymentState
+    pay_url: str | None = None
+    """Where the buyer pays, while the invoice can still be paid."""
+
+
 class CryptoInvoiceGateway(Protocol):
     """Creates invoices at an external crypto payment provider."""
 
@@ -65,6 +75,16 @@ class CryptoInvoiceGateway(Protocol):
 
     async def fetch_states(self, external_ids: Sequence[str]) -> Mapping[str, PaymentState]:
         """Current provider state of the given invoices (reconciliation)."""
+        ...
+
+    async def fetch_invoices(self, external_ids: Sequence[str]) -> Mapping[str, InvoiceSnapshot]:
+        """State and payment URL of the given invoices, keyed by invoice id.
+
+        An id missing from the result is one the provider does not know.
+
+        Raises:
+            PaymentGatewayError: the provider refused or could not be reached.
+        """
         ...
 
 

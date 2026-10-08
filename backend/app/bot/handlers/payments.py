@@ -26,6 +26,7 @@ from app.bot.texts import (
     BONUS_NOT_FOR_PRODUCT,
     CARD_UNAVAILABLE,
     CRYPTO_INVOICE_CREATED,
+    CRYPTO_INVOICE_RESUMED,
     DELIVERY_FAILED,
     PAYMENT_IN_PROGRESS,
     PAYMENT_UNAVAILABLE,
@@ -34,15 +35,19 @@ from app.bot.texts import (
     PRE_CHECKOUT_UNKNOWN,
     REFUND_NOTICE,
     bonus_prompt,
+    pending_invoice_exists,
 )
 from app.core.exceptions import (
     AppError,
     BonusesNotAvailableError,
+    CheckoutAlreadyPendingError,
     ConflictError,
     DuplicatePurchaseError,
     InsufficientBonusBalanceError,
     LockBusyError,
+    PaymentAlreadyReceivedError,
     PaymentGatewayError,
+    PendingInvoiceExistsError,
     ProductInactiveError,
     ProductNotFoundError,
     ProviderNotSupportedError,
@@ -194,18 +199,7 @@ async def _start_checkout(
             )
             await callback.answer()
         else:
-            checkout = await shop.checkout.start_crypto_checkout(
-                user_id=user.id,
-                product=product,
-                use_bonus=use_bonus,
-            )
-            await callback.answer()
-            if callback.bot is not None:
-                await callback.bot.send_message(
-                    chat_id=user.id,
-                    text=CRYPTO_INVOICE_CREATED,
-                    reply_markup=crypto_pay_keyboard(checkout.pay_url),
-                )
+            await _start_crypto_checkout(callback, shop, product=product, use_bonus=use_bonus)
     except LockBusyError:
         await callback.answer(PAYMENT_IN_PROGRESS, show_alert=False)
     except InsufficientBonusBalanceError:
@@ -238,6 +232,55 @@ async def _start_checkout(
         await callback.answer(PAYMENT_UNAVAILABLE, show_alert=True)
     except PaymentGatewayError:
         await callback.answer(PAYMENT_UNAVAILABLE, show_alert=True)
+
+
+async def _start_crypto_checkout(
+    callback: CallbackQuery,
+    shop: BotServices,
+    *,
+    product: Product,
+    use_bonus: bool,
+) -> None:
+    """Send the buyer their one CryptoBot invoice for this product.
+
+    The outcomes only the crypto rail has are answered here; everything shared
+    with Stars propagates to ``_start_checkout``.
+    """
+    user = callback.from_user
+    try:
+        checkout = await shop.checkout.start_crypto_checkout(
+            user_id=user.id,
+            product=product,
+            use_bonus=use_bonus,
+        )
+    except PaymentAlreadyReceivedError:
+        # The earlier invoice is paid; reconciliation or the webhook delivers it.
+        await callback.answer(PAYMENT_IN_PROGRESS, show_alert=True)
+        return
+    except CheckoutAlreadyPendingError:
+        # A parallel press recorded its invoice first; pressing again hands
+        # that one back.
+        await callback.answer(PAYMENT_IN_PROGRESS, show_alert=False)
+        return
+    except PendingInvoiceExistsError as error:
+        # No second invoice, and the old one is not passed off as matching:
+        # the buyer sees what it is for and chooses.
+        await callback.answer()
+        if callback.bot is not None:
+            await callback.bot.send_message(
+                chat_id=user.id,
+                text=pending_invoice_exists(amount=error.amount, currency=error.currency),
+                reply_markup=crypto_pay_keyboard(error.pay_url) if error.pay_url else None,
+            )
+        return
+
+    await callback.answer()
+    if callback.bot is not None:
+        await callback.bot.send_message(
+            chat_id=user.id,
+            text=CRYPTO_INVOICE_RESUMED if checkout.resumed else CRYPTO_INVOICE_CREATED,
+            reply_markup=crypto_pay_keyboard(checkout.pay_url),
+        )
 
 
 async def handle_pre_checkout(query: PreCheckoutQuery, shop: BotServices) -> None:

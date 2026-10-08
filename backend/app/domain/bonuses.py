@@ -397,9 +397,17 @@ class CheckoutPricing(Protocol):
     async def on_payment_confirmed(self, uow: UnitOfWork, purchase: Purchase) -> None:
         """Turn the holds behind a paid purchase into settled facts.
 
-        Releasing a hold has no hook here on purpose: invoices are expired in
-        bulk by housekeeping, so the release pass is a sweep rather than a
-        per-purchase callback.
+        Invoices expired in bulk by housekeeping are released by a sweep, not
+        through a callback; ``on_checkout_expired`` covers the one invoice a
+        checkout expires itself.
+        """
+        ...
+
+    async def on_checkout_expired(self, uow: UnitOfWork, purchase: Purchase) -> None:
+        """Give back whatever a just-expired invoice was holding.
+
+        Runs in the transaction that expired it, so a checkout started right
+        afterwards prices against the restored balance. Idempotent.
         """
         ...
 

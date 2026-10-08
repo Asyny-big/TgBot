@@ -8,6 +8,7 @@ It never sends a message — handing the link to the buyer belongs to
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -26,9 +27,11 @@ from app.core.logging import get_logger
 from app.domain.bonuses import BonusPolicy, discount_for, plain_quote
 from app.domain.cards import PaymentOption, ProductCard
 from app.domain.commands import PurchaseDraft
+from app.domain.enums import PurchaseStatus
 from app.domain.locks import payment_lock_key, purchase_lock_key
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from uuid import UUID
 
     from app.domain.bonuses import CheckoutPricing, PriceQuote
@@ -182,10 +185,50 @@ class PurchaseService:
                 balance moved since the price was shown.
             ConflictError: the price moved away from ``expected_amount``.
         """
-        async with (
-            self.locks.lock(purchase_lock_key(user_id, product_id)),
-            self.uow_factory() as uow,
-        ):
+        async with self.checkout_session(user_id, product_id) as session:
+            return await session.record(
+                provider=provider,
+                external_id=external_id,
+                use_bonus=use_bonus,
+                expected_amount=expected_amount,
+            )
+
+    @asynccontextmanager
+    async def checkout_session(
+        self,
+        user_id: int,
+        product_id: UUID,
+    ) -> AsyncIterator[CheckoutSession]:
+        """Hold the purchase lock of one buyer and product for a whole checkout.
+
+        For rails that must talk to the provider *before* the purchase row
+        exists: everything from "is there already an invoice?" to the insert
+        happens under one lock, so a second press cannot reach the provider
+        while the first is still in flight. The session refuses to be used once
+        the lock is released.
+
+        Raises:
+            LockBusyError: another checkout for this buyer and product is running.
+        """
+        async with self.locks.lock(purchase_lock_key(user_id, product_id)):
+            session = CheckoutSession(self, user_id=user_id, product_id=product_id)
+            try:
+                yield session
+            finally:
+                session.close()
+
+    async def _record_purchase(  # noqa: PLR0913 — one checkout, this many facts
+        self,
+        *,
+        user_id: int,
+        product_id: UUID,
+        provider: PaymentProvider,
+        external_id: str,
+        use_bonus: bool,
+        expected_amount: Decimal | None,
+    ) -> Purchase:
+        """Validate, price and insert the purchase. The caller holds the lock."""
+        async with self.uow_factory() as uow:
             if await uow.users.get(user_id) is None:
                 raise UserNotFoundError(telegram_id=user_id)
             product = await uow.products.get(product_id)
@@ -471,6 +514,28 @@ class PurchaseService:
             logger.info("pending_purchases_expired", count=expired)
         return expired
 
+    async def _expire_checkout(self, purchase_id: UUID) -> Purchase:
+        """Expire one pending purchase and release what it held. The caller holds the lock."""
+        async with self.uow_factory() as uow:
+            expired = await uow.purchases.expire(purchase_id)
+            if expired.status is PurchaseStatus.EXPIRED and self.pricing is not None:
+                await self.pricing.on_checkout_expired(uow, expired)
+        logger.info(
+            "pending_purchase_expired",
+            purchase_id=str(purchase_id),
+            status=expired.status.value,
+        )
+        return expired
+
+    async def _pending_checkouts(
+        self,
+        user_id: int,
+        product_id: UUID,
+        provider: PaymentProvider,
+    ) -> tuple[Purchase, ...]:
+        async with self.uow_factory() as uow:
+            return await uow.purchases.pending_checkouts(user_id, product_id, provider)
+
     @staticmethod
     def _price(product: Product, provider: PaymentProvider) -> int | Decimal:
         """Price in the rail's own currency; the rail is known to be supported."""
@@ -481,3 +546,90 @@ class PurchaseService:
                 provider=provider.value,
             )
         return value
+
+
+class CheckoutSession:
+    """What a checkout may do while it holds its buyer's purchase lock.
+
+    Only ``PurchaseService.checkout_session`` hands these out, and every method
+    refuses to run once that lock is released — so the "the caller holds the
+    lock" methods behind it cannot be reached without the lock by accident.
+    """
+
+    __slots__ = ("_open", "_service", "product_id", "user_id")
+
+    def __init__(self, service: PurchaseService, *, user_id: int, product_id: UUID) -> None:
+        self._service = service
+        self.user_id = user_id
+        self.product_id = product_id
+        self._open = True
+
+    def close(self) -> None:
+        """Called when the lock is released; the session is dead from then on."""
+        self._open = False
+
+    async def owned(self) -> Purchase | None:
+        """The buyer's paid or delivered purchase of this product, if any."""
+        self._require_open()
+        return await self._service.find_owned(self.user_id, self.product_id)
+
+    async def pending(self, provider: PaymentProvider) -> tuple[Purchase, ...]:
+        """The buyer's pending purchases of this product on one rail, newest first."""
+        self._require_open()
+        return await self._service._pending_checkouts(self.user_id, self.product_id, provider)
+
+    async def expire(self, purchase: Purchase) -> Purchase:
+        """Expire one of this buyer's pending purchases of this product.
+
+        Only for an invoice the provider itself reports as expired. Anything
+        no longer pending is returned untouched.
+        """
+        self._require_open()
+        self._require_own(purchase.user_id, purchase.product_id)
+        return await self._service._expire_checkout(purchase.id)
+
+    async def quote(
+        self,
+        product: Product,
+        provider: PaymentProvider,
+        *,
+        use_bonus: bool = False,
+    ) -> Decimal:
+        """What this checkout would be billed right now. Records nothing."""
+        self._require_open()
+        self._require_own(self.user_id, product.id)
+        return await self._service.quote_amount(
+            user_id=self.user_id,
+            product=product,
+            provider=provider,
+            use_bonus=use_bonus,
+        )
+
+    async def record(
+        self,
+        *,
+        provider: PaymentProvider,
+        external_id: str,
+        use_bonus: bool = False,
+        expected_amount: Decimal | None = None,
+    ) -> Purchase:
+        """Insert the pending purchase for an invoice. See ``start_purchase``."""
+        self._require_open()
+        return await self._service._record_purchase(
+            user_id=self.user_id,
+            product_id=self.product_id,
+            provider=provider,
+            external_id=external_id,
+            use_bonus=use_bonus,
+            expected_amount=expected_amount,
+        )
+
+    def _require_open(self) -> None:
+        if not self._open:
+            message = "The checkout session was used after its purchase lock was released"
+            raise RuntimeError(message)
+
+    def _require_own(self, user_id: int, product_id: UUID) -> None:
+        if (user_id, product_id) != (self.user_id, self.product_id):
+            message = "The checkout session is locked for a different buyer or product"
+            raise ValueError(message)

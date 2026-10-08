@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from app.core.exceptions import (
+    CheckoutAlreadyPendingError,
     ConflictError,
     DiscountAlreadyUsedError,
     DuplicatePurchaseError,
@@ -43,6 +44,7 @@ from app.domain.enums import (
     ACCESS_GRANTING_STATUSES,
     BONUS_HOLD_TYPES,
     BonusTransactionType,
+    PaymentProvider,
     PurchaseStatus,
 )
 from app.domain.pagination import Page
@@ -60,7 +62,6 @@ if TYPE_CHECKING:
         UserDraft,
     )
     from app.domain.delivery import DeliveryMessage
-    from app.domain.enums import PaymentProvider
     from app.domain.pagination import (
         PageRequest,
         ProductFilters,
@@ -223,6 +224,15 @@ class FakePurchaseRepository:
             if existing.provider is draft.provider and existing.external_id == draft.external_id:
                 message = "This invoice is already recorded"
                 raise ConflictError(message, external_id=draft.external_id)
+            if (
+                draft.provider is PaymentProvider.CRYPTO
+                and (draft.status or PurchaseStatus.PENDING) is PurchaseStatus.PENDING
+                and existing.provider is PaymentProvider.CRYPTO
+                and existing.status is PurchaseStatus.PENDING
+                and (existing.user_id, existing.product_id) == (draft.user_id, draft.product_id)
+            ):
+                # Mirrors uq_purchases_user_product_pending_crypto.
+                raise CheckoutAlreadyPendingError(external_id=draft.external_id)
         purchase = Purchase(
             id=uuid4(),
             user_id=draft.user_id,
@@ -352,6 +362,31 @@ class FakePurchaseRepository:
                 self.items[purchase_id] = replace(purchase, status=PurchaseStatus.EXPIRED)
                 expired += 1
         return expired
+
+    async def expire(self, purchase_id: UUID) -> Purchase:
+        purchase = self._require(purchase_id)
+        if purchase.status is not PurchaseStatus.PENDING:
+            return purchase
+        expired = replace(purchase, status=PurchaseStatus.EXPIRED)
+        self.items[purchase_id] = expired
+        return expired
+
+    async def pending_checkouts(
+        self,
+        user_id: int,
+        product_id: UUID,
+        provider: PaymentProvider,
+    ) -> tuple[Purchase, ...]:
+        pending = [
+            purchase
+            for purchase in self.items.values()
+            if purchase.user_id == user_id
+            and purchase.product_id == product_id
+            and purchase.provider is provider
+            and purchase.status is PurchaseStatus.PENDING
+        ]
+        # Insertion order stands in for created_at, which is constant in the fakes.
+        return tuple(reversed(pending))
 
     async def list_pending(
         self,

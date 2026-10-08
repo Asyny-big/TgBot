@@ -7,6 +7,10 @@ the admin SPA and the bot can react to them without string matching.
 from __future__ import annotations
 
 from http import HTTPStatus
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from decimal import Decimal
 
 
 class AppError(Exception):
@@ -179,6 +183,49 @@ class InsufficientBonusBalanceError(ConflictError):
 
     code = "insufficient_bonus_balance"
     message = "Not enough bonuses to cover this purchase"
+
+
+class PendingInvoiceExistsError(ConflictError):
+    """The buyer already holds an unpaid invoice for this product on other terms.
+
+    No second invoice is issued, and the old one is not handed back as if it
+    matched: the buyer is told what it is for and decides.
+    """
+
+    code = "pending_invoice_exists"
+    message = "An unpaid invoice for this product already exists"
+
+    def __init__(
+        self,
+        *,
+        amount: Decimal,
+        currency: str,
+        pay_url: str | None,
+        **details: object,
+    ) -> None:
+        super().__init__(amount=str(amount), currency=currency, **details)
+        self.amount = amount
+        self.currency = currency
+        self.pay_url = pay_url
+
+
+class CheckoutAlreadyPendingError(ConflictError):
+    """The database already holds a pending checkout for this buyer and product.
+
+    Raised from ``uq_purchases_user_product_pending_crypto``: the checkout lock
+    normally makes this unreachable, so seeing it means two checkouts overlapped
+    anyway. The buyer simply presses again and gets the invoice that won.
+    """
+
+    code = "checkout_already_pending"
+    message = "A checkout for this product is already in progress"
+
+
+class PaymentAlreadyReceivedError(ConflictError):
+    """The buyer's earlier invoice is paid; its settlement has not landed yet."""
+
+    code = "payment_already_received"
+    message = "The payment for this product is already being processed"
 
 
 class BonusesNotAvailableError(ValidationError):

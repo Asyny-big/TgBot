@@ -47,6 +47,7 @@ STARS_RATE_SCALE: Final = 6
 """Width of the recorded Stars-per-USDT rate. Wide enough to never round it."""
 
 _ACCESS_STATUS_SQL: Final = "status IN ('paid', 'delivered')"
+_PENDING_CRYPTO_SQL: Final = "status = 'pending' AND provider = 'crypto'"
 
 #: Operator class that makes ``ILIKE '%term%'`` index-assisted.
 _TRGM_OPS: Final = "gin_trgm_ops"
@@ -223,6 +224,16 @@ class PurchaseModel(Base):
             "product_id",
             unique=True,
             postgresql_where=text(_ACCESS_STATUS_SQL),
+        ),
+        # At most one live CryptoBot checkout per buyer and product. The checkout
+        # lock already keeps a second invoice from being issued; this is what
+        # still holds if that lock ever expired mid-checkout.
+        Index(
+            "uq_purchases_user_product_pending_crypto",
+            "user_id",
+            "product_id",
+            unique=True,
+            postgresql_where=text(_PENDING_CRYPTO_SQL),
         ),
         Index(
             "uq_purchases_telegram_charge_id",
