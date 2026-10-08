@@ -77,6 +77,9 @@ async def handle_pay_pressed(
     else — and every buyer without bonuses — goes straight to checkout exactly
     as before.
     """
+    if not callback_data.provider.is_payable:
+        await _refuse_unpayable(callback, callback_data.provider)
+        return
     user = callback.from_user
     try:
         product = await shop.purchases.product_for_checkout(callback_data.product_id)
@@ -109,6 +112,9 @@ async def handle_bonus_choice(
     shop: BotServices,
 ) -> None:
     """The buyer answered "spend your bonuses?" — now issue the invoice."""
+    if not callback_data.provider.is_payable:
+        await _refuse_unpayable(callback, callback_data.provider)
+        return
     try:
         product = await shop.purchases.product_for_checkout(callback_data.product_id)
     except (ProductNotFoundError, ProductInactiveError):
@@ -122,6 +128,21 @@ async def handle_bonus_choice(
         provider=callback_data.provider,
         use_bonus=callback_data.use_bonus,
     )
+
+
+async def _refuse_unpayable(callback: CallbackQuery, provider: PaymentProvider) -> None:
+    """A button for something that is not a payment rail: refuse, bill nothing.
+
+    No such button is ever shown — an internal grant is not something to pay
+    for — so this is a hand-crafted callback. It must never fall through to an
+    invoice on some other rail.
+    """
+    logger.warning(
+        "checkout_refused_for_unpayable_provider",
+        user_id=callback.from_user.id,
+        provider=provider.value,
+    )
+    await callback.answer(CARD_UNAVAILABLE, show_alert=True)
 
 
 async def _bonus_offer(
@@ -198,8 +219,12 @@ async def _start_checkout(
                 use_bonus=use_bonus,
             )
             await callback.answer()
-        else:
+        elif provider is PaymentProvider.CRYPTO:
             await _start_crypto_checkout(callback, shop, product=product, use_bonus=use_bonus)
+        else:  # pragma: no cover — both handlers refuse a non-rail before this
+            # Never "not Stars, so crypto": anything that is not a named rail
+            # is refused here as well as at the button.
+            await _refuse_unpayable(callback, provider)
     except LockBusyError:
         await callback.answer(PAYMENT_IN_PROGRESS, show_alert=False)
     except InsufficientBonusBalanceError:

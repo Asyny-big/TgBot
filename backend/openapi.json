@@ -1151,10 +1151,11 @@
         "type": "string",
         "enum": [
           "stars",
-          "crypto"
+          "crypto",
+          "internal"
         ],
         "title": "PaymentProvider",
-        "description": "Payment rails available on a product card."
+        "description": "How a purchase came to be paid for.\n\n``STARS`` and ``CRYPTO`` are payment rails: they appear as buttons on a\nproduct card and bill the buyer through a provider. ``INTERNAL`` is not a\nrail. It marks a pack the shop hands over itself (a loyalty free pack): no\ninvoice, no provider, no money. Code that takes a payment must therefore\naccept only ``PAYABLE_PROVIDERS`` and refuse anything else explicitly — never\ntreat \"not Stars\" as \"crypto\"."
       },
       "PaymentState": {
         "type": "string",

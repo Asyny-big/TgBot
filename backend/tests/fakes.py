@@ -222,6 +222,7 @@ class FakePurchaseRepository:
         self.items: dict[UUID, Purchase] = {}
 
     async def create(self, draft: PurchaseDraft) -> Purchase:
+        self._check_amount_rules(draft)
         for existing in self.items.values():
             if existing.provider is draft.provider and existing.external_id == draft.external_id:
                 message = "This invoice is already recorded"
@@ -245,6 +246,7 @@ class FakePurchaseRepository:
             base_amount=draft.base_amount,
             discount_amount=draft.discount_amount,
             bonus_amount=draft.bonus_amount,
+            loyalty_amount=draft.loyalty_amount,
             currency=draft.currency,
             external_id=draft.external_id,
             telegram_charge_id=None,
@@ -414,6 +416,26 @@ class FakePurchaseRepository:
             raise PurchaseNotFoundError(purchase_id=str(purchase_id))
         return purchase
 
+    @staticmethod
+    def _check_amount_rules(draft: PurchaseDraft) -> None:
+        """Mirror ck_purchases_amount_matches_provider and _internal_is_loyalty_grant."""
+        status = draft.status or PurchaseStatus.PENDING
+        if draft.provider is PaymentProvider.INTERNAL:
+            valid = (
+                draft.amount == 0
+                and draft.base_amount is not None
+                and draft.base_amount > 0
+                and draft.loyalty_amount == draft.base_amount
+                and draft.discount_amount == 0
+                and draft.bonus_amount == 0
+                and status in (PurchaseStatus.PAID, PurchaseStatus.DELIVERED)
+            )
+        else:
+            valid = draft.amount > 0
+        if not valid:
+            message = "Purchase amount does not match its provider"
+            raise ValueError(message)
+
 
 class FakeReferralRepository:
     """Referrals in a dictionary, with the permanence rules enforced.
@@ -491,7 +513,9 @@ class FakeReferralRepository:
         return sum(
             1
             for purchase in self.purchases.items.values()
-            if purchase.user_id in invited and purchase.status in ACCESS_GRANTING_STATUSES
+            if purchase.user_id in invited
+            and purchase.status in ACCESS_GRANTING_STATUSES
+            and purchase.provider.is_payable
         )
 
     async def search(self, filters: ReferralFilters, page: PageRequest) -> Page[ReferralRecord]:

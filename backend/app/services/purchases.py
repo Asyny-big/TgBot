@@ -374,10 +374,14 @@ class PurchaseService:
         confirmed purchase to ``DeliveryService``.
 
         Raises:
+            ProviderNotSupportedError: ``provider`` is not a payment rail. An
+                internal grant is never "paid"; nothing may confirm one.
             PurchaseNotFoundError: no purchase behind this invoice.
             ConflictError: the purchase was refunded.
             DuplicatePurchaseError: the buyer already owns a paid copy.
         """
+        if not provider.is_payable:
+            raise ProviderNotSupportedError(provider=provider.value, external_id=external_id)
         async with (
             self.locks.lock(
                 payment_lock_key(provider, external_id),

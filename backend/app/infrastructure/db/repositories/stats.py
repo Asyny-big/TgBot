@@ -2,6 +2,11 @@
 
 Only ``paid`` and ``delivered`` purchases count as revenue: refunded and expired
 ones are deliberately excluded so the numbers match the money actually held.
+
+Only purchases made through a payment rail count at all. A loyalty free pack
+(``internal``) is neither revenue nor a paid purchase, so it is left out of the
+totals and the top products — it still shows in the recent purchases list,
+which is a log of what was handed over, not of what was earned.
 """
 
 from __future__ import annotations
@@ -11,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import Numeric, case, func, select
 
-from app.domain.enums import ACCESS_GRANTING_STATUSES, Currency
+from app.domain.enums import ACCESS_GRANTING_STATUSES, PAYABLE_PROVIDERS, Currency
 from app.domain.stats import RevenueSummary, TopProduct
 from app.infrastructure.db.mappers import to_record
 from app.infrastructure.db.models import ProductModel, PurchaseModel, UserModel
@@ -115,7 +120,10 @@ class SqlAlchemyStatsRepository:
 
     @staticmethod
     def _window(period: StatsPeriod, now: datetime | None) -> list[ColumnElement[bool]]:
-        conditions: list[ColumnElement[bool]] = [PurchaseModel.status.in_(ACCESS_GRANTING_STATUSES)]
+        conditions: list[ColumnElement[bool]] = [
+            PurchaseModel.status.in_(ACCESS_GRANTING_STATUSES),
+            PurchaseModel.provider.in_(PAYABLE_PROVIDERS),
+        ]
         start = period.start(now)
         if start is not None:
             conditions.append(PurchaseModel.paid_at >= start)

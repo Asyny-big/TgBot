@@ -56,6 +56,7 @@ class SqlAlchemyPurchaseRepository:
             base_amount=draft.base_amount,
             discount_amount=draft.discount_amount,
             bonus_amount=draft.bonus_amount,
+            loyalty_amount=draft.loyalty_amount,
             currency=draft.currency,
             external_id=draft.external_id,
         )

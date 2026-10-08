@@ -17,6 +17,7 @@ from app.core.config import (
     BotSettings,
     CryptoBotSettings,
     DeliverySettings,
+    LoyaltySettings,
     PostgresSettings,
     RedisSettings,
     ReferralSettings,
@@ -91,6 +92,7 @@ _SETTINGS_CLASSES = (
     TelegramSettings,
     CryptoBotSettings,
     ReferralSettings,
+    LoyaltySettings,
     SecuritySettings,
 )
 

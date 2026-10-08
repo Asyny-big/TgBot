@@ -22,6 +22,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -32,9 +33,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.domain.enums import (
     BonusTransactionType,
     Currency,
+    LoyaltyRewardKind,
+    LoyaltyRewardStatus,
     PaymentProvider,
     PurchaseStatus,
 )
+from app.domain.loyalty import DISCOUNT_MILESTONE, FREE_PACK_MILESTONE
 from app.domain.referrals import REFERRAL_CODE_MAX_LENGTH
 from app.domain.slug import SLUG_MAX_LENGTH, SLUG_PATTERN
 from app.infrastructure.db.base import Base, TimestampMixin
@@ -48,6 +52,39 @@ STARS_RATE_SCALE: Final = 6
 
 _ACCESS_STATUS_SQL: Final = "status IN ('paid', 'delivered')"
 _PENDING_CRYPTO_SQL: Final = "status = 'pending' AND provider = 'crypto'"
+
+# ``provider::text`` rather than the enum literal: migration 0005 adds
+# 'internal' to the enum and creates these checks in one transaction, and
+# PostgreSQL refuses to use a freshly added enum value before it is committed.
+_AMOUNT_MATCHES_PROVIDER_SQL: Final = (
+    "(provider::text = 'internal' AND amount = 0) OR (provider::text <> 'internal' AND amount > 0)"
+)
+_INTERNAL_IS_LOYALTY_GRANT_SQL: Final = (
+    "provider::text <> 'internal' OR ("
+    "base_amount IS NOT NULL AND base_amount > 0 "
+    "AND loyalty_amount = base_amount "
+    "AND discount_amount = 0 AND bonus_amount = 0 "
+    "AND telegram_charge_id IS NULL "
+    "AND status::text IN ('paid', 'delivered', 'refunded'))"
+)
+_AMOUNT_BREAKDOWN_SQL: Final = (
+    "base_amount IS NULL OR amount = base_amount - discount_amount - loyalty_amount - bonus_amount"
+)
+_REWARD_MILESTONE_KIND_SQL: Final = (
+    f"(milestone = {DISCOUNT_MILESTONE} AND kind::text = 'discount_50_percent') "
+    f"OR (milestone = {FREE_PACK_MILESTONE} AND kind::text = 'free_pack')"
+)
+_REWARD_STATE_SHAPE_SQL: Final = (
+    "(status::text = 'available' AND applied_purchase_id IS NULL AND applied_at IS NULL "
+    "AND consumed_purchase_id IS NULL AND consumed_at IS NULL) "
+    "OR (status::text = 'applied' AND applied_purchase_id IS NOT NULL "
+    "AND applied_at IS NOT NULL AND consumed_purchase_id IS NULL AND consumed_at IS NULL) "
+    "OR (status::text = 'consumed' AND consumed_purchase_id IS NOT NULL "
+    "AND consumed_at IS NOT NULL)"
+)
+_REWARD_FREE_PACK_NEVER_APPLIED_SQL: Final = (
+    "kind::text <> 'free_pack' OR status::text <> 'applied'"
+)
 
 #: Operator class that makes ``ILIKE '%term%'`` index-assisted.
 _TRGM_OPS: Final = "gin_trgm_ops"
@@ -198,6 +235,11 @@ class PurchaseModel(Base):
         nullable=False,
         server_default=text("0"),
     )
+    loyalty_amount: Mapped[Decimal] = mapped_column(
+        nullable=False,
+        server_default=text("0"),
+    )
+    """Waived by a loyalty reward: half a price, or all of it on a free pack."""
     currency: Mapped[Currency] = mapped_column(
         _enum_column(Currency, "currency"),
         nullable=False,
@@ -249,15 +291,20 @@ class PurchaseModel(Base):
         Index("ix_purchases_user_id_status", "user_id", "status"),
         _trigram_index("ix_purchases_external_id_trgm", "external_id"),
         _trigram_index("ix_purchases_telegram_charge_id_trgm", "telegram_charge_id"),
-        CheckConstraint("amount > 0", name="amount_positive"),
+        # A payment rail always bills something; only an internal grant, which
+        # bills nobody, may be zero — and it must be.
+        CheckConstraint(_AMOUNT_MATCHES_PROVIDER_SQL, name="amount_matches_provider"),
+        # An internal purchase exists for one reason: a loyalty free pack. It
+        # waives the whole list price, carries nothing else, has no Telegram
+        # charge, and is never pending or expired — so no provider is ever
+        # asked about it.
+        CheckConstraint(_INTERNAL_IS_LOYALTY_GRANT_SQL, name="internal_is_loyalty_grant"),
         CheckConstraint("discount_amount >= 0", name="discount_amount_non_negative"),
         CheckConstraint("bonus_amount >= 0", name="bonus_amount_non_negative"),
+        CheckConstraint("loyalty_amount >= 0", name="loyalty_amount_non_negative"),
         # The breakdown must add up. Without this a bug in the pricing code
         # could store a sale whose history does not explain its own price.
-        CheckConstraint(
-            "base_amount IS NULL OR amount = base_amount - discount_amount - bonus_amount",
-            name="amount_breakdown_consistent",
-        ),
+        CheckConstraint(_AMOUNT_BREAKDOWN_SQL, name="amount_breakdown_consistent"),
         CheckConstraint(
             "status IN ('pending', 'expired') OR paid_at IS NOT NULL",
             name="paid_at_present",
@@ -378,4 +425,67 @@ class BonusTransactionModel(Base):
         ),
         Index("ix_bonus_transactions_user_id_created_at", "user_id", "created_at"),
         Index("ix_bonus_transactions_referral_id", "referral_id"),
+    )
+
+
+class LoyaltyRewardModel(Base):
+    """One loyalty milestone reward of one buyer.
+
+    Written lazily, the first time a reward is used — never by a backfill — so
+    the table only ever holds rewards somebody actually touched. VIP has no row:
+    it is read off the number of completed purchases.
+    """
+
+    __tablename__ = "loyalty_rewards"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    milestone: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    kind: Mapped[LoyaltyRewardKind] = mapped_column(
+        _enum_column(LoyaltyRewardKind, "loyalty_reward_kind"),
+        nullable=False,
+    )
+    status: Mapped[LoyaltyRewardStatus] = mapped_column(
+        _enum_column(LoyaltyRewardStatus, "loyalty_reward_status"),
+        nullable=False,
+        server_default=text("'available'"),
+    )
+    applied_purchase_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("purchases.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    consumed_purchase_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("purchases.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    earned_at: Mapped[datetime] = mapped_column(server_default=text("now()"), nullable=False)
+    applied_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    __table_args__ = (
+        # Each milestone rewards a buyer once, however many times it is reached
+        # concurrently: the second insert of the same reward cannot exist.
+        UniqueConstraint("user_id", "milestone", name="uq_loyalty_rewards_user_milestone"),
+        CheckConstraint(_REWARD_MILESTONE_KIND_SQL, name="milestone_kind"),
+        # Every status carries exactly the facts that status implies.
+        CheckConstraint(_REWARD_STATE_SHAPE_SQL, name="state_shape"),
+        # A free pack is handed over in one step; it is never priced into an invoice.
+        CheckConstraint(_REWARD_FREE_PACK_NEVER_APPLIED_SQL, name="free_pack_never_applied"),
+        # One reward per purchase, whichever way it was used.
+        Index(
+            "uq_loyalty_rewards_applied_purchase_id",
+            "applied_purchase_id",
+            unique=True,
+            postgresql_where=text("applied_purchase_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_loyalty_rewards_consumed_purchase_id",
+            "consumed_purchase_id",
+            unique=True,
+            postgresql_where=text("consumed_purchase_id IS NOT NULL"),
+        ),
     )

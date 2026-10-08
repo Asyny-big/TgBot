@@ -16,17 +16,43 @@ class Currency(StrEnum):
 
 
 class PaymentProvider(StrEnum):
-    """Payment rails available on a product card."""
+    """How a purchase came to be paid for.
+
+    ``STARS`` and ``CRYPTO`` are payment rails: they appear as buttons on a
+    product card and bill the buyer through a provider. ``INTERNAL`` is not a
+    rail. It marks a pack the shop hands over itself (a loyalty free pack): no
+    invoice, no provider, no money. Code that takes a payment must therefore
+    accept only ``PAYABLE_PROVIDERS`` and refuse anything else explicitly — never
+    treat "not Stars" as "crypto".
+    """
 
     STARS = "stars"
     CRYPTO = "crypto"
+    INTERNAL = "internal"
+
+    @property
+    def is_payable(self) -> bool:
+        """Whether this is a real payment rail a buyer can be billed through."""
+        return self in PAYABLE_PROVIDERS
 
     @property
     def currency(self) -> Currency:
-        """Currency this provider always charges in."""
+        """Currency this payment rail always charges in.
+
+        Raises:
+            ValueError: for ``INTERNAL``, which charges nothing. The currency an
+                internal grant is *valued* in is decided by whoever records it.
+        """
         if self is PaymentProvider.STARS:
             return Currency.XTR
-        return Currency.USDT
+        if self is PaymentProvider.CRYPTO:
+            return Currency.USDT
+        message = f"{self.value!r} is not a payment rail and charges in no currency"
+        raise ValueError(message)
+
+
+PAYABLE_PROVIDERS: tuple[PaymentProvider, ...] = (PaymentProvider.STARS, PaymentProvider.CRYPTO)
+"""The payment rails, in the order their buttons appear on a product card."""
 
 
 class PurchaseStatus(StrEnum):
@@ -111,3 +137,27 @@ Referral eligibility is decided with this set, and ``REFUNDED`` is in it
 deliberately: were it absent, a buyer could refund their way back to "never
 bought anything" and harvest the first-purchase discount again.
 """
+
+
+class LoyaltyRewardKind(StrEnum):
+    """What a loyalty milestone grants. VIP is a status, not a reward."""
+
+    DISCOUNT_50_PERCENT = "discount_50_percent"
+    """Milestone 5: half off one later paid pack."""
+
+    FREE_PACK = "free_pack"
+    """Milestone 10: one pack handed over without payment."""
+
+
+class LoyaltyRewardStatus(StrEnum):
+    """Lifecycle of one loyalty reward.
+
+    ``AVAILABLE`` — earned and unused.
+    ``APPLIED`` — priced into a pending invoice; goes back to ``AVAILABLE`` if
+        that invoice expires unpaid. A free pack is never in this state.
+    ``CONSUMED`` — used by a paid purchase or a handed-over free pack. Final.
+    """
+
+    AVAILABLE = "available"
+    APPLIED = "applied"
+    CONSUMED = "consumed"

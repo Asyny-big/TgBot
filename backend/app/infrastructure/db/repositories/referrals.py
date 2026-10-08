@@ -20,7 +20,11 @@ from app.core.exceptions import (
     ReferralNotFoundError,
     SelfReferralError,
 )
-from app.domain.enums import ACCESS_GRANTING_STATUSES, BonusTransactionType
+from app.domain.enums import (
+    ACCESS_GRANTING_STATUSES,
+    PAYABLE_PROVIDERS,
+    BonusTransactionType,
+)
 from app.domain.pagination import Page
 from app.infrastructure.db.errors import LIKE_ESCAPE, like_pattern, violated_constraint
 from app.infrastructure.db.mappers import to_referral, to_referral_record
@@ -125,7 +129,10 @@ class SqlAlchemyReferralRepository:
         return await self._session.scalar(statement) or 0
 
     async def count_referral_purchases(self, referrer_user_id: int) -> int:
-        """Settled purchases made by everyone this user invited."""
+        """Settled purchases made by everyone this user invited.
+
+        Paid ones only: a loyalty free pack (``internal``) was not bought.
+        """
         statement = (
             select(func.count())
             .select_from(PurchaseModel)
@@ -133,6 +140,7 @@ class SqlAlchemyReferralRepository:
             .where(
                 ReferralModel.referrer_user_id == referrer_user_id,
                 PurchaseModel.status.in_(ACCESS_GRANTING_STATUSES),
+                PurchaseModel.provider.in_(PAYABLE_PROVIDERS),
             )
         )
         return await self._session.scalar(statement) or 0
@@ -149,6 +157,7 @@ class SqlAlchemyReferralRepository:
             .where(
                 PurchaseModel.user_id == ReferralModel.referred_user_id,
                 PurchaseModel.status.in_(ACCESS_GRANTING_STATUSES),
+                PurchaseModel.provider.in_(PAYABLE_PROVIDERS),
             )
             .correlate(ReferralModel)
             .scalar_subquery()

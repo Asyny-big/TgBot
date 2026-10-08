@@ -20,6 +20,7 @@ from app.core.config import (
     DeliverySettings,
     Environment,
     LogFormat,
+    LoyaltySettings,
     PostgresSettings,
     RedisSettings,
     ReferralSettings,
@@ -47,6 +48,7 @@ _PLACEHOLDER = Settings(
     bot=BotSettings(),
     delivery=DeliverySettings(),
     referral=ReferralSettings(),
+    loyalty=LoyaltySettings(),
     security=SecuritySettings(
         jwt_secret=SecretStr("s" * 48),
         admin_username="schema",

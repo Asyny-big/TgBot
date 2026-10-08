@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from app.domain.entities import (
     BonusTransaction,
+    LoyaltyReward,
     Product,
     Purchase,
     PurchaseRecord,
@@ -20,6 +21,7 @@ from app.domain.entities import (
 if TYPE_CHECKING:
     from app.infrastructure.db.models import (
         BonusTransactionModel,
+        LoyaltyRewardModel,
         ProductModel,
         PurchaseModel,
         ReferralModel,
@@ -114,6 +116,7 @@ def to_purchase(model: PurchaseModel) -> Purchase:
         base_amount=model.base_amount,
         discount_amount=model.discount_amount,
         bonus_amount=model.bonus_amount,
+        loyalty_amount=model.loyalty_amount,
         currency=model.currency,
         external_id=model.external_id,
         telegram_charge_id=model.telegram_charge_id,
@@ -134,4 +137,20 @@ def to_record(
         purchase=to_purchase(purchase),
         user=to_user(user),
         product=to_product(product),
+    )
+
+
+def to_loyalty_reward(model: LoyaltyRewardModel) -> LoyaltyReward:
+    """Map a loyalty reward row onto its domain entity."""
+    return LoyaltyReward(
+        id=model.id,
+        user_id=model.user_id,
+        milestone=model.milestone,
+        kind=model.kind,
+        status=model.status,
+        earned_at=model.earned_at,
+        applied_purchase_id=model.applied_purchase_id,
+        consumed_purchase_id=model.consumed_purchase_id,
+        applied_at=model.applied_at,
+        consumed_at=model.consumed_at,
     )

@@ -78,4 +78,6 @@ export function outcomeLabel(outcome: VerificationOutcome): string {
 export const PROVIDER_LABELS: Record<string, string> = {
   stars: "⭐ Stars",
   crypto: "💎 CryptoBot",
+  // A loyalty free pack: handed over by the shop, never paid for.
+  internal: "🎁 Бесплатно",
 };

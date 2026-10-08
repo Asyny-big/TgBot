@@ -366,6 +366,20 @@ class ReferralSettings(BaseSettings):
         return self
 
 
+class LoyaltySettings(BaseSettings):
+    """Loyalty programme ("🏆 My progress") master switch.
+
+    Off by default. While it is off the shop behaves exactly as it did before
+    the programme existed: no progress screen, no loyalty price on a card, no
+    reward is recorded and no free pack is handed over. The schema the
+    programme needs is in place either way; turning it on is a deploy.
+    """
+
+    model_config = _settings_config("LOYALTY_")
+
+    enabled: bool = False
+
+
 class SecuritySettings(BaseSettings):
     """Admin authentication and browser-facing security policy."""
 
@@ -425,6 +439,7 @@ class Settings(BaseModel):
     bot: BotSettings
     delivery: DeliverySettings
     referral: ReferralSettings
+    loyalty: LoyaltySettings
     security: SecuritySettings
 
 
@@ -445,5 +460,6 @@ def get_settings() -> Settings:
         bot=_load(BotSettings),
         delivery=_load(DeliverySettings),
         referral=_load(ReferralSettings),
+        loyalty=_load(LoyaltySettings),
         security=_load(SecuritySettings),
     )

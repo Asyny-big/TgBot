@@ -379,7 +379,23 @@ class CheckoutService:
 
         if purchase.provider is PaymentProvider.STARS:
             return await self._verify_stars(purchase, status_before)
-        return await self._verify_crypto(purchase, status_before)
+        if purchase.provider is PaymentProvider.CRYPTO:
+            return await self._verify_crypto(purchase, status_before)
+        # Not a payment rail (an internal loyalty grant). A database check keeps
+        # those out of pending and expired, so this is unreachable — and if it
+        # ever were reached there is no provider to ask, so none is asked.
+        logger.warning(
+            "verification_without_payment_rail",
+            purchase_id=str(purchase.id),
+            provider=purchase.provider.value,
+            status=purchase.status.value,
+        )
+        return self._report(
+            purchase,
+            VerificationOutcome.NO_PROVIDER_EVIDENCE,
+            status_before,
+            detail="This purchase was not paid through a payment provider.",
+        )
 
     async def _verify_stars(
         self,

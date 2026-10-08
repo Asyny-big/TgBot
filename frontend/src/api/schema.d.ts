@@ -473,10 +473,17 @@ export interface components {
         };
         /**
          * PaymentProvider
-         * @description Payment rails available on a product card.
+         * @description How a purchase came to be paid for.
+         *
+         *     ``STARS`` and ``CRYPTO`` are payment rails: they appear as buttons on a
+         *     product card and bill the buyer through a provider. ``INTERNAL`` is not a
+         *     rail. It marks a pack the shop hands over itself (a loyalty free pack): no
+         *     invoice, no provider, no money. Code that takes a payment must therefore
+         *     accept only ``PAYABLE_PROVIDERS`` and refuse anything else explicitly — never
+         *     treat "not Stars" as "crypto".
          * @enum {string}
          */
-        PaymentProvider: "stars" | "crypto";
+        PaymentProvider: "stars" | "crypto" | "internal";
         /**
          * PaymentState
          * @description Provider view of an invoice, used when reconciling lost notifications.

@@ -100,6 +100,7 @@ class PurchaseDraft:
     base_amount: Decimal | None = None
     discount_amount: Decimal = Decimal(0)
     bonus_amount: Decimal = Decimal(0)
+    loyalty_amount: Decimal = Decimal(0)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

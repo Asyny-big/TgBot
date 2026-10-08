@@ -16,6 +16,7 @@ from app.core.config import (
     DeliverySettings,
     Environment,
     LogFormat,
+    LoyaltySettings,
     PostgresSettings,
     RedisSettings,
     ReferralSettings,
@@ -65,6 +66,9 @@ def build_settings(**overrides: Any) -> Settings:
             reward_percent=15,
             max_bonus_payment_percent=50,
         ),
+        # Off, as in production until it is switched on: the loyalty
+        # programme's tests enable it explicitly.
+        "loyalty": LoyaltySettings(enabled=False),
         "security": SecuritySettings(
             jwt_secret=SecretStr("a" * 48),
             admin_username="administrator",

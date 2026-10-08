@@ -660,6 +660,46 @@ async def test_a_failing_provider_is_reported_to_the_buyer(harness: BotHarness) 
     assert await harness.container.purchases.list_pending(PaymentProvider.CRYPTO) == ()
 
 
+async def test_a_hand_crafted_internal_pay_button_is_refused(harness: BotHarness) -> None:
+    """``pay:internal:…`` must never fall through to "not Stars, so crypto"."""
+    product = await _product(harness)
+    user = make_user()
+    await harness.feed(start_update(product.slug, user=user))
+
+    await harness.feed(
+        pay_button_update(provider=PaymentProvider.INTERNAL, product_id=product.id, user=user)
+    )
+
+    answer = harness.bot.methods(AnswerCallbackQuery)[-1]
+    assert answer.text == CARD_UNAVAILABLE
+    assert answer.show_alert is True
+    assert harness.crypto.created == []
+    assert harness.crypto.lookups == []
+    assert harness.bot.methods(SendInvoice) == []
+    for provider in PaymentProvider:
+        if provider.is_payable:
+            assert await harness.container.purchases.list_pending(provider) == ()
+
+
+async def test_a_hand_crafted_internal_bonus_choice_is_refused(harness: BotHarness) -> None:
+    product = await _product(harness)
+    user = make_user()
+    await harness.feed(start_update(product.slug, user=user))
+
+    await harness.feed(
+        bonus_choice_update(
+            provider=PaymentProvider.INTERNAL,
+            product_id=product.id,
+            use_bonus=False,
+            user=user,
+        )
+    )
+
+    assert harness.bot.methods(AnswerCallbackQuery)[-1].text == CARD_UNAVAILABLE
+    assert harness.crypto.created == []
+    assert harness.bot.methods(SendInvoice) == []
+
+
 async def test_pressing_crypto_again_hands_back_the_same_invoice(harness: BotHarness) -> None:
     """Bug #3: fifteen presses used to make fifteen invoices."""
     product = await _product(harness)

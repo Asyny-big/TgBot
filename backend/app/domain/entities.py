@@ -11,7 +11,15 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final
 
-from app.domain.enums import BonusTransactionType, Currency, PaymentProvider, PurchaseStatus
+from app.domain.enums import (
+    PAYABLE_PROVIDERS,
+    BonusTransactionType,
+    Currency,
+    LoyaltyRewardKind,
+    LoyaltyRewardStatus,
+    PaymentProvider,
+    PurchaseStatus,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -38,10 +46,16 @@ class Product:
     updated_at: datetime
 
     def price_for(self, provider: PaymentProvider) -> int | Decimal | None:
-        """Price in the provider's own currency, or ``None`` when unsupported."""
+        """Price on this payment rail, or ``None`` when it cannot be bought there.
+
+        Every rail is named explicitly: ``INTERNAL`` is not a rail, so it has no
+        price here and nothing can ever be *bought* through it.
+        """
         if provider is PaymentProvider.STARS:
             return self.price_stars
-        return self.price_usdt
+        if provider is PaymentProvider.CRYPTO:
+            return self.price_usdt
+        return None
 
     def supports(self, provider: PaymentProvider) -> bool:
         """Whether the product can be bought through this provider."""
@@ -49,8 +63,8 @@ class Product:
 
     @property
     def available_providers(self) -> tuple[PaymentProvider, ...]:
-        """Providers with a configured price, in display order."""
-        return tuple(provider for provider in PaymentProvider if self.supports(provider))
+        """Payment rails with a configured price, in display order."""
+        return tuple(provider for provider in PAYABLE_PROVIDERS if self.supports(provider))
 
     @property
     def stars_per_usdt(self) -> Decimal | None:
@@ -126,6 +140,12 @@ class Purchase:
     bonus_amount: Decimal = _NO_MONEY
     """Part of the price covered from the buyer's bonus balance."""
 
+    loyalty_amount: Decimal = _NO_MONEY
+    """Part of the list price waived by a loyalty reward.
+
+    The whole list price on an ``INTERNAL`` free pack, whose ``amount`` is 0.
+    """
+
     @property
     def grants_access(self) -> bool:
         """Whether this purchase entitles the buyer to the delivery link."""
@@ -148,7 +168,7 @@ class Purchase:
     @property
     def was_reduced(self) -> bool:
         """Whether anything was taken off the list price for this sale."""
-        return self.discount_amount > 0 or self.bonus_amount > 0
+        return self.discount_amount > 0 or self.bonus_amount > 0 or self.loyalty_amount > 0
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -205,6 +225,27 @@ class BonusTransaction:
     """
 
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LoyaltyReward:
+    """One loyalty milestone reward of one buyer, once it has been recorded.
+
+    Rewards are recorded lazily, the first time one is actually used, so a
+    buyer who qualifies but never used theirs has no row at all. VIP has no
+    reward: it is read off the number of completed purchases.
+    """
+
+    id: UUID
+    user_id: int
+    milestone: int
+    kind: LoyaltyRewardKind
+    status: LoyaltyRewardStatus
+    earned_at: datetime
+    applied_purchase_id: UUID | None = None
+    consumed_purchase_id: UUID | None = None
+    applied_at: datetime | None = None
+    consumed_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
