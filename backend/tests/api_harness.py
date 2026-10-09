@@ -146,7 +146,8 @@ def build_api_harness(
         locks=locks,
         settings=settings.referral,
     )
-    pricing = PricingService(uow_factory=uow_factory, bonuses=bonuses)
+    loyalty = LoyaltyService(uow_factory=uow_factory, settings=settings.loyalty)
+    pricing = PricingService(uow_factory=uow_factory, bonuses=bonuses, loyalty=loyalty)
     container = Container(
         settings=settings,
         uow_factory=uow_factory,
@@ -162,7 +163,7 @@ def build_api_harness(
         ),
         bonuses=bonuses,
         pricing=pricing,
-        loyalty=LoyaltyService(uow_factory=uow_factory, settings=settings.loyalty),
+        loyalty=loyalty,
         stats=StatsService(uow_factory=uow_factory),
         auth=AuthService(settings.security, RedisTokenRevocationStore(redis)),
     )

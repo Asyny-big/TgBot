@@ -410,9 +410,11 @@ class BonusRepository(Protocol):
 
 
 class LoyaltyRepository(Protocol):
-    """Read access to a buyer's loyalty progress and recorded rewards.
+    """A buyer's loyalty progress, and the rewards recorded as they get used.
 
-    Read only for now: nothing records or uses a reward yet.
+    Rewards are written lazily — ``ensure_reward`` the first time one is used —
+    and every change of state is a method that checks the current state under
+    the row lock, so no transition can happen twice or out of order.
     """
 
     async def count_completed(self, user_id: int) -> int:
@@ -426,6 +428,51 @@ class LoyaltyRepository(Protocol):
 
     async def rewards_of(self, user_id: int) -> tuple[LoyaltyReward, ...]:
         """Loyalty rewards recorded for this buyer so far, by milestone."""
+        ...
+
+    async def ensure_reward(self, user_id: int, milestone: int) -> None:
+        """Record this milestone's reward as available, unless it already exists.
+
+        Idempotent and race free: ``INSERT … ON CONFLICT DO NOTHING`` on the
+        unique (user, milestone) pair. The caller checks the milestone is
+        reached; this only makes sure the row is there to lock.
+        """
+        ...
+
+    async def lock_reward(self, user_id: int, milestone: int) -> LoyaltyReward | None:
+        """The reward row, locked ``FOR UPDATE`` until the transaction ends."""
+        ...
+
+    async def mark_applied(self, reward_id: UUID, purchase_id: UUID) -> LoyaltyReward:
+        """``available → applied``: priced into this purchase.
+
+        Raises:
+            ConflictError: the reward is not available any more.
+        """
+        ...
+
+    async def mark_consumed(self, reward_id: UUID, purchase_id: UUID) -> LoyaltyReward:
+        """``available | applied → consumed`` by this purchase. Idempotent per purchase.
+
+        Raises:
+            ConflictError: another purchase already consumed it.
+        """
+        ...
+
+    async def mark_released(self, reward_id: UUID, purchase_id: UUID) -> LoyaltyReward | None:
+        """``applied → available`` if — and only if — it is applied to this purchase.
+
+        ``None`` when it was not: already released, consumed, or used elsewhere.
+        """
+        ...
+
+    async def release_expired(self, *, limit: int = 100) -> tuple[UUID, ...]:
+        """Release every reward applied to a purchase that has since expired.
+
+        One conditional ``UPDATE``: a released reward changes state, so it is
+        never selected again, and rows a payment is settling right now are
+        skipped rather than waited for.
+        """
         ...
 
 

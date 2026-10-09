@@ -67,9 +67,11 @@ class Container:
             locks=locks,
             settings=settings.referral,
         )
-        # The loyalty discount is not wired into pricing yet: until it is,
-        # PricingService delegates to the referral and bonus pricing as is.
-        pricing = PricingService(uow_factory=uow_factory, bonuses=bonuses)
+        # The loyalty discount sits between the referral discount and bonuses.
+        # It prices nothing while LOYALTY_ENABLED is off; rewards already
+        # priced into an invoice are still settled or released either way.
+        loyalty = LoyaltyService(uow_factory=uow_factory, settings=settings.loyalty)
+        pricing = PricingService(uow_factory=uow_factory, bonuses=bonuses, loyalty=loyalty)
         purchases = PurchaseService(
             uow_factory=uow_factory,
             locks=locks,
@@ -91,7 +93,7 @@ class Container:
             ),
             bonuses=bonuses,
             pricing=pricing,
-            loyalty=LoyaltyService(uow_factory=uow_factory, settings=settings.loyalty),
+            loyalty=loyalty,
             stats=StatsService(uow_factory=uow_factory),
             auth=AuthService(
                 settings.security,

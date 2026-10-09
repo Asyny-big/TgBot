@@ -84,6 +84,17 @@ class CheckoutService:
         decided inside that transaction — so a discount or a bonus spend can
         never disagree with what the buyer is asked to pay.
 
+        The loyalty 50% discount is held by exactly one unpaid invoice, so two
+        things happen only to invoices that carry it:
+
+        * pressing ⭐ again for the same product replaces the unpaid one: it is
+          expired here, its discount released, and the new invoice gets it. The
+          old Telegram invoice is then refused at pre-checkout;
+        * an invoice Telegram refused to send is expired at once and its
+          discount released, instead of holding it for the invoice lifetime.
+
+        Every other invoice behaves exactly as it always has.
+
         Raises:
             LockBusyError: the buyer is already checking this product out.
             DuplicatePurchaseError: the buyer already owns the product.
@@ -92,24 +103,32 @@ class CheckoutService:
             PaymentGatewayError: Telegram refused to send the invoice.
         """
         payload = uuid4().hex
-        purchase = await self.purchases.start_purchase(
-            user_id=user_id,
-            product_id=product.id,
-            provider=PaymentProvider.STARS,
-            external_id=payload,
-            use_bonus=use_bonus,
-        )
-        await self.stars.send_invoice(
-            InvoiceRequest(
-                user_id=user_id,
-                product_id=product.id,
-                title=product.title,
-                description=product.description,
-                amount=purchase.amount,
-                currency=purchase.currency,
-                payload=payload,
+        async with self.purchases.checkout_session(user_id, product.id) as session:
+            await self._supersede_unpaid_loyalty_invoices(session)
+            purchase = await session.record(
+                provider=PaymentProvider.STARS,
+                external_id=payload,
+                use_bonus=use_bonus,
             )
-        )
+        try:
+            await self.stars.send_invoice(
+                InvoiceRequest(
+                    user_id=user_id,
+                    product_id=product.id,
+                    title=product.title,
+                    description=product.description,
+                    amount=purchase.amount,
+                    currency=purchase.currency,
+                    payload=payload,
+                )
+            )
+        except PaymentGatewayError:
+            if purchase.loyalty_amount > 0:
+                # Nobody can pay an invoice that was never sent: give the
+                # discount back now rather than after the invoice lifetime.
+                await self.purchases.withdraw_unsent_checkout(purchase.id)
+                logger.info("loyalty_stars_invoice_withdrawn", purchase_id=str(purchase.id))
+            raise
         logger.info(
             "stars_checkout_started",
             purchase_id=str(purchase.id),
@@ -117,6 +136,21 @@ class CheckoutService:
             product_id=str(product.id),
         )
         return purchase
+
+    @staticmethod
+    async def _supersede_unpaid_loyalty_invoices(session: CheckoutSession) -> None:
+        """Expire this buyer's unpaid Stars invoices for this product that hold the discount.
+
+        Only those: a plain unpaid Stars invoice is left exactly as it was.
+        """
+        for pending in await session.pending(PaymentProvider.STARS):
+            if pending.loyalty_amount > 0:
+                await session.expire(pending)
+                logger.info(
+                    "loyalty_stars_invoice_superseded",
+                    purchase_id=str(pending.id),
+                    user_id=pending.user_id,
+                )
 
     async def start_crypto_checkout(
         self,
@@ -293,15 +327,19 @@ class CheckoutService:
     ) -> bool:
         """Whether a pending invoice is what this press would be billed now.
 
-        A discount or a bonus reservation is held *by* that invoice, so pricing
-        the checkout afresh would not see it as available and would disagree
-        for no reason. For those the terms are compared instead — same list
-        price, same bonus choice. A plain invoice is simply re-priced: that also
-        catches a discount the buyer has become entitled to since.
+        A discount, a loyalty discount or a bonus reservation is held *by* that
+        invoice, so pricing the checkout afresh would not see it as available
+        and would disagree for no reason. For those the terms are compared
+        instead — same list price, same bonus choice. A loyalty discount never
+        combines with bonuses, so for it the bonus choice changes nothing. A
+        plain invoice is simply re-priced: that also catches a discount the
+        buyer has become entitled to since.
         """
         listed = product.price_for(PaymentProvider.CRYPTO)
         if listed is None or purchase.list_amount != Decimal(listed):
             return False
+        if purchase.loyalty_amount > 0:
+            return True
         if (purchase.bonus_amount > 0) != use_bonus:
             return False
         if purchase.discount_amount > 0 or purchase.bonus_amount > 0:

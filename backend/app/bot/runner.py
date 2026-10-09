@@ -75,6 +75,7 @@ def _start_workers(runtime: BotRuntime) -> list[asyncio.Task[None]]:
         purchases=runtime.container.purchases,
         settings=runtime.settings.bot,
         bonuses=runtime.container.bonuses,
+        loyalty=runtime.container.loyalty,
     )
     return [
         asyncio.create_task(reconciliation.run_forever(), name="reconciliation"),

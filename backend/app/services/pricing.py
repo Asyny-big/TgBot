@@ -100,9 +100,15 @@ class PricingService:
         if referral.uses_discount:
             return referral
 
-        reward_id = await loyalty.lock_discount(uow, user_id)
-        if reward_id is not None:
-            loyal = loyalty_quote(base_amount, currency, reward_id=reward_id)
+        # A discount that rounds to nothing must not even record the reward,
+        # let alone spend it — so the arithmetic is checked before the lock.
+        if loyalty_quote(base_amount, currency) is not None:
+            reward_id = await loyalty.lock_discount(uow, user_id)
+            loyal = (
+                loyalty_quote(base_amount, currency, reward_id=reward_id)
+                if reward_id is not None
+                else None
+            )
             if loyal is not None:
                 if use_bonus:
                     logger.info("bonus_request_superseded_by_loyalty", user_id=user_id)
@@ -181,10 +187,9 @@ class PricingService:
         loyalty = self._loyalty
         if loyalty is None or referral.uses_discount:
             return referral
-        if await loyalty.discount_available(uow, user_id):
-            loyal = loyalty_quote(base_amount, currency)
-            if loyal is not None:
-                return loyal
+        loyal = loyalty_quote(base_amount, currency)
+        if loyal is not None and await loyalty.discount_available(uow, user_id):
+            return loyal
         return referral
 
     async def offer_for(
@@ -217,10 +222,13 @@ class PricingService:
         base_amount: Decimal,
         currency: Currency,
     ) -> PriceQuote | None:
-        """The loyalty price if the reward is due and the discount is not zero."""
+        """The loyalty price if the discount is not zero and the reward is due."""
+        loyal = loyalty_quote(base_amount, currency)
+        if loyal is None:
+            return None
         async with self.uow_factory() as uow:
             available = await loyalty.discount_available(uow, user_id)
-        return loyalty_quote(base_amount, currency) if available else None
+        return loyal if available else None
 
     # ------------------------------------------------------------------- holds
 

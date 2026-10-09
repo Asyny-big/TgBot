@@ -47,9 +47,11 @@ from app.domain.enums import (
     BONUS_HOLD_TYPES,
     BonusTransactionType,
     Currency,
+    LoyaltyRewardStatus,
     PaymentProvider,
     PurchaseStatus,
 )
+from app.domain.loyalty import REWARD_MILESTONES
 from app.domain.pagination import Page
 from app.domain.patch import is_set
 from app.domain.stats import RevenueSummary, StatsPeriod
@@ -692,6 +694,111 @@ class FakeLoyaltyRepository:
                 key=lambda reward: reward.milestone,
             )
         )
+
+    async def ensure_reward(self, user_id: int, milestone: int) -> None:
+        if any(r.user_id == user_id and r.milestone == milestone for r in self.rewards):
+            return
+        self.rewards.append(
+            LoyaltyReward(
+                id=uuid4(),
+                user_id=user_id,
+                milestone=milestone,
+                kind=REWARD_MILESTONES[milestone],
+                status=LoyaltyRewardStatus.AVAILABLE,
+                earned_at=NOW,
+            )
+        )
+
+    async def lock_reward(self, user_id: int, milestone: int) -> LoyaltyReward | None:
+        for reward in self.rewards:
+            if reward.user_id == user_id and reward.milestone == milestone:
+                return reward
+        return None
+
+    async def mark_applied(self, reward_id: UUID, purchase_id: UUID) -> LoyaltyReward:
+        reward = self._require(reward_id)
+        if reward.status is not LoyaltyRewardStatus.AVAILABLE:
+            message = "The loyalty reward is not available"
+            raise ConflictError(message, reward_id=str(reward_id))
+        if any(r.applied_purchase_id == purchase_id for r in self.rewards):
+            message = "The loyalty reward could not change state"
+            raise ConflictError(message, reward_id=str(reward_id))
+        return self._store(
+            replace(
+                reward,
+                status=LoyaltyRewardStatus.APPLIED,
+                applied_purchase_id=purchase_id,
+                applied_at=NOW,
+            )
+        )
+
+    async def mark_consumed(self, reward_id: UUID, purchase_id: UUID) -> LoyaltyReward:
+        reward = self._require(reward_id)
+        if reward.status is LoyaltyRewardStatus.CONSUMED:
+            if reward.consumed_purchase_id == purchase_id:
+                return reward
+            message = "The loyalty reward was already consumed by another purchase"
+            raise ConflictError(message, reward_id=str(reward_id))
+        return self._store(
+            replace(
+                reward,
+                status=LoyaltyRewardStatus.CONSUMED,
+                consumed_purchase_id=purchase_id,
+                consumed_at=NOW,
+            )
+        )
+
+    async def mark_released(self, reward_id: UUID, purchase_id: UUID) -> LoyaltyReward | None:
+        reward = self._require(reward_id)
+        if (
+            reward.status is not LoyaltyRewardStatus.APPLIED
+            or reward.applied_purchase_id != purchase_id
+        ):
+            return None
+        return self._store(
+            replace(
+                reward,
+                status=LoyaltyRewardStatus.AVAILABLE,
+                applied_purchase_id=None,
+                applied_at=None,
+            )
+        )
+
+    async def release_expired(self, *, limit: int = 100) -> tuple[UUID, ...]:
+        released: list[UUID] = []
+        for reward in list(self.rewards):
+            holder = (
+                self.purchases.items.get(reward.applied_purchase_id)
+                if reward.applied_purchase_id is not None
+                else None
+            )
+            if (
+                reward.status is LoyaltyRewardStatus.APPLIED
+                and holder is not None
+                and holder.status is PurchaseStatus.EXPIRED
+                and len(released) < limit
+            ):
+                self._store(
+                    replace(
+                        reward,
+                        status=LoyaltyRewardStatus.AVAILABLE,
+                        applied_purchase_id=None,
+                        applied_at=None,
+                    )
+                )
+                released.append(reward.id)
+        return tuple(released)
+
+    def _require(self, reward_id: UUID) -> LoyaltyReward:
+        for reward in self.rewards:
+            if reward.id == reward_id:
+                return reward
+        message = "No such loyalty reward"
+        raise ConflictError(message, reward_id=str(reward_id))
+
+    def _store(self, updated: LoyaltyReward) -> LoyaltyReward:
+        self.rewards = [updated if r.id == updated.id else r for r in self.rewards]
+        return updated
 
 
 @dataclass

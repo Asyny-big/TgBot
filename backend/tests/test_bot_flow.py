@@ -14,6 +14,7 @@ import json
 import socket
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
@@ -76,8 +77,14 @@ from app.core.exceptions import (
     PaymentGatewayError,
     ServiceUnavailableError,
 )
-from app.domain.commands import ProductDraft, ProductUpdate, PurchaseDraft, UserDraft
-from app.domain.enums import Currency, PaymentProvider, PurchaseStatus
+from app.domain.commands import (
+    BonusTransactionDraft,
+    ProductDraft,
+    ProductUpdate,
+    PurchaseDraft,
+    UserDraft,
+)
+from app.domain.enums import BonusTransactionType, Currency, PaymentProvider, PurchaseStatus
 from app.infrastructure.cache.rate_limit import RedisRateLimiter
 from app.infrastructure.payments.cryptobot import SIGNATURE_HEADER, CryptoBotClient
 from app.infrastructure.telegram.gateways import TelegramDeliveryGateway
@@ -326,7 +333,8 @@ def _container(
         locks=locks,
         settings=settings.referral,
     )
-    pricing = PricingService(uow_factory=uow_factory, bonuses=bonuses)
+    loyalty = LoyaltyService(uow_factory=uow_factory, settings=settings.loyalty)
+    pricing = PricingService(uow_factory=uow_factory, bonuses=bonuses, loyalty=loyalty)
     return Container(
         settings=settings,
         uow_factory=uow_factory,
@@ -342,7 +350,7 @@ def _container(
         ),
         bonuses=bonuses,
         pricing=pricing,
-        loyalty=LoyaltyService(uow_factory=uow_factory, settings=settings.loyalty),
+        loyalty=loyalty,
         stats=StatsService(uow_factory=uow_factory),
         auth=AuthService(settings.security, FakeRevocationStore()),
     )
@@ -2047,3 +2055,129 @@ async def test_a_failing_progress_read_is_a_soft_error(
     await loyalty_harness.feed(progress_button_update(user=user, update_id=271))
 
     assert loyalty_harness.bot.last_text() == PROGRESS_UNAVAILABLE
+
+
+# --------------------------------------------------------------------------- #
+# Loyalty: the 50% discount through the bot
+# --------------------------------------------------------------------------- #
+async def _seed_bonus_balance(harness: BotHarness, user_id: int, units: int) -> None:
+    async with harness.container.uow_factory() as uow:
+        await uow.bonuses.add(
+            BonusTransactionDraft(
+                user_id=user_id,
+                amount=units,
+                type=BonusTransactionType.REFERRAL_REWARD,
+            )
+        )
+
+
+async def test_the_card_shows_the_loyalty_price(loyalty_harness: BotHarness) -> None:
+    user = make_user(telegram_id=5301, username="loyal")
+    await _seed_received_packs(loyalty_harness, user.id, 5)
+    product = await _product(loyalty_harness)
+
+    await loyalty_harness.feed(start_update(product.slug, user=user, update_id=301))
+
+    text = loyalty_harness.bot.last_text()
+    assert "<s>150</s> 75 XTR" in text
+    assert "<s>5</s> 2.5 USDT" in text
+    assert "🏆 Скидка 50% по программе лояльности" in text
+
+
+async def test_no_bonus_question_while_the_loyalty_discount_applies(
+    loyalty_harness: BotHarness,
+) -> None:
+    user = make_user(telegram_id=5302, username="loyalbonus")
+    await _seed_received_packs(loyalty_harness, user.id, 5)
+    await _seed_bonus_balance(loyalty_harness, user.id, 300)
+    product = await _product(loyalty_harness)
+    await loyalty_harness.feed(start_update(product.slug, user=user, update_id=311))
+
+    await loyalty_harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=user,
+            update_id=312,
+        )
+    )
+
+    invoices = loyalty_harness.bot.methods(SendInvoice)
+    assert len(invoices) == 1
+    assert invoices[0].prices[0].amount == 75
+    assert not [text for text in loyalty_harness.bot.texts() if "бонусов" in text]
+
+
+async def test_a_replaced_discounted_stars_invoice_is_refused_at_pre_checkout(
+    loyalty_harness: BotHarness,
+) -> None:
+    """Decision B through the bot: the old invoice cannot be paid, the new one can."""
+    user = make_user(telegram_id=5303, username="repress")
+    await _seed_received_packs(loyalty_harness, user.id, 5)
+    product = await _product(loyalty_harness)
+    await loyalty_harness.feed(start_update(product.slug, user=user, update_id=321))
+
+    for update_id in (322, 323):
+        await loyalty_harness.feed(
+            pay_button_update(
+                provider=PaymentProvider.STARS,
+                product_id=product.id,
+                user=user,
+                update_id=update_id,
+            )
+        )
+    old, new = loyalty_harness.bot.methods(SendInvoice)
+    assert old.prices[0].amount == new.prices[0].amount == 75
+
+    await loyalty_harness.feed(
+        pre_checkout_update(payload=old.payload, amount=75, user=user, update_id=324)
+    )
+    refused = loyalty_harness.bot.methods(AnswerPreCheckoutQuery)[-1]
+    assert refused.ok is False
+    assert refused.error_message == PRE_CHECKOUT_UNKNOWN
+
+    await loyalty_harness.feed(
+        pre_checkout_update(payload=new.payload, amount=75, user=user, update_id=325)
+    )
+    assert loyalty_harness.bot.methods(AnswerPreCheckoutQuery)[-1].ok is True
+    await loyalty_harness.feed(
+        successful_payment_update(
+            payload=new.payload,
+            amount=75,
+            charge_id="charge-loyal",
+            user=user,
+            update_id=326,
+        )
+    )
+
+    assert len([text for text in loyalty_harness.bot.texts() if DELIVERY_URL in text]) == 1
+    async with loyalty_harness.container.uow_factory() as uow:
+        rewards = await uow.loyalty.rewards_of(user.id)
+    assert [(reward.milestone, reward.status.value) for reward in rewards] == [(5, "consumed")]
+
+
+async def test_an_expired_plain_stars_invoice_still_passes_pre_checkout(
+    loyalty_harness: BotHarness,
+) -> None:
+    """Only discounted invoices are refused once expired; nothing else changed."""
+    user = make_user(telegram_id=5304, username="plainlate")
+    product = await _product(loyalty_harness)
+    await loyalty_harness.feed(start_update(product.slug, user=user, update_id=331))
+    await loyalty_harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=user,
+            update_id=332,
+        )
+    )
+    (invoice,) = loyalty_harness.bot.methods(SendInvoice)
+    await loyalty_harness.container.purchases.expire_stale(
+        now=datetime.now(UTC) + timedelta(hours=2)
+    )
+
+    await loyalty_harness.feed(
+        pre_checkout_update(payload=invoice.payload, amount=150, user=user, update_id=333)
+    )
+
+    assert loyalty_harness.bot.methods(AnswerPreCheckoutQuery)[-1].ok is True

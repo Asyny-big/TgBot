@@ -537,6 +537,15 @@ class PurchaseService:
             logger.info("pending_purchases_expired", count=expired)
         return expired
 
+    async def withdraw_unsent_checkout(self, purchase_id: UUID) -> Purchase:
+        """Expire a pending purchase whose invoice never reached the buyer.
+
+        Whatever it held is given back in the same transaction. Safe without the
+        checkout lock: only a still-pending row moves, under its own row lock, so
+        a purchase that was paid in the meantime is left untouched.
+        """
+        return await self._expire_checkout(purchase_id)
+
     async def _expire_checkout(self, purchase_id: UUID) -> Purchase:
         """Expire one pending purchase and release what it held. The caller holds the lock."""
         async with self.uow_factory() as uow:

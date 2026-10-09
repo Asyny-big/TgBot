@@ -320,6 +320,14 @@ async def handle_pre_checkout(query: PreCheckoutQuery, shop: BotServices) -> Non
     if purchase.status in (PurchaseStatus.PAID, PurchaseStatus.DELIVERED):
         await query.answer(ok=False, error_message=PRE_CHECKOUT_ALREADY_OWNED)
         return
+    if purchase.status is PurchaseStatus.EXPIRED and purchase.loyalty_amount > 0:
+        # A Telegram invoice never expires, but this one's loyalty discount was
+        # given back when it did — possibly to a newer invoice already. Paying
+        # it now would use the discount twice. Plain expired invoices are left
+        # as they always were.
+        logger.info("loyalty_stars_invoice_refused", purchase_id=str(purchase.id))
+        await query.answer(ok=False, error_message=PRE_CHECKOUT_UNKNOWN)
+        return
 
     try:
         await shop.purchases.product_for_checkout(purchase.product_id)
