@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     )
     from app.domain.entities import (
         BonusTransaction,
+        LoyaltyReward,
         Product,
         Purchase,
         PurchaseRecord,
@@ -405,6 +406,26 @@ class BonusRepository(Protocol):
 
     async def stale_holds(self, *, limit: int = 100) -> tuple[UUID, ...]:
         """Purchases whose reservation is dead and not yet released."""
+        ...
+
+
+class LoyaltyRepository(Protocol):
+    """Read access to a buyer's loyalty progress and recorded rewards.
+
+    Read only for now: nothing records or uses a reward yet.
+    """
+
+    async def count_completed(self, user_id: int) -> int:
+        """Purchases this buyer received: delivered, or refunded after delivery.
+
+        Pending, paid-but-undelivered, expired and refunded-before-delivery
+        purchases are not counted. Every provider counts, including an
+        ``internal`` free pack once it has been delivered.
+        """
+        ...
+
+    async def rewards_of(self, user_id: int) -> tuple[LoyaltyReward, ...]:
+        """Loyalty rewards recorded for this buyer so far, by milestone."""
         ...
 
 

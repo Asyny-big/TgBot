@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from aiogram import Dispatcher
 
-from app.bot.handlers import bonuses, payments, start
+from app.bot.handlers import bonuses, payments, progress, start
 from app.bot.middlewares import (
     BotServices,
     LogContextMiddleware,
@@ -50,6 +50,7 @@ def create_dispatcher(container: Container, checkout: CheckoutService) -> Dispat
         checkout=checkout,
         referrals=container.referrals,
         bonuses=container.bonuses,
+        loyalty=container.loyalty,
     )
 
     dispatcher.update.outer_middleware(LogContextMiddleware())
@@ -64,6 +65,7 @@ def create_dispatcher(container: Container, checkout: CheckoutService) -> Dispat
     # The bonus router is registered before ``start`` so its /bonus command is
     # matched by its own handler rather than by the deep-link filter.
     dispatcher.include_router(bonuses.build_router())
+    dispatcher.include_router(progress.build_router())
     dispatcher.include_router(start.build_router())
     dispatcher.include_router(payments.build_router())
     return dispatcher

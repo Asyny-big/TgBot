@@ -12,7 +12,7 @@ import hashlib
 import hmac
 import json
 import socket
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from decimal import Decimal
 from http import HTTPStatus
@@ -29,8 +29,10 @@ from aiogram.methods import (
     SendMessage,
     SendPhoto,
 )
+from aiogram.types import InlineKeyboardMarkup
 from aiohttp import web
 from pydantic import SecretStr
+from sqlalchemy import text as sql_text
 
 from app.bot.factory import create_checkout, create_dispatcher
 from app.bot.profile import profile_of
@@ -47,7 +49,10 @@ from app.bot.texts import (
     PAYMENT_UNAVAILABLE,
     PRE_CHECKOUT_ALREADY_OWNED,
     PRE_CHECKOUT_UNKNOWN,
+    PROGRESS_SECTION_BUTTON,
+    PROGRESS_UNAVAILABLE,
     REFUND_NOTICE,
+    SECTION_UNAVAILABLE,
     bonus_section,
     referral_welcome,
 )
@@ -57,6 +62,7 @@ from app.core.config import (
     BotSettings,
     CryptoBotSettings,
     DeliverySettings,
+    LoyaltySettings,
     PostgresSettings,
     RedisSettings,
     SecuritySettings,
@@ -68,13 +74,15 @@ from app.core.exceptions import (
     CheckoutAlreadyPendingError,
     InvalidSlugError,
     PaymentGatewayError,
+    ServiceUnavailableError,
 )
-from app.domain.commands import ProductDraft, ProductUpdate, UserDraft
-from app.domain.enums import PaymentProvider, PurchaseStatus
+from app.domain.commands import ProductDraft, ProductUpdate, PurchaseDraft, UserDraft
+from app.domain.enums import Currency, PaymentProvider, PurchaseStatus
 from app.infrastructure.cache.rate_limit import RedisRateLimiter
 from app.infrastructure.payments.cryptobot import SIGNATURE_HEADER, CryptoBotClient
 from app.infrastructure.telegram.gateways import TelegramDeliveryGateway
 from app.services.checkout import CheckoutService
+from app.services.loyalty import LoyaltyService
 from tests.bot_harness import (
     RecordingBot,
     bonus_button_update,
@@ -83,6 +91,8 @@ from tests.bot_harness import (
     make_user,
     pay_button_update,
     pre_checkout_update,
+    progress_button_update,
+    progress_command_update,
     refunded_payment_update,
     start_update,
     successful_payment_update,
@@ -197,7 +207,7 @@ class BotHarness:
         await self.dispatcher.feed_update(self.bot, update)
 
 
-def _settings(dsn: str, *, throttle: float = 0.0) -> Settings:
+def _settings(dsn: str, *, throttle: float = 0.0, loyalty: bool = False) -> Settings:
     url = httpx.URL(dsn.replace("postgresql+asyncpg", "postgresql"))
     return build_settings(
         postgres=PostgresSettings(
@@ -217,6 +227,7 @@ def _settings(dsn: str, *, throttle: float = 0.0) -> Settings:
         cryptobot=CryptoBotSettings(api_token=SecretStr(CRYPTO_TOKEN), network="testnet"),
         bot=BotSettings(throttle_seconds=throttle, reconciliation_batch_size=10),
         delivery=DeliverySettings(max_attempts=3, initial_backoff_seconds=0.01),
+        loyalty=LoyaltySettings(enabled=loyalty),
         security=SecuritySettings(
             jwt_secret=SecretStr("a" * 48),
             admin_username="administrator",
@@ -240,6 +251,32 @@ async def harness(
 ) -> AsyncIterator[BotHarness]:
     """A bot wired to the live database, live Redis and a fake Crypto Pay."""
     settings = _settings(migrated_database)
+    async with _running_bot(settings, live_database, live_locks, redis_client, crypto_pay) as bot:
+        yield bot
+
+
+@pytest.fixture
+async def loyalty_harness(
+    live_database: Database,
+    live_locks: RedisLockManager,
+    redis_client: Redis,
+    migrated_database: str,
+    crypto_pay: FakeCryptoPay,
+) -> AsyncIterator[BotHarness]:
+    """The same bot with the loyalty programme switched on."""
+    settings = _settings(migrated_database, loyalty=True)
+    async with _running_bot(settings, live_database, live_locks, redis_client, crypto_pay) as bot:
+        yield bot
+
+
+@asynccontextmanager
+async def _running_bot(
+    settings: Settings,
+    live_database: Database,
+    live_locks: RedisLockManager,
+    redis_client: Redis,
+    crypto_pay: FakeCryptoPay,
+) -> AsyncIterator[BotHarness]:
     container = _container(settings, live_database, live_locks, redis_client, crypto_pay)
     bot = RecordingBot()
     checkout = create_checkout(container, bot)
@@ -268,6 +305,7 @@ def _container(
     from app.infrastructure.db.uow import SqlAlchemyUnitOfWorkFactory  # noqa: PLC0415
     from app.services.auth import AuthService  # noqa: PLC0415
     from app.services.bonuses import BonusService  # noqa: PLC0415
+    from app.services.loyalty import LoyaltyService  # noqa: PLC0415
     from app.services.products import ProductService  # noqa: PLC0415
     from app.services.purchases import PurchaseService  # noqa: PLC0415
     from app.services.referrals import ReferralService  # noqa: PLC0415
@@ -301,6 +339,7 @@ def _container(
             settings=settings.referral,
         ),
         bonuses=bonuses,
+        loyalty=LoyaltyService(uow_factory=uow_factory, settings=settings.loyalty),
         stats=StatsService(uow_factory=uow_factory),
         auth=AuthService(settings.security, FakeRevocationStore()),
     )
@@ -1820,3 +1859,188 @@ async def test_a_buyer_without_bonuses_is_never_asked(harness: BotHarness) -> No
     )
 
     assert harness.bot.methods(SendInvoice)[-1].prices[0].amount == 1000
+
+
+# --------------------------------------------------------------------------- #
+# Loyalty: "🏆 My progress" (read only)
+# --------------------------------------------------------------------------- #
+async def _seed_received_packs(harness: BotHarness, user_id: int, count: int) -> None:
+    """``count`` delivered packs, one product each, as a historical buyer has."""
+    async with harness.container.uow_factory() as uow:
+        await uow.users.upsert(UserDraft(telegram_id=user_id))
+        for _ in range(count):
+            product = await uow.products.create(
+                ProductDraft(
+                    slug=f"pack{uuid4().hex[:8]}",
+                    title="Pack",
+                    description="",
+                    delivery_url=DELIVERY_URL,
+                    price_stars=STARS_PRICE,
+                )
+            )
+            paid = await uow.purchases.create(
+                PurchaseDraft(
+                    user_id=user_id,
+                    product_id=product.id,
+                    provider=PaymentProvider.STARS,
+                    amount=Decimal(STARS_PRICE),
+                    currency=Currency.XTR,
+                    external_id=uuid4().hex,
+                    status=PurchaseStatus.PAID,
+                )
+            )
+            await uow.purchases.mark_delivered(paid.id, delivered_url=DELIVERY_URL)
+
+
+async def _database_snapshot(harness: BotHarness) -> tuple[Any, ...]:
+    async with harness.container.uow_factory() as uow:
+        row = (
+            await uow.session.execute(
+                sql_text(
+                    "SELECT"
+                    " (SELECT count(*) FROM loyalty_rewards),"
+                    " (SELECT count(*) FROM purchases),"
+                    " (SELECT md5(coalesce(string_agg(id::text || status::text,"
+                    "   ',' ORDER BY id), '')) FROM purchases),"
+                    " (SELECT md5(coalesce(string_agg(telegram_id::text || last_seen_at::text,"
+                    "   ',' ORDER BY telegram_id), '')) FROM users)"
+                )
+            )
+        ).one()
+    return tuple(row)
+
+
+def _labels(message: SendMessage) -> list[str]:
+    markup = message.reply_markup
+    rows = markup.inline_keyboard if isinstance(markup, InlineKeyboardMarkup) else []
+    return [button.text for row in rows for button in row]
+
+
+async def test_progress_is_invisible_while_the_programme_is_off(harness: BotHarness) -> None:
+    """LOYALTY_ENABLED=false: no button, no command, and a pressed button reveals nothing."""
+    user = make_user(telegram_id=5201, username="offbuyer")
+    await _seed_received_packs(harness, user.id, 7)
+
+    await harness.feed(start_update(None, user=user, update_id=201))
+    assert _labels(harness.bot.methods(SendMessage)[-1]) == [BONUS_SECTION_BUTTON]
+
+    sent_before = len(harness.bot.methods(SendMessage))
+    await harness.feed(progress_command_update(user=user, update_id=202))
+    # Not handled at all — exactly what the bot did before the section existed.
+    assert len(harness.bot.methods(SendMessage)) == sent_before
+
+    await harness.feed(progress_button_update(user=user, update_id=203))
+    assert harness.bot.methods(AnswerCallbackQuery)[-1].text == SECTION_UNAVAILABLE
+    assert len(harness.bot.methods(SendMessage)) == sent_before
+    assert not [text for text in harness.bot.texts() if "Покупок" in text]
+
+
+async def test_the_start_menu_offers_progress_when_the_programme_is_on(
+    loyalty_harness: BotHarness,
+) -> None:
+    user = make_user(telegram_id=5202, username="onbuyer")
+
+    await loyalty_harness.feed(start_update(None, user=user, update_id=211))
+
+    sent = loyalty_harness.bot.methods(SendMessage)[-1]
+    assert sent.text == NO_DEEP_LINK
+    assert _labels(sent) == [BONUS_SECTION_BUTTON, PROGRESS_SECTION_BUTTON]
+
+
+async def test_the_progress_button_shows_the_buyers_own_progress(
+    loyalty_harness: BotHarness,
+) -> None:
+    user = make_user(telegram_id=5203, username="seven")
+    await _seed_received_packs(loyalty_harness, user.id, 7)
+
+    await loyalty_harness.feed(progress_button_update(user=user, update_id=221))
+
+    assert loyalty_harness.bot.methods(AnswerCallbackQuery)[-1].text is None
+    lines = [line for line in loyalty_harness.bot.last_text().split("\n") if line]
+    assert lines == [
+        "🏆 <b>Мой прогресс</b>",
+        "Покупок: 7",
+        "🎉 Скидка 50% доступна",
+        "До бесплатного пака: 3 покупки",
+        "До VIP: 8 покупок",
+    ]
+
+
+async def test_the_progress_command_shows_a_vip(loyalty_harness: BotHarness) -> None:
+    user = make_user(telegram_id=5204, username="vip")
+    await _seed_received_packs(loyalty_harness, user.id, 18)
+
+    await loyalty_harness.feed(progress_command_update(user=user, update_id=231))
+
+    text = loyalty_harness.bot.last_text()
+    assert "Покупок: 18" in text
+    assert "🎉 Скидка 50% доступна" in text
+    assert "🎁 Бесплатный пак доступен" in text
+    assert "👑 VIP" in text
+    # Nothing to press: using a reward is not part of this screen.
+    assert loyalty_harness.bot.methods(SendMessage)[-1].reply_markup is None
+
+
+async def test_the_bonus_section_is_unaffected_by_the_programme(
+    loyalty_harness: BotHarness,
+) -> None:
+    user = make_user(telegram_id=5205, username="bonuses")
+
+    await loyalty_harness.feed(bonus_command_update(user=user, update_id=241))
+
+    text = loyalty_harness.bot.last_text()
+    assert "?start=ref_" in text
+    assert "Мой прогресс" not in text
+
+
+async def test_a_hand_crafted_progress_callback_reveals_nobody_elses_progress(
+    loyalty_harness: BotHarness,
+) -> None:
+    """The callback carries no user id; a forged one with a payload is not even matched."""
+    owner = make_user(telegram_id=5206, username="owner")
+    snoop = make_user(telegram_id=5207, username="snoop")
+    await _seed_received_packs(loyalty_harness, owner.id, 7)
+    sent_before = len(loyalty_harness.bot.methods(SendMessage))
+
+    await loyalty_harness.feed(
+        progress_button_update(user=snoop, update_id=251, data=f"progress:{owner.id}")
+    )
+    assert len(loyalty_harness.bot.methods(SendMessage)) == sent_before
+
+    await loyalty_harness.feed(progress_button_update(user=snoop, update_id=252))
+    sent = loyalty_harness.bot.methods(SendMessage)[-1]
+    assert sent.chat_id == snoop.id
+    assert "Покупок: 0" in sent.text
+    assert not [text for text in loyalty_harness.bot.texts() if "Покупок: 7" in text]
+
+
+async def test_opening_progress_repeatedly_changes_nothing(loyalty_harness: BotHarness) -> None:
+    user = make_user(telegram_id=5208, username="repeat")
+    await _seed_received_packs(loyalty_harness, user.id, 12)
+    before = await _database_snapshot(loyalty_harness)
+
+    for update_id in range(261, 266):
+        await loyalty_harness.feed(progress_button_update(user=user, update_id=update_id))
+    await loyalty_harness.feed(progress_command_update(user=user, update_id=266))
+
+    assert await _database_snapshot(loyalty_harness) == before
+    assert before[0] == 0
+
+
+async def test_a_failing_progress_read_is_a_soft_error(
+    loyalty_harness: BotHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The section is an extra: a failure reads as "try later", never a broken bot."""
+    user = make_user(telegram_id=5209, username="unlucky")
+
+    async def unavailable(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        message = "the database is resting"
+        raise ServiceUnavailableError(message)
+
+    monkeypatch.setattr(LoyaltyService, "get_progress", unavailable)
+
+    await loyalty_harness.feed(progress_button_update(user=user, update_id=271))
+
+    assert loyalty_harness.bot.last_text() == PROGRESS_UNAVAILABLE

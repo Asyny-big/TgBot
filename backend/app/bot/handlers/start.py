@@ -16,7 +16,7 @@ from aiogram import F, Router
 from aiogram.filters import CommandObject, CommandStart
 
 from app.bot.handlers.bonuses import show_invitation
-from app.bot.keyboards import bonus_hint_keyboard, payment_keyboard
+from app.bot.keyboards import payment_keyboard, start_menu_keyboard
 from app.bot.middlewares import BotServices
 from app.bot.profile import profile_of
 from app.bot.texts import (
@@ -46,11 +46,15 @@ logger = get_logger(__name__)
 async def handle_start_without_deep_link(message: Message, shop: BotServices) -> None:
     """No payload: there is nothing to show, and nothing is recorded.
 
-    Still not a catalogue. The bonus section is offered as a button because it
-    is the one screen a user may legitimately want without a product link — it
-    lists no products and no channels.
+    Still not a catalogue. The bonus and progress sections are offered as
+    buttons because they are the screens a user may legitimately want without a
+    product link — neither lists products or channels. Each appears only while
+    its programme is switched on.
     """
-    keyboard = bonus_hint_keyboard() if shop.referrals.enabled else None
+    keyboard = start_menu_keyboard(
+        bonuses=shop.referrals.enabled,
+        progress=shop.loyalty.enabled,
+    )
     await message.answer(NO_DEEP_LINK, reply_markup=keyboard)
 
 

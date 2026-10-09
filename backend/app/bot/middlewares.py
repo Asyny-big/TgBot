@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from app.domain.locks import LockManager
     from app.services.bonuses import BonusService
     from app.services.checkout import CheckoutService
+    from app.services.loyalty import LoyaltyService
     from app.services.purchases import PurchaseService
     from app.services.referrals import ReferralService
 
@@ -36,11 +37,13 @@ class BotServices:
         checkout: CheckoutService,
         referrals: ReferralService,
         bonuses: BonusService,
+        loyalty: LoyaltyService,
     ) -> None:
         self.purchases = purchases
         self.checkout = checkout
         self.referrals = referrals
         self.bonuses = bonuses
+        self.loyalty = loyalty
 
 
 class ServicesMiddleware(BaseMiddleware):

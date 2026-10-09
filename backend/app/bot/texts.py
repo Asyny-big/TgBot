@@ -11,8 +11,11 @@ from decimal import Decimal
 from html import escape
 from typing import TYPE_CHECKING, Final
 
+from app.domain.loyalty import MilestoneRewardState
+
 if TYPE_CHECKING:
     from app.domain.cards import ProductCard
+    from app.domain.loyalty import LoyaltyProgress
 
 STARS_BUTTON: Final = "⭐ Telegram Stars"
 CRYPTO_BUTTON: Final = "💎 CryptoBot (USDT)"
@@ -231,3 +234,59 @@ def reward_notice(
             f"💰 Баланс: {balance}",
         ]
     )
+
+
+# --------------------------------- Loyalty ---------------------------------- #
+
+PROGRESS_SECTION_BUTTON: Final = "🏆 Мой прогресс"
+PROGRESS_UNAVAILABLE: Final = "Не удалось открыть прогресс. Попробуйте ещё раз через минуту."
+SECTION_UNAVAILABLE: Final = "Этот раздел сейчас недоступен."
+
+_PLURAL_FEW_MIN: Final = 2
+_PLURAL_FEW_MAX: Final = 4
+_TEENS: Final = range(11, 15)
+
+
+def _purchases(count: int) -> str:
+    """``1 покупка``, ``3 покупки``, ``8 покупок``, ``12 покупок``."""
+    if count % 10 == 1 and count % 100 != 11:  # noqa: PLR2004 — Russian plural rule
+        word = "покупка"
+    elif _PLURAL_FEW_MIN <= count % 10 <= _PLURAL_FEW_MAX and count % 100 not in _TEENS:
+        word = "покупки"
+    else:
+        word = "покупок"
+    return f"{count} {word}"
+
+
+def loyalty_progress(progress: LoyaltyProgress) -> str:
+    """The "🏆 My progress" screen.
+
+    Says what the buyer has and what is missing — and nothing more. There is no
+    button to *use* a reward here: using one is a separate step.
+    """
+    lines = ["🏆 <b>Мой прогресс</b>", "", f"Покупок: {progress.completed_count}", ""]
+
+    match progress.discount_50:
+        case MilestoneRewardState.AVAILABLE:
+            lines.append("🎉 Скидка 50% доступна")
+        case MilestoneRewardState.IN_USE:
+            lines.append("⏳ Скидка 50% ждёт оплаты счёта")
+        case MilestoneRewardState.USED:
+            lines.append("✅ Скидка 50% использована")
+        case MilestoneRewardState.LOCKED:
+            lines.append(f"До скидки 50%: {_purchases(progress.to_discount)}")
+
+    match progress.free_pack:
+        case MilestoneRewardState.AVAILABLE:
+            lines.append("🎁 Бесплатный пак доступен")
+        case MilestoneRewardState.USED:
+            lines.append("✅ Бесплатный пак получен")
+        case MilestoneRewardState.LOCKED | MilestoneRewardState.IN_USE:
+            # A free pack is never "in use"; the database refuses that state.
+            lines.append(f"До бесплатного пака: {_purchases(progress.to_free)}")
+
+    if progress.vip:
+        lines.append("👑 VIP")
+    else:
+        lines.append(f"До VIP: {_purchases(progress.to_vip)}")
+    return "\n".join(lines)

@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
     from app.domain.repositories import (
         BonusRepository,
+        LoyaltyRepository,
         ProductRepository,
         PurchaseRepository,
         ReferralRepository,
@@ -54,6 +55,11 @@ class UnitOfWork(Protocol):
     @property
     def stats(self) -> StatsRepository:
         """Statistics repository bound to this transaction."""
+        ...
+
+    @property
+    def loyalty(self) -> LoyaltyRepository:
+        """Loyalty progress and rewards repository bound to this transaction."""
         ...
 
     async def commit(self) -> None:

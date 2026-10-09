@@ -33,6 +33,7 @@ from app.infrastructure.telegram.factory import create_delivery_gateway, create_
 from app.main import create_app
 from app.services.auth import AuthService
 from app.services.bonuses import BonusService
+from app.services.loyalty import LoyaltyService
 from app.services.products import ProductService
 from app.services.purchases import PurchaseService
 from app.services.referrals import ReferralService
@@ -158,6 +159,7 @@ def build_api_harness(
             settings=settings.referral,
         ),
         bonuses=bonuses,
+        loyalty=LoyaltyService(uow_factory=uow_factory, settings=settings.loyalty),
         stats=StatsService(uow_factory=uow_factory),
         auth=AuthService(settings.security, RedisTokenRevocationStore(redis)),
     )

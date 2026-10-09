@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from app.infrastructure.db.repositories.bonuses import SqlAlchemyBonusRepository
+from app.infrastructure.db.repositories.loyalty import SqlAlchemyLoyaltyRepository
 from app.infrastructure.db.repositories.products import SqlAlchemyProductRepository
 from app.infrastructure.db.repositories.purchases import SqlAlchemyPurchaseRepository
 from app.infrastructure.db.repositories.referrals import SqlAlchemyReferralRepository
@@ -31,6 +32,7 @@ class SqlAlchemyUnitOfWork:
         self._referrals = SqlAlchemyReferralRepository(session)
         self._bonuses = SqlAlchemyBonusRepository(session)
         self._stats = SqlAlchemyStatsRepository(session)
+        self._loyalty = SqlAlchemyLoyaltyRepository(session)
 
     @property
     def session(self) -> AsyncSession:
@@ -59,6 +61,10 @@ class SqlAlchemyUnitOfWork:
     @property
     def stats(self) -> SqlAlchemyStatsRepository:
         return self._stats
+
+    @property
+    def loyalty(self) -> SqlAlchemyLoyaltyRepository:
+        return self._loyalty
 
     async def commit(self) -> None:
         await self._session.commit()

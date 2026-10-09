@@ -34,7 +34,7 @@ from aiogram.types import (
     User,
 )
 
-from app.bot.keyboards import BonusCallback, BonusChoiceCallback
+from app.bot.keyboards import BonusCallback, BonusChoiceCallback, ProgressCallback
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -176,6 +176,31 @@ def bonus_button_update(*, user: User | None = None, update_id: int = 20) -> Upd
             chat_instance="instance-1",
             message=make_message(text="anything", user=sender),
             data=BonusCallback().pack(),
+        ),
+    )
+
+
+def progress_command_update(*, user: User | None = None, update_id: int = 22) -> Update:
+    """``/progress``: the loyalty section, while the programme is on."""
+    return Update(update_id=update_id, message=make_message(text="/progress", user=user))
+
+
+def progress_button_update(
+    *,
+    user: User | None = None,
+    update_id: int = 23,
+    data: str | None = None,
+) -> Update:
+    """A press on "🏆 My progress" — or, with ``data``, a hand-crafted callback."""
+    sender = user or make_user()
+    return Update(
+        update_id=update_id,
+        callback_query=CallbackQuery(
+            id="callback-progress",
+            from_user=sender,
+            chat_instance="instance-1",
+            message=make_message(text="anything", user=sender),
+            data=data if data is not None else ProgressCallback().pack(),
         ),
     )
 

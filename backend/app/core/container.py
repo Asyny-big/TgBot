@@ -20,6 +20,7 @@ from app.services.auth import AuthService
 from app.services.bonuses import BonusService
 from app.services.checkout import CheckoutService
 from app.services.delivery import DeliveryService
+from app.services.loyalty import LoyaltyService
 from app.services.products import ProductService
 from app.services.purchases import PurchaseService
 from app.services.referrals import ReferralService
@@ -46,6 +47,7 @@ class Container:
     purchases: PurchaseService
     referrals: ReferralService
     bonuses: BonusService
+    loyalty: LoyaltyService
     stats: StatsService
     auth: AuthService
 
@@ -83,6 +85,7 @@ class Container:
                 settings=settings.referral,
             ),
             bonuses=bonuses,
+            loyalty=LoyaltyService(uow_factory=uow_factory, settings=settings.loyalty),
             stats=StatsService(uow_factory=uow_factory),
             auth=AuthService(
                 settings.security,

@@ -34,6 +34,7 @@ from app.domain.bonuses import BonusPolicy, reward_bonuses
 from app.domain.commands import BonusTransactionDraft
 from app.domain.entities import (
     BonusTransaction,
+    LoyaltyReward,
     Product,
     Purchase,
     PurchaseRecord,
@@ -664,6 +665,35 @@ class FakeBonusRepository:
         return tuple(item for item in held[:limit] if item is not None)
 
 
+class FakeLoyaltyRepository:
+    """Loyalty read model over the fake purchases, counting exactly as the SQL does."""
+
+    def __init__(self, purchases: FakePurchaseRepository) -> None:
+        self.purchases = purchases
+        self.rewards: list[LoyaltyReward] = []
+
+    async def count_completed(self, user_id: int) -> int:
+        return sum(
+            1
+            for purchase in self.purchases.items.values()
+            if purchase.user_id == user_id
+            and (
+                purchase.status is PurchaseStatus.DELIVERED
+                or (
+                    purchase.status is PurchaseStatus.REFUNDED and purchase.delivered_at is not None
+                )
+            )
+        )
+
+    async def rewards_of(self, user_id: int) -> tuple[LoyaltyReward, ...]:
+        return tuple(
+            sorted(
+                (reward for reward in self.rewards if reward.user_id == user_id),
+                key=lambda reward: reward.milestone,
+            )
+        )
+
+
 @dataclass
 class FakeStatsRepository:
     """Returns canned aggregates so the stats service can be tested alone."""
@@ -713,6 +743,7 @@ class FakeUnitOfWork:
         self._referrals = FakeReferralRepository()
         self._bonuses = FakeBonusRepository(self._users)
         self._stats = FakeStatsRepository()
+        self._loyalty = FakeLoyaltyRepository(self._purchases)
         self._products.purchases = self._purchases
         self._referrals.purchases = self._purchases
         self._bonuses.purchases = self._purchases
@@ -743,6 +774,10 @@ class FakeUnitOfWork:
     @property
     def stats(self) -> FakeStatsRepository:
         return self._stats
+
+    @property
+    def loyalty(self) -> FakeLoyaltyRepository:
+        return self._loyalty
 
     async def commit(self) -> None:
         self.commits += 1

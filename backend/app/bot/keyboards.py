@@ -21,6 +21,7 @@ from app.bot.texts import (
     CRYPTO_BUTTON,
     CRYPTO_PAY_BUTTON,
     PREVIEW_BUTTON,
+    PROGRESS_SECTION_BUTTON,
     STARS_BUTTON,
 )
 from app.domain.enums import PaymentProvider
@@ -135,6 +136,33 @@ def bonus_choice_keyboard(
             ],
         ]
     )
+
+
+class ProgressCallback(CallbackData, prefix="progress"):
+    """Opens the "🏆 My progress" section. Carries nothing: the buyer is the sender."""
+
+
+def start_menu_keyboard(*, bonuses: bool, progress: bool) -> InlineKeyboardMarkup | None:
+    """The sections reachable without a product link, one button each.
+
+    Only switched-on sections get a button, so with the loyalty programme off
+    this is exactly the bonus hint the bot has always shown — or nothing.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if bonuses:
+        rows.append(
+            [InlineKeyboardButton(text=BONUS_SECTION_BUTTON, callback_data=BonusCallback().pack())]
+        )
+    if progress:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=PROGRESS_SECTION_BUTTON,
+                    callback_data=ProgressCallback().pack(),
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
 def bonus_hint_keyboard() -> InlineKeyboardMarkup:

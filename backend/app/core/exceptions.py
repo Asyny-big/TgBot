@@ -240,6 +240,13 @@ class BonusesNotAvailableError(ValidationError):
     message = "Bonuses can only be spent on a Telegram Stars purchase"
 
 
+class LoyaltyDisabledError(ConflictError):
+    """The loyalty programme is switched off (``LOYALTY_ENABLED=false``)."""
+
+    code = "loyalty_disabled"
+    message = "The loyalty programme is not available"
+
+
 class DeliveryError(AppError):
     """Base class for delivery transport failures."""
 
