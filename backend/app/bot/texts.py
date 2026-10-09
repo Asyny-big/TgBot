@@ -79,6 +79,9 @@ def product_card(card: ProductCard) -> str:
     if card.is_discounted:
         lines.append("")
         lines.append(f"🎁 Скидка {card.discount_percent}% по приглашению")
+    if card.is_loyalty_discounted:
+        lines.append("")
+        lines.append(f"🏆 Скидка {card.loyalty_percent}% по программе лояльности")
     return "\n".join(lines)
 
 

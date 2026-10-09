@@ -306,6 +306,7 @@ def _container(
     from app.services.auth import AuthService  # noqa: PLC0415
     from app.services.bonuses import BonusService  # noqa: PLC0415
     from app.services.loyalty import LoyaltyService  # noqa: PLC0415
+    from app.services.pricing import PricingService  # noqa: PLC0415
     from app.services.products import ProductService  # noqa: PLC0415
     from app.services.purchases import PurchaseService  # noqa: PLC0415
     from app.services.referrals import ReferralService  # noqa: PLC0415
@@ -325,6 +326,7 @@ def _container(
         locks=locks,
         settings=settings.referral,
     )
+    pricing = PricingService(uow_factory=uow_factory, bonuses=bonuses)
     return Container(
         settings=settings,
         uow_factory=uow_factory,
@@ -332,13 +334,14 @@ def _container(
         rate_limiter=RedisRateLimiter(redis),
         crypto_payments=crypto_client,
         products=ProductService(uow_factory=uow_factory, telegram=settings.telegram),
-        purchases=PurchaseService(uow_factory=uow_factory, locks=locks, pricing=bonuses),
+        purchases=PurchaseService(uow_factory=uow_factory, locks=locks, pricing=pricing),
         referrals=ReferralService(
             uow_factory=uow_factory,
             telegram=settings.telegram,
             settings=settings.referral,
         ),
         bonuses=bonuses,
+        pricing=pricing,
         loyalty=LoyaltyService(uow_factory=uow_factory, settings=settings.loyalty),
         stats=StatsService(uow_factory=uow_factory),
         auth=AuthService(settings.security, FakeRevocationStore()),

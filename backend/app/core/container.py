@@ -21,6 +21,7 @@ from app.services.bonuses import BonusService
 from app.services.checkout import CheckoutService
 from app.services.delivery import DeliveryService
 from app.services.loyalty import LoyaltyService
+from app.services.pricing import PricingService
 from app.services.products import ProductService
 from app.services.purchases import PurchaseService
 from app.services.referrals import ReferralService
@@ -47,6 +48,7 @@ class Container:
     purchases: PurchaseService
     referrals: ReferralService
     bonuses: BonusService
+    pricing: PricingService
     loyalty: LoyaltyService
     stats: StatsService
     auth: AuthService
@@ -58,18 +60,21 @@ class Container:
         uow_factory = SqlAlchemyUnitOfWorkFactory(resources.database)
         locks = RedisLockManager(resources.cache.client, settings.redis)
         # Pricing is built before the purchase service because the purchase
-        # service takes it as a collaborator: the discount and the bonus hold
-        # have to commit in the same transaction as the purchase row.
+        # service takes it as a collaborator: a discount and its hold have to
+        # commit in the same transaction as the purchase row.
         bonuses = BonusService(
             uow_factory=uow_factory,
             locks=locks,
             settings=settings.referral,
         )
+        # The loyalty discount is not wired into pricing yet: until it is,
+        # PricingService delegates to the referral and bonus pricing as is.
+        pricing = PricingService(uow_factory=uow_factory, bonuses=bonuses)
         purchases = PurchaseService(
             uow_factory=uow_factory,
             locks=locks,
             invoice_ttl=timedelta(seconds=settings.cryptobot.invoice_ttl_seconds),
-            pricing=bonuses,
+            pricing=pricing,
         )
         return cls(
             settings=settings,
@@ -85,6 +90,7 @@ class Container:
                 settings=settings.referral,
             ),
             bonuses=bonuses,
+            pricing=pricing,
             loyalty=LoyaltyService(uow_factory=uow_factory, settings=settings.loyalty),
             stats=StatsService(uow_factory=uow_factory),
             auth=AuthService(

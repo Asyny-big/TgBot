@@ -161,7 +161,7 @@ async def _bonus_offer(
     if price is None:  # pragma: no cover — the button only exists with a price
         return None
     try:
-        offer = await shop.bonuses.offer_for(
+        offer = await shop.pricing.offer_for(
             user_id=user_id,
             base_amount=Decimal(price),
             currency=provider.currency,

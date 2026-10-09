@@ -50,6 +50,12 @@ class ProductCard:
     discount_percent: int = 0
     """Referral discount awaiting this visitor, as a percentage. ``0`` for most."""
 
+    loyalty_percent: int = 0
+    """Loyalty discount awaiting this visitor, as a percentage. ``0`` for most.
+
+    Never set together with ``discount_percent``: the referral discount wins.
+    """
+
     @property
     def is_owned(self) -> bool:
         """Whether this buyer already paid for the product."""
@@ -59,3 +65,8 @@ class ProductCard:
     def is_discounted(self) -> bool:
         """Whether a referral discount is being shown on this card."""
         return self.discount_percent > 0 and any(option.is_discounted for option in self.options)
+
+    @property
+    def is_loyalty_discounted(self) -> bool:
+        """Whether a loyalty discount is being shown on this card."""
+        return self.loyalty_percent > 0 and any(option.is_discounted for option in self.options)

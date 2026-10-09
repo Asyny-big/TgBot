@@ -91,8 +91,12 @@ class PriceQuote:
     """What the buyer will actually be charged, and why.
 
     Kept as an explicit breakdown rather than a single number because the
-    purchase row stores all three: what the product cost, what was taken off,
-    and what was billed. A later price change must not rewrite an old sale.
+    purchase row stores all of it: what the product cost, what was taken off and
+    why, and what was billed. A later price change must not rewrite an old sale.
+
+    At most one reduction is ever present — referral discount, loyalty discount
+    or bonuses, in that order of precedence — so the breakdown always explains
+    the charge with a single line.
     """
 
     base_amount: Decimal
@@ -118,6 +122,16 @@ class PriceQuote:
     external rate that could go stale.
     """
 
+    loyalty_amount: Decimal = Decimal(0)
+    """Loyalty discount, in the purchase currency. Never combined with the others."""
+
+    loyalty_reward_id: UUID | None = None
+    """The recorded loyalty reward this discount uses, once it has been locked.
+
+    ``None`` on a prediction (card, preview): a reward that is due but was never
+    used has no row yet, and a prediction records nothing.
+    """
+
     @property
     def bonus_amount(self) -> Decimal:
         """Money value of the bonuses spent, in the purchase currency.
@@ -138,7 +152,7 @@ class PriceQuote:
     @property
     def charged_amount(self) -> Decimal:
         """What the invoice is issued for."""
-        return self.base_amount - self.discount_amount - self.bonus_amount
+        return self.base_amount - self.discount_amount - self.loyalty_amount - self.bonus_amount
 
     @property
     def uses_discount(self) -> bool:
@@ -151,9 +165,14 @@ class PriceQuote:
         return self.bonus_units > 0
 
     @property
+    def uses_loyalty(self) -> bool:
+        """Whether a loyalty discount was applied."""
+        return self.loyalty_amount > 0
+
+    @property
     def is_plain(self) -> bool:
         """Whether this is an ordinary, unmodified sale."""
-        return not self.uses_discount and not self.uses_bonus
+        return not self.uses_discount and not self.uses_loyalty and not self.uses_bonus
 
 
 def plain_quote(base_amount: Decimal, currency: Currency) -> PriceQuote:
@@ -349,7 +368,12 @@ def quote(  # noqa: PLR0913 — pricing genuinely depends on this many inputs
 
 
 class CheckoutPricing(Protocol):
-    """How the purchase service asks the referral feature what to charge.
+    """How the purchase service asks what to charge.
+
+    Implemented by ``BonusService`` (referral discount and bonuses) and by the
+    ``PricingService`` that puts the loyalty programme between the two. Every
+    figure a buyer is shown — card, preview, invoice — comes from the same
+    ``quote`` arithmetic behind these methods.
 
     ``resolve`` and ``hold_for`` take the caller's unit of work: pricing and the
     reservation of bonuses must commit in the *same* transaction as the purchase
@@ -402,11 +426,21 @@ class CheckoutPricing(Protocol):
         """Referral discount this shop gives, as a percentage."""
         ...
 
-    async def discount_eligible(self, uow: UnitOfWork, user_id: int) -> bool:
-        """Whether this buyer's next purchase carries the referral discount.
+    async def card_quote(
+        self,
+        uow: UnitOfWork,
+        *,
+        user_id: int,
+        base_amount: Decimal,
+        currency: Currency,
+        stars_per_usdt: Decimal | None = None,
+    ) -> PriceQuote:
+        """What this visitor would pay on one rail, as the product card shows it.
 
-        Answered from the caller's transaction so the product card can show the
-        reduced price without a second round trip.
+        Bonuses are never part of it — they are offered after a button is
+        pressed. Read only, answered from the card's own transaction, and the
+        same arithmetic as ``preview`` without bonuses: the card cannot promise
+        a price the invoice then disagrees with.
         """
         ...
 

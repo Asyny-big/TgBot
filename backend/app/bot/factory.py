@@ -51,6 +51,7 @@ def create_dispatcher(container: Container, checkout: CheckoutService) -> Dispat
         referrals=container.referrals,
         bonuses=container.bonuses,
         loyalty=container.loyalty,
+        pricing=container.pricing,
     )
 
     dispatcher.update.outer_middleware(LogContextMiddleware())

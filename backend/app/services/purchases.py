@@ -24,11 +24,12 @@ from app.core.exceptions import (
     UserNotFoundError,
 )
 from app.core.logging import get_logger
-from app.domain.bonuses import BonusPolicy, discount_for, plain_quote
+from app.domain.bonuses import plain_quote
 from app.domain.cards import PaymentOption, ProductCard
 from app.domain.commands import PurchaseDraft
 from app.domain.enums import PurchaseStatus
 from app.domain.locks import payment_lock_key, purchase_lock_key
+from app.domain.loyalty import LOYALTY_DISCOUNT_PERCENT
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -55,7 +56,7 @@ class PurchaseService:
     locks: LockManager
     invoice_ttl: timedelta = timedelta(minutes=30)
     pricing: CheckoutPricing | None = None
-    """Optional referral/bonus pricing.
+    """Optional pricing: referral discount, loyalty discount, bonuses.
 
     ``None`` is the shop as it was before the referral feature existed: the
     list price is charged, nothing is held and nothing is recorded. Everything
@@ -78,31 +79,39 @@ class PurchaseService:
             if not product.is_active:
                 raise ProductInactiveError(slug=slug)
             owned = await uow.purchases.find_access_granting(profile.telegram_id, product.id)
-            # Asked in the same transaction the card already opened, so showing
-            # the reduced price costs no extra round trip. Returns False for
-            # every ordinary visitor, and instantly when the feature is off.
-            discounted = owned is None and await self._discount_eligible(
-                uow,
-                profile.telegram_id,
+            # Priced in the same transaction the card already opened, through
+            # the very path a checkout uses — so the card never shows a price
+            # the invoice would then disagree with. An owned product shows no
+            # buttons, so it is not priced at all.
+            quotes = (
+                []
+                if owned is not None
+                else [
+                    await self._card_quote(uow, profile.telegram_id, product, provider)
+                    for provider in product.available_providers
+                ]
             )
 
-        percent = self.discount_percent if discounted else 0
         options = tuple(
-            self._payment_option(product, provider, discount_percent=percent)
-            for provider in product.available_providers
+            self._payment_option(product, provider, quotes[index] if quotes else None)
+            for index, provider in enumerate(product.available_providers)
         )
+        referral = any(priced.uses_discount for priced in quotes)
+        loyalty = any(priced.uses_loyalty for priced in quotes)
         logger.info(
             "card_opened",
             telegram_id=profile.telegram_id,
             slug=slug,
             owned=owned is not None,
-            discounted=discounted,
+            discounted=referral,
+            loyalty=loyalty,
         )
         return ProductCard(
             product=product,
             options=options,
             owned_purchase=owned,
-            discount_percent=percent,
+            discount_percent=self.discount_percent if referral else 0,
+            loyalty_percent=LOYALTY_DISCOUNT_PERCENT if loyalty else 0,
         )
 
     @property
@@ -110,38 +119,47 @@ class PurchaseService:
         """Referral discount the shop is configured to give, as a percentage."""
         return 0 if self.pricing is None else self.pricing.discount_percent
 
-    async def _discount_eligible(self, uow: UnitOfWork, user_id: int) -> bool:
-        """Whether this visitor's next purchase carries the referral discount."""
+    async def _card_quote(
+        self,
+        uow: UnitOfWork,
+        user_id: int,
+        product: Product,
+        provider: PaymentProvider,
+    ) -> PriceQuote:
+        """This visitor's price on one rail, as the card shows it."""
+        base_amount = Decimal(self._price(product, provider))
         if self.pricing is None:
-            return False
-        return await self.pricing.discount_eligible(uow, user_id)
+            return plain_quote(base_amount, provider.currency)
+        return await self.pricing.card_quote(
+            uow,
+            user_id=user_id,
+            base_amount=base_amount,
+            currency=provider.currency,
+            stars_per_usdt=product.stars_per_usdt,
+        )
 
     def _payment_option(
         self,
         product: Product,
         provider: PaymentProvider,
-        *,
-        discount_percent: int,
+        priced: PriceQuote | None,
     ) -> PaymentOption:
         """One button, with the reduced price attached when one applies.
 
-        ``amount`` stays the list price whatever happens: the discount is a
+        ``amount`` stays the list price whatever happens: a reduction is a
         property of this visitor's next sale, not of the catalogue.
         """
         listed = self._price(product, provider)
-        if discount_percent <= 0:
-            return PaymentOption(
-                provider=provider,
-                amount=listed,
-                currency=provider.currency,
-            )
-        policy = BonusPolicy(discount_percent=discount_percent)
-        discount = discount_for(Decimal(listed), provider.currency, policy)
+        reduced = (
+            priced.charged_amount
+            if priced is not None and priced.charged_amount < Decimal(listed)
+            else None
+        )
         return PaymentOption(
             provider=provider,
             amount=listed,
             currency=provider.currency,
-            discounted_amount=Decimal(listed) - discount if discount > 0 else None,
+            discounted_amount=reduced,
         )
 
     async def remember_user(self, profile: UserDraft) -> User:
@@ -267,6 +285,7 @@ class PurchaseService:
                     base_amount=priced.base_amount,
                     discount_amount=priced.discount_amount,
                     bonus_amount=priced.bonus_amount,
+                    loyalty_amount=priced.loyalty_amount,
                     currency=provider.currency,
                     external_id=external_id,
                 )

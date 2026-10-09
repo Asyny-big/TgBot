@@ -209,6 +209,33 @@ class BonusService:
         referral = await uow.referrals.get_by_referred(user_id)
         return await self._discount_eligible(uow, user_id, referral=referral)
 
+    async def card_quote(
+        self,
+        uow: UnitOfWork,
+        *,
+        user_id: int,
+        base_amount: Decimal,
+        currency: Currency,
+        stars_per_usdt: Decimal | None = None,
+    ) -> PriceQuote:
+        """The card's price on one rail: the referral discount when it is due.
+
+        Bonuses never appear on a card — they are offered once a button is
+        pressed — so ``stars_per_usdt`` changes nothing here. The figure comes
+        from ``quote``, exactly as ``preview`` without bonuses does.
+        """
+        del stars_per_usdt
+        if not self.settings.enabled:
+            return plain_quote(base_amount, currency)
+        referral = await uow.referrals.get_by_referred(user_id)
+        return quote(
+            base_amount,
+            currency,
+            policy=self.policy,
+            referral_id=referral.id if referral is not None else None,
+            discount_eligible=await self._discount_eligible(uow, user_id, referral=referral),
+        )
+
     async def hold_for(self, uow: UnitOfWork, purchase: Purchase, priced: PriceQuote) -> None:
         """Record the reservation behind a purchase that was just created.
 

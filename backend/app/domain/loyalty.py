@@ -18,15 +18,20 @@ the recorded rewards mean, with no database in sight.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
+from app.domain.bonuses import PriceQuote, floor_to_step
 from app.domain.enums import LoyaltyRewardKind, LoyaltyRewardStatus
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from uuid import UUID
 
-    from app.domain.entities import LoyaltyReward
+    from app.domain.entities import LoyaltyReward, Purchase
+    from app.domain.enums import Currency
+    from app.domain.uow import UnitOfWork
 
 DISCOUNT_MILESTONE: Final = 5
 """Completed purchases that earn one 50% discount on a later paid pack."""
@@ -42,6 +47,44 @@ REWARD_MILESTONES: Final[dict[int, LoyaltyRewardKind]] = {
     FREE_PACK_MILESTONE: LoyaltyRewardKind.FREE_PACK,
 }
 """The milestones that grant a one-time reward, and what each grants."""
+
+LOYALTY_DISCOUNT_PERCENT: Final = 50
+"""Share of a list price the milestone-5 reward takes off one paid pack."""
+
+_PERCENT: Final = Decimal(100)
+
+
+def loyalty_discount_for(base_amount: Decimal, currency: Currency) -> Decimal:
+    """Half of the list price, rounded down to something the rail can charge.
+
+    Whole Stars on Telegram Stars, cents on USDT — the same flooring as every
+    other reduction, so the discount never promises a fraction the invoice
+    cannot carry. A price too small to halve (1 Star, 0.01 USDT) yields 0.
+    """
+    raw = base_amount * Decimal(LOYALTY_DISCOUNT_PERCENT) / _PERCENT
+    return floor_to_step(raw, currency)
+
+
+def loyalty_quote(
+    base_amount: Decimal,
+    currency: Currency,
+    *,
+    reward_id: UUID | None = None,
+) -> PriceQuote | None:
+    """The price with the loyalty discount, or ``None`` when it would be zero.
+
+    ``None`` means "do not use the reward here": a discount of nothing must not
+    spend the buyer's one 50% reward.
+    """
+    discount = loyalty_discount_for(base_amount, currency)
+    if discount <= 0:
+        return None
+    return PriceQuote(
+        base_amount=base_amount,
+        currency=currency,
+        loyalty_amount=discount,
+        loyalty_reward_id=reward_id,
+    )
 
 
 class MilestoneRewardState(StrEnum):
@@ -141,13 +184,55 @@ def progress_of(completed_count: int, rewards: Iterable[LoyaltyReward]) -> Loyal
     )
 
 
+class LoyaltyPricing(Protocol):
+    """How pricing reaches the loyalty programme's 50% discount.
+
+    The read-only methods answer for a card or a preview; the others run inside
+    the caller's transaction, next to the purchase they concern, so the reward
+    and the sale can never disagree.
+    """
+
+    @property
+    def enabled(self) -> bool:
+        """Whether the programme may price anything right now."""
+        ...
+
+    async def discount_available(self, uow: UnitOfWork, user_id: int) -> bool:
+        """Whether the 50% reward is due and unused. Read only; records nothing."""
+        ...
+
+    async def lock_discount(self, uow: UnitOfWork, user_id: int) -> UUID | None:
+        """For a checkout: record the reward if it is due, lock it, return its id.
+
+        ``None`` when there is nothing to use (not reached, already in use or
+        already used). The lock is held until the caller's transaction ends.
+        """
+        ...
+
+    async def apply_discount(self, uow: UnitOfWork, purchase: Purchase, priced: PriceQuote) -> None:
+        """Mark the locked reward as priced into ``purchase`` (same transaction)."""
+        ...
+
+    async def consume_discount(self, uow: UnitOfWork, purchase: Purchase) -> None:
+        """The purchase was paid: its reward is spent for good. Idempotent."""
+        ...
+
+    async def release_discount(self, uow: UnitOfWork, purchase: Purchase) -> None:
+        """The purchase expired unpaid: its reward is available again. Idempotent."""
+        ...
+
+
 __all__ = [
     "DISCOUNT_MILESTONE",
     "FREE_PACK_MILESTONE",
+    "LOYALTY_DISCOUNT_PERCENT",
     "REWARD_MILESTONES",
     "VIP_MILESTONE",
+    "LoyaltyPricing",
     "LoyaltyProgress",
     "MilestoneRewardState",
+    "loyalty_discount_for",
+    "loyalty_quote",
     "progress_of",
     "reward_state",
 ]
