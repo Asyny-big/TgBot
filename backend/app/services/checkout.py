@@ -13,6 +13,12 @@ Settlement is orchestration too, in the mandated order and nothing more:
 
     PurchaseService.confirm_payment() → DeliveryService.deliver_purchase()
     (which itself confirms via PurchaseService.mark_delivered())
+
+The loyalty free pack is the one hand-over without an invoice. It is reached
+only from its own button, creates no invoice and asks no provider anything:
+
+    PurchaseService (internal purchase + reward, one commit)
+        → DeliveryService.deliver_purchase()
 """
 
 from __future__ import annotations
@@ -41,6 +47,7 @@ if TYPE_CHECKING:
 
     from app.domain.delivery import DeliveryResult
     from app.domain.entities import Product, Purchase
+    from app.domain.loyalty import FreePackGrant
     from app.domain.payments import CryptoInvoiceGateway, StarsInvoiceSender
     from app.services.delivery import DeliveryService
     from app.services.purchases import CheckoutSession, PurchaseService
@@ -56,6 +63,16 @@ class CryptoCheckout:
     pay_url: str
     resumed: bool = False
     """The buyer's existing invoice, handed back instead of a new one."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FreePackClaim:
+    """A free pack handed over, and how its delivery went."""
+
+    purchase: Purchase
+    delivery: DeliveryResult
+    repeated: bool = False
+    """The pack this buyer had already claimed, delivered again."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +153,38 @@ class CheckoutService:
             product_id=str(product.id),
         )
         return purchase
+
+    async def claim_free_pack(self, *, user_id: int, product: Product) -> FreePackClaim:
+        """Hand ``product`` over as the buyer's loyalty free pack, then deliver it.
+
+        The pack is granted under the same purchase lock a checkout of this
+        product takes, so a claim and a payment button pressed together cannot
+        both go through. Delivery runs after the commit, exactly as it does
+        after a payment: a delivery that fails leaves the pack paid and owned,
+        and pressing again (or the deep link, or the admin's verify) hands it
+        over without granting a second one.
+
+        Raises:
+            LockBusyError: a checkout or claim of this product is running.
+            LoyaltyDisabledError, FreePackNotAvailableError,
+            FreePackAlreadyUsedError, FreePackPendingCheckoutError,
+            DuplicatePurchaseError, ProductInactiveError: see
+                ``PurchaseService._grant_free_pack``.
+        """
+        async with self.purchases.checkout_session(user_id, product.id) as session:
+            grant = await session.grant_free_pack()
+        delivery = await self._hand_over(grant)
+        return FreePackClaim(
+            purchase=grant.purchase,
+            delivery=delivery,
+            repeated=grant.repeated,
+        )
+
+    async def _hand_over(self, grant: FreePackGrant) -> DeliveryResult:
+        """Deliver a fresh pack; send the link again for one already delivered."""
+        if grant.purchase.status is PurchaseStatus.DELIVERED:
+            return await self.delivery.redeliver(grant.purchase.id)
+        return await self.delivery.deliver_purchase(grant.purchase.id)
 
     @staticmethod
     async def _supersede_unpaid_loyalty_invoices(session: CheckoutSession) -> None:

@@ -56,6 +56,14 @@ class ProductCard:
     Never set together with ``discount_percent``: the referral discount wins.
     """
 
+    free_pack_available: bool = False
+    """Whether this visitor may take this pack as their loyalty free pack.
+
+    ``False`` for everyone while the programme is off, and for a product the
+    visitor already owns. The payment buttons stay either way: taking the pack
+    for free is an offer, never the only way forward.
+    """
+
     @property
     def is_owned(self) -> bool:
         """Whether this buyer already paid for the product."""

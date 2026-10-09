@@ -17,6 +17,10 @@ from typing import TYPE_CHECKING
 from app.core.exceptions import (
     ConflictError,
     DuplicatePurchaseError,
+    FreePackAlreadyUsedError,
+    FreePackNotAvailableError,
+    FreePackPendingCheckoutError,
+    LoyaltyDisabledError,
     ProductInactiveError,
     ProductNotFoundError,
     ProviderNotSupportedError,
@@ -27,9 +31,19 @@ from app.core.logging import get_logger
 from app.domain.bonuses import plain_quote
 from app.domain.cards import PaymentOption, ProductCard
 from app.domain.commands import PurchaseDraft
-from app.domain.enums import PurchaseStatus
+from app.domain.enums import (
+    PAYABLE_PROVIDERS,
+    LoyaltyRewardStatus,
+    PaymentProvider,
+    PurchaseStatus,
+)
 from app.domain.locks import payment_lock_key, purchase_lock_key
-from app.domain.loyalty import LOYALTY_DISCOUNT_PERCENT
+from app.domain.loyalty import (
+    LOYALTY_DISCOUNT_PERCENT,
+    FreePackGrant,
+    free_pack_external_id,
+    free_pack_value,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -37,9 +51,10 @@ if TYPE_CHECKING:
 
     from app.domain.bonuses import CheckoutPricing, PriceQuote
     from app.domain.commands import UserDraft
-    from app.domain.entities import Product, Purchase, User
-    from app.domain.enums import Currency, PaymentProvider
+    from app.domain.entities import LoyaltyReward, Product, Purchase, User
+    from app.domain.enums import Currency
     from app.domain.locks import LockManager
+    from app.domain.loyalty import FreePackRewards
     from app.domain.uow import UnitOfWork, UnitOfWorkFactory
 
 logger = get_logger(__name__)
@@ -62,6 +77,10 @@ class PurchaseService:
     list price is charged, nothing is held and nothing is recorded. Everything
     below therefore has exactly one extra branch, and the default path through
     it is byte for byte the old behaviour.
+    """
+    loyalty: FreePackRewards | None = None
+    """Optional loyalty free pack. With ``None`` — or the programme switched
+    off — no card offers it and nothing can claim it.
     """
 
     async def open_card(self, profile: UserDraft, slug: str) -> ProductCard:
@@ -91,6 +110,7 @@ class PurchaseService:
                     for provider in product.available_providers
                 ]
             )
+            free_pack = owned is None and await self._free_pack_offered(uow, profile.telegram_id)
 
         options = tuple(
             self._payment_option(product, provider, quotes[index] if quotes else None)
@@ -105,6 +125,7 @@ class PurchaseService:
             owned=owned is not None,
             discounted=referral,
             loyalty=loyalty,
+            free_pack=free_pack,
         )
         return ProductCard(
             product=product,
@@ -112,7 +133,14 @@ class PurchaseService:
             owned_purchase=owned,
             discount_percent=self.discount_percent if referral else 0,
             loyalty_percent=LOYALTY_DISCOUNT_PERCENT if loyalty else 0,
+            free_pack_available=free_pack,
         )
+
+    async def _free_pack_offered(self, uow: UnitOfWork, user_id: int) -> bool:
+        """Whether the card offers this visitor the pack as their free pack."""
+        if self.loyalty is None or not self.loyalty.enabled:
+            return False
+        return await self.loyalty.free_pack_available(uow, user_id)
 
     @property
     def discount_percent(self) -> int:
@@ -305,6 +333,99 @@ class PurchaseService:
             bonus=str(purchase.bonus_amount),
         )
         return purchase
+
+    async def _grant_free_pack(self, *, user_id: int, product_id: UUID) -> FreePackGrant:
+        """Hand this product over as the buyer's free pack. The caller holds the lock.
+
+        One transaction: the reward is locked, the ``internal`` purchase is
+        inserted already paid — amount 0, the whole list price waived — and the
+        reward is consumed by it. Either both happen or neither does.
+
+        Pressing again for the pack already handed over returns that same
+        purchase, so a delivery that failed can simply be retried.
+
+        Raises:
+            LoyaltyDisabledError: the programme is off.
+            FreePackNotAvailableError: fewer than 10 completed purchases.
+            FreePackAlreadyUsedError: the free pack went to another product.
+            ProductNotFoundError, ProductInactiveError: product unavailable.
+            DuplicatePurchaseError: the buyer already owns the product.
+            FreePackPendingCheckoutError: an unpaid invoice for it exists.
+            UserNotFoundError: the buyer was never recorded.
+        """
+        rewards = self.loyalty
+        if rewards is None or not rewards.enabled:
+            raise LoyaltyDisabledError(user_id=user_id)
+        async with self.uow_factory() as uow:
+            if await uow.users.get(user_id) is None:
+                raise UserNotFoundError(telegram_id=user_id)
+            product = await uow.products.get(product_id)
+            if product is None:
+                raise ProductNotFoundError(product_id=str(product_id))
+
+            reward = await rewards.lock_free_pack(uow, user_id)
+            if reward is None:
+                raise FreePackNotAvailableError(user_id=user_id)
+            if reward.status is LoyaltyRewardStatus.CONSUMED:
+                return await self._free_pack_handed_over(uow, reward, product_id)
+
+            if not product.is_active:
+                raise ProductInactiveError(product_id=str(product_id))
+            if await uow.purchases.find_access_granting(user_id, product_id) is not None:
+                raise DuplicatePurchaseError(product_id=str(product_id), user_id=user_id)
+            for provider in PAYABLE_PROVIDERS:
+                if await uow.purchases.pending_checkouts(user_id, product_id, provider):
+                    raise FreePackPendingCheckoutError(
+                        product_id=str(product_id),
+                        provider=provider.value,
+                    )
+
+            value, currency = free_pack_value(product)
+            purchase = await uow.purchases.create(
+                PurchaseDraft(
+                    user_id=user_id,
+                    product_id=product_id,
+                    provider=PaymentProvider.INTERNAL,
+                    status=PurchaseStatus.PAID,
+                    amount=Decimal(0),
+                    base_amount=value,
+                    loyalty_amount=value,
+                    currency=currency,
+                    external_id=free_pack_external_id(reward.id),
+                )
+            )
+            await rewards.consume_free_pack(uow, reward, purchase)
+
+        logger.info(
+            "free_pack_granted",
+            purchase_id=str(purchase.id),
+            user_id=user_id,
+            product_id=str(product_id),
+            reward_id=str(reward.id),
+            value=str(value),
+            currency=currency.value,
+        )
+        return FreePackGrant(purchase=purchase)
+
+    @staticmethod
+    async def _free_pack_handed_over(
+        uow: UnitOfWork,
+        reward: LoyaltyReward,
+        product_id: UUID,
+    ) -> FreePackGrant:
+        """A press for a free pack already claimed: that pack again, or a refusal."""
+        handed = (
+            await uow.purchases.get(reward.consumed_purchase_id)
+            if reward.consumed_purchase_id is not None
+            else None
+        )
+        if handed is None or handed.product_id != product_id or not handed.grants_access:
+            raise FreePackAlreadyUsedError(
+                reward_id=str(reward.id),
+                consumed_purchase_id=str(reward.consumed_purchase_id),
+            )
+        logger.info("free_pack_already_granted", purchase_id=str(handed.id))
+        return FreePackGrant(purchase=handed, repeated=True)
 
     async def _price_checkout(  # noqa: PLR0913 — one checkout, this many pricing facts
         self,
@@ -654,6 +775,14 @@ class CheckoutSession:
             external_id=external_id,
             use_bonus=use_bonus,
             expected_amount=expected_amount,
+        )
+
+    async def grant_free_pack(self) -> FreePackGrant:
+        """Hand this product over as the buyer's free pack. See ``_grant_free_pack``."""
+        self._require_open()
+        return await self._service._grant_free_pack(
+            user_id=self.user_id,
+            product_id=self.product_id,
         )
 
     def _require_open(self) -> None:

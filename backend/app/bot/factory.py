@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from aiogram import Dispatcher
 
-from app.bot.handlers import bonuses, payments, progress, start
+from app.bot.handlers import bonuses, free_pack, payments, progress, start
 from app.bot.middlewares import (
     BotServices,
     LogContextMiddleware,
@@ -67,6 +67,7 @@ def create_dispatcher(container: Container, checkout: CheckoutService) -> Dispat
     # matched by its own handler rather than by the deep-link filter.
     dispatcher.include_router(bonuses.build_router())
     dispatcher.include_router(progress.build_router())
+    dispatcher.include_router(free_pack.build_router())
     dispatcher.include_router(start.build_router())
     dispatcher.include_router(payments.build_router())
     return dispatcher

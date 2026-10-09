@@ -247,6 +247,30 @@ class LoyaltyDisabledError(ConflictError):
     message = "The loyalty programme is not available"
 
 
+class FreePackNotAvailableError(ConflictError):
+    """The buyer has not completed enough purchases for the free pack yet."""
+
+    code = "free_pack_not_available"
+    message = "The free pack is not available yet"
+
+
+class FreePackAlreadyUsedError(ConflictError):
+    """The one free pack was already handed over — for another product."""
+
+    code = "free_pack_already_used"
+    message = "The free pack was already claimed"
+
+
+class FreePackPendingCheckoutError(ConflictError):
+    """The buyer holds an unpaid invoice for this product, so it is not given away.
+
+    Paying that invoice would then sell a pack the buyer already received.
+    """
+
+    code = "free_pack_pending_checkout"
+    message = "An unpaid invoice for this product exists"
+
+
 class DeliveryError(AppError):
     """Base class for delivery transport failures."""
 

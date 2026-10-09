@@ -9,19 +9,22 @@ backfill.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
 
-from app.bot.texts import loyalty_progress
-from app.domain.entities import LoyaltyReward
-from app.domain.enums import LoyaltyRewardKind, LoyaltyRewardStatus
+from app.bot.texts import FREE_PACK_PROGRESS_HINT, loyalty_progress
+from app.domain.entities import LoyaltyReward, Product
+from app.domain.enums import Currency, LoyaltyRewardKind, LoyaltyRewardStatus
 from app.domain.loyalty import (
     DISCOUNT_MILESTONE,
     FREE_PACK_MILESTONE,
     REWARD_MILESTONES,
     VIP_MILESTONE,
     MilestoneRewardState,
+    free_pack_external_id,
+    free_pack_value,
     progress_of,
     reward_state,
 )
@@ -169,6 +172,7 @@ def test_the_screen_for_thirteen_purchases() -> None:
         "Покупок: 13",
         "🎉 Скидка 50% доступна",
         "🎁 Бесплатный пак доступен",
+        FREE_PACK_PROGRESS_HINT,
         "До VIP: 2 покупки",
     ]
 
@@ -179,6 +183,7 @@ def test_the_screen_for_eighteen_purchases() -> None:
         "Покупок: 18",
         "🎉 Скидка 50% доступна",
         "🎁 Бесплатный пак доступен",
+        FREE_PACK_PROGRESS_HINT,
         "👑 VIP",
     ]
 
@@ -193,12 +198,28 @@ def test_the_screen_for_a_new_buyer() -> None:
     ]
 
 
-def test_the_screen_never_offers_to_claim_anything() -> None:
-    """Using a reward is not implemented yet, so nothing here may promise it."""
-    for completed in (0, 5, 10, 15, 18):
-        text = loyalty_progress(progress_of(completed, ())).lower()
-        assert "забрать" not in text
-        assert "получить" not in text
+@pytest.mark.parametrize(
+    ("completed", "free_pack", "hinted"),
+    [
+        (0, None, False),
+        (5, None, False),
+        (9, None, False),
+        (10, None, True),
+        (18, None, True),
+        (12, LoyaltyRewardStatus.AVAILABLE, True),
+        (12, LoyaltyRewardStatus.CONSUMED, False),
+    ],
+)
+def test_the_screen_points_to_the_free_pack_only_while_it_waits(
+    completed: int,
+    free_pack: LoyaltyRewardStatus | None,
+    hinted: bool,
+) -> None:
+    """The screen itself has no button: it says where the pack is claimed."""
+    rewards = () if free_pack is None else (_reward(FREE_PACK_MILESTONE, free_pack),)
+    text = loyalty_progress(progress_of(completed, rewards))
+    assert (FREE_PACK_PROGRESS_HINT in text) is hinted
+    assert ("забрать" in text.lower()) is hinted
 
 
 def test_the_screen_for_rewards_in_use_and_used() -> None:
@@ -226,3 +247,52 @@ def test_the_screen_for_rewards_in_use_and_used() -> None:
 def test_purchases_are_counted_in_proper_russian(missing: int, phrase: str) -> None:
     completed = VIP_MILESTONE - missing
     assert f"До VIP: {phrase}" in _screen(completed)
+
+
+# --------------------------------------------------------------------------- #
+# The free pack on paper                                                      #
+# --------------------------------------------------------------------------- #
+
+
+def _product(*, stars: int | None, usdt: str | None) -> Product:
+    now = datetime.now(UTC)
+    return Product(
+        id=uuid4(),
+        slug="pack",
+        title="Pack",
+        description="",
+        photo_file_id=None,
+        delivery_url="https://t.me/+pack",
+        price_stars=stars,
+        price_usdt=Decimal(usdt) if usdt is not None else None,
+        is_active=True,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+@pytest.mark.parametrize(
+    ("stars", "usdt", "expected"),
+    [
+        (1000, "10.00", (Decimal(1000), Currency.XTR)),
+        (1000, None, (Decimal(1000), Currency.XTR)),
+        (None, "7.50", (Decimal("7.50"), Currency.USDT)),
+    ],
+)
+def test_a_free_pack_is_valued_in_stars_first(
+    stars: int | None,
+    usdt: str | None,
+    expected: tuple[Decimal, Currency],
+) -> None:
+    assert free_pack_value(_product(stars=stars, usdt=usdt)) == expected
+
+
+def test_a_product_without_a_price_cannot_be_valued() -> None:
+    with pytest.raises(ValueError, match="no price"):
+        free_pack_value(_product(stars=None, usdt=None))
+
+
+def test_one_reward_names_one_free_pack() -> None:
+    reward_id = uuid4()
+    assert free_pack_external_id(reward_id) == f"loyalty:{reward_id}"
+    assert free_pack_external_id(reward_id) != free_pack_external_id(uuid4())

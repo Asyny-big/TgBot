@@ -77,6 +77,7 @@ class Container:
             locks=locks,
             invoice_ttl=timedelta(seconds=settings.cryptobot.invoice_ttl_seconds),
             pricing=pricing,
+            loyalty=loyalty,
         )
         return cls(
             settings=settings,

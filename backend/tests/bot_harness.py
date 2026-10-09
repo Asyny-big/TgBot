@@ -34,7 +34,12 @@ from aiogram.types import (
     User,
 )
 
-from app.bot.keyboards import BonusCallback, BonusChoiceCallback, ProgressCallback
+from app.bot.keyboards import (
+    BonusCallback,
+    BonusChoiceCallback,
+    FreePackCallback,
+    ProgressCallback,
+)
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -201,6 +206,26 @@ def progress_button_update(
             chat_instance="instance-1",
             message=make_message(text="anything", user=sender),
             data=data if data is not None else ProgressCallback().pack(),
+        ),
+    )
+
+
+def free_pack_button_update(
+    *,
+    product_id: UUID,
+    user: User | None = None,
+    update_id: int = 24,
+) -> Update:
+    """A press on "🎁 Take it for free" on a product card."""
+    sender = user or make_user()
+    return Update(
+        update_id=update_id,
+        callback_query=CallbackQuery(
+            id="callback-free-pack",
+            from_user=sender,
+            chat_instance="instance-1",
+            message=make_message(text="card", user=sender),
+            data=FreePackCallback(product_id=product_id).pack(),
         ),
     )
 

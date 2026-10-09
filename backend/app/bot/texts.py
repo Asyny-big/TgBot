@@ -82,6 +82,9 @@ def product_card(card: ProductCard) -> str:
     if card.is_loyalty_discounted:
         lines.append("")
         lines.append(f"🏆 Скидка {card.loyalty_percent}% по программе лояльности")
+    if card.free_pack_available:
+        lines.append("")
+        lines.append(FREE_PACK_CARD_LINE)
     return "\n".join(lines)
 
 
@@ -245,6 +248,24 @@ PROGRESS_SECTION_BUTTON: Final = "🏆 Мой прогресс"
 PROGRESS_UNAVAILABLE: Final = "Не удалось открыть прогресс. Попробуйте ещё раз через минуту."
 SECTION_UNAVAILABLE: Final = "Этот раздел сейчас недоступен."
 
+FREE_PACK_BUTTON: Final = "🎁 Забрать бесплатно"
+FREE_PACK_CARD_LINE: Final = "🎁 Этот пак можно забрать бесплатно по программе лояльности"
+FREE_PACK_PROGRESS_HINT: Final = "Откройте ссылку на любой пак и нажмите «🎁 Забрать бесплатно»."
+FREE_PACK_GRANTED: Final = "🎁 Бесплатный пак ваш!"
+FREE_PACK_RESENT: Final = "Этот пак вы уже забрали. Отправляю ссылку ещё раз."
+FREE_PACK_NOT_AVAILABLE: Final = "Бесплатный пак пока недоступен."
+FREE_PACK_ALREADY_USED: Final = "Бесплатный пак уже получен."
+FREE_PACK_PENDING_INVOICE: Final = (
+    "У вас есть неоплаченный счёт на этот пак. "
+    "Оплатите его или дождитесь, пока он истечёт, — тогда пак можно забрать бесплатно."
+)
+FREE_PACK_IN_PROGRESS: Final = "Уже обрабатывается. Подождите пару секунд."
+FREE_PACK_FAILED: Final = "Не удалось выдать бесплатный пак. Попробуйте ещё раз через минуту."
+FREE_PACK_DELIVERY_FAILED: Final = (
+    "Пак ваш, но отправить ссылку не удалось. "
+    "Нажмите «🎁 Забрать бесплатно» ещё раз или откройте ссылку на товар — бот выдаст доступ."
+)
+
 _PLURAL_FEW_MIN: Final = 2
 _PLURAL_FEW_MAX: Final = 4
 _TEENS: Final = range(11, 15)
@@ -264,8 +285,9 @@ def _purchases(count: int) -> str:
 def loyalty_progress(progress: LoyaltyProgress) -> str:
     """The "🏆 My progress" screen.
 
-    Says what the buyer has and what is missing — and nothing more. There is no
-    button to *use* a reward here: using one is a separate step.
+    Says what the buyer has and what is missing. There is no button to *use* a
+    reward here — the 50% discount applies by itself at checkout, and an
+    available free pack is claimed from a product card, which the hint says.
     """
     lines = ["🏆 <b>Мой прогресс</b>", "", f"Покупок: {progress.completed_count}", ""]
 
@@ -282,6 +304,7 @@ def loyalty_progress(progress: LoyaltyProgress) -> str:
     match progress.free_pack:
         case MilestoneRewardState.AVAILABLE:
             lines.append("🎁 Бесплатный пак доступен")
+            lines.append(FREE_PACK_PROGRESS_HINT)
         case MilestoneRewardState.USED:
             lines.append("✅ Бесплатный пак получен")
         case MilestoneRewardState.LOCKED | MilestoneRewardState.IN_USE:

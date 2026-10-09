@@ -45,6 +45,16 @@ from app.bot.texts import (
     CRYPTO_INVOICE_CREATED,
     CRYPTO_INVOICE_RESUMED,
     DELIVERY_FAILED,
+    FREE_PACK_ALREADY_USED,
+    FREE_PACK_BUTTON,
+    FREE_PACK_CARD_LINE,
+    FREE_PACK_DELIVERY_FAILED,
+    FREE_PACK_FAILED,
+    FREE_PACK_GRANTED,
+    FREE_PACK_NOT_AVAILABLE,
+    FREE_PACK_PENDING_INVOICE,
+    FREE_PACK_PROGRESS_HINT,
+    FREE_PACK_RESENT,
     NO_DEEP_LINK,
     PAYMENT_IN_PROGRESS,
     PAYMENT_UNAVAILABLE,
@@ -54,6 +64,7 @@ from app.bot.texts import (
     PROGRESS_UNAVAILABLE,
     REFUND_NOTICE,
     SECTION_UNAVAILABLE,
+    STARS_BUTTON,
     bonus_section,
     referral_welcome,
 )
@@ -95,6 +106,7 @@ from tests.bot_harness import (
     bonus_button_update,
     bonus_choice_update,
     bonus_command_update,
+    free_pack_button_update,
     make_user,
     pay_button_update,
     pre_checkout_update,
@@ -342,7 +354,12 @@ def _container(
         rate_limiter=RedisRateLimiter(redis),
         crypto_payments=crypto_client,
         products=ProductService(uow_factory=uow_factory, telegram=settings.telegram),
-        purchases=PurchaseService(uow_factory=uow_factory, locks=locks, pricing=pricing),
+        purchases=PurchaseService(
+            uow_factory=uow_factory,
+            locks=locks,
+            pricing=pricing,
+            loyalty=loyalty,
+        ),
         referrals=ReferralService(
             uow_factory=uow_factory,
             telegram=settings.telegram,
@@ -2181,3 +2198,282 @@ async def test_an_expired_plain_stars_invoice_still_passes_pre_checkout(
     )
 
     assert loyalty_harness.bot.methods(AnswerPreCheckoutQuery)[-1].ok is True
+
+
+# --------------------------------------------------------------------------- #
+# Loyalty: the free pack through the bot
+# --------------------------------------------------------------------------- #
+async def _internal_purchase_count(harness: BotHarness, user_id: int) -> int:
+    async with harness.container.uow_factory() as uow:
+        count = await uow.session.scalar(
+            sql_text(
+                "SELECT count(*) FROM purchases WHERE user_id = :user AND provider = 'internal'"
+            ),
+            {"user": user_id},
+        )
+    return int(count or 0)
+
+
+async def test_the_card_offers_the_free_pack_above_the_payment_buttons(
+    loyalty_harness: BotHarness,
+) -> None:
+    user = make_user(telegram_id=5401, username="tenpacks")
+    await _seed_received_packs(loyalty_harness, user.id, 10)
+    product = await _product(loyalty_harness)
+
+    await loyalty_harness.feed(start_update(product.slug, user=user, update_id=401))
+
+    card = loyalty_harness.bot.methods(SendMessage)[-1]
+    assert FREE_PACK_CARD_LINE in card.text
+    labels = _labels(card)
+    assert labels[0] == FREE_PACK_BUTTON
+    assert STARS_BUTTON in labels[1:]
+    assert len(labels) == 3  # free pack, Stars, CryptoBot
+
+
+async def test_pressing_take_it_for_free_delivers_the_pack(loyalty_harness: BotHarness) -> None:
+    user = make_user(telegram_id=5402, username="claimer")
+    await _seed_received_packs(loyalty_harness, user.id, 10)
+    product = await _product(loyalty_harness)
+    await loyalty_harness.feed(start_update(product.slug, user=user, update_id=411))
+
+    await loyalty_harness.feed(
+        free_pack_button_update(product_id=product.id, user=user, update_id=412)
+    )
+
+    assert loyalty_harness.bot.methods(AnswerCallbackQuery)[-1].text == FREE_PACK_GRANTED
+    assert len([text for text in loyalty_harness.bot.texts() if DELIVERY_URL in text]) == 1
+    assert loyalty_harness.bot.methods(SendInvoice) == []
+    assert await _internal_purchase_count(loyalty_harness, user.id) == 1
+
+    # Pressing the old button again sends the link again — no second pack.
+    await loyalty_harness.feed(
+        free_pack_button_update(product_id=product.id, user=user, update_id=413)
+    )
+    assert loyalty_harness.bot.methods(AnswerCallbackQuery)[-1].text == FREE_PACK_RESENT
+    assert len([text for text in loyalty_harness.bot.texts() if DELIVERY_URL in text]) == 2
+    assert await _internal_purchase_count(loyalty_harness, user.id) == 1
+
+    await loyalty_harness.feed(progress_command_update(user=user, update_id=414))
+    progress = loyalty_harness.bot.last_text()
+    assert "Покупок: 11" in progress
+    assert "✅ Бесплатный пак получен" in progress
+    assert FREE_PACK_PROGRESS_HINT not in progress
+
+
+async def test_the_progress_screen_says_where_to_claim_the_pack(
+    loyalty_harness: BotHarness,
+) -> None:
+    user = make_user(telegram_id=5403, username="hinted")
+    await _seed_received_packs(loyalty_harness, user.id, 10)
+
+    await loyalty_harness.feed(progress_command_update(user=user, update_id=421))
+
+    assert FREE_PACK_PROGRESS_HINT in loyalty_harness.bot.last_text()
+    assert loyalty_harness.bot.methods(SendMessage)[-1].reply_markup is None
+
+
+async def test_the_free_pack_is_invisible_while_the_programme_is_off(harness: BotHarness) -> None:
+    user = make_user(telegram_id=5404, username="offclaimer")
+    await _seed_received_packs(harness, user.id, 18)
+    product = await _product(harness)
+
+    await harness.feed(start_update(product.slug, user=user, update_id=431))
+    card = harness.bot.methods(SendMessage)[-1]
+    assert FREE_PACK_BUTTON not in _labels(card)
+    assert FREE_PACK_CARD_LINE not in card.text
+
+    await harness.feed(free_pack_button_update(product_id=product.id, user=user, update_id=432))
+    assert harness.bot.methods(AnswerCallbackQuery)[-1].text == SECTION_UNAVAILABLE
+    assert await _internal_purchase_count(harness, user.id) == 0
+    assert not [text for text in harness.bot.texts() if DELIVERY_URL in text]
+
+
+async def test_a_hand_crafted_claim_below_the_milestone_is_refused(
+    loyalty_harness: BotHarness,
+) -> None:
+    user = make_user(telegram_id=5405, username="tooearly")
+    await _seed_received_packs(loyalty_harness, user.id, 3)
+    product = await _product(loyalty_harness)
+
+    await loyalty_harness.feed(
+        free_pack_button_update(product_id=product.id, user=user, update_id=441)
+    )
+
+    answer = loyalty_harness.bot.methods(AnswerCallbackQuery)[-1]
+    assert answer.text == FREE_PACK_NOT_AVAILABLE
+    assert answer.show_alert is True
+    assert await _internal_purchase_count(loyalty_harness, user.id) == 0
+
+
+async def test_a_free_pack_that_could_not_be_sent_is_handed_over_later(
+    loyalty_harness: BotHarness,
+) -> None:
+    user = make_user(telegram_id=5406, username="blocked")
+    await _seed_received_packs(loyalty_harness, user.id, 10)
+    product = await _product(loyalty_harness)
+    await loyalty_harness.feed(start_update(product.slug, user=user, update_id=451))
+
+    loyalty_harness.bot.fail_send_message = [
+        TelegramForbiddenError(
+            method=SendMessage(chat_id=user.id, text="x"),
+            message="Forbidden: bot was blocked by the user",
+        ),
+    ]
+    await loyalty_harness.feed(
+        free_pack_button_update(product_id=product.id, user=user, update_id=452)
+    )
+    assert FREE_PACK_DELIVERY_FAILED in loyalty_harness.bot.texts()
+    assert not [text for text in loyalty_harness.bot.texts() if DELIVERY_URL in text]
+
+    # The deep link again: the pack is owned, so it is simply handed over.
+    await loyalty_harness.feed(start_update(product.slug, user=user, update_id=453))
+    assert ALREADY_PURCHASED in loyalty_harness.bot.texts()
+    assert len([text for text in loyalty_harness.bot.texts() if DELIVERY_URL in text]) == 1
+    assert await _internal_purchase_count(loyalty_harness, user.id) == 1
+
+
+async def test_an_old_stars_invoice_cannot_buy_a_pack_taken_for_free(
+    loyalty_harness: BotHarness,
+) -> None:
+    """A Telegram invoice never expires: pre-checkout refuses what the buyer now owns."""
+    user = make_user(telegram_id=5407, username="latepayer")
+    await _seed_received_packs(loyalty_harness, user.id, 10)
+    # One Star: too little to halve, so this invoice carries no loyalty discount
+    # and the refusal below is the ownership check, not the discount guard.
+    product = await _product(loyalty_harness, price_stars=1, price_usdt=None)
+    await loyalty_harness.feed(start_update(product.slug, user=user, update_id=461))
+    await loyalty_harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=user,
+            update_id=462,
+        )
+    )
+    (invoice,) = loyalty_harness.bot.methods(SendInvoice)
+    assert invoice.prices[0].amount == 1
+    await loyalty_harness.container.purchases.expire_stale(
+        now=datetime.now(UTC) + timedelta(hours=2)
+    )
+    await loyalty_harness.feed(
+        free_pack_button_update(product_id=product.id, user=user, update_id=463)
+    )
+    assert loyalty_harness.bot.methods(AnswerCallbackQuery)[-1].text == FREE_PACK_GRANTED
+
+    await loyalty_harness.feed(
+        pre_checkout_update(payload=invoice.payload, amount=1, user=user, update_id=464)
+    )
+
+    refused = loyalty_harness.bot.methods(AnswerPreCheckoutQuery)[-1]
+    assert refused.ok is False
+    assert refused.error_message == PRE_CHECKOUT_ALREADY_OWNED
+
+
+async def test_the_free_pack_goes_to_one_product_only(loyalty_harness: BotHarness) -> None:
+    user = make_user(telegram_id=5408, username="onlyone")
+    await _seed_received_packs(loyalty_harness, user.id, 10)
+    first, second = await _product(loyalty_harness), await _product(loyalty_harness)
+    await loyalty_harness.feed(
+        free_pack_button_update(product_id=first.id, user=user, update_id=471)
+    )
+
+    await loyalty_harness.feed(
+        free_pack_button_update(product_id=second.id, user=user, update_id=472)
+    )
+
+    answer = loyalty_harness.bot.methods(AnswerCallbackQuery)[-1]
+    assert answer.text == FREE_PACK_ALREADY_USED
+    assert answer.show_alert is True
+    assert await _internal_purchase_count(loyalty_harness, user.id) == 1
+
+
+async def test_an_unpaid_invoice_holds_the_free_pack_back(loyalty_harness: BotHarness) -> None:
+    user = make_user(telegram_id=5409, username="pending")
+    await _seed_received_packs(loyalty_harness, user.id, 10)
+    product = await _product(loyalty_harness)
+    await loyalty_harness.feed(start_update(product.slug, user=user, update_id=481))
+    await loyalty_harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=user,
+            update_id=482,
+        )
+    )
+
+    await loyalty_harness.feed(
+        free_pack_button_update(product_id=product.id, user=user, update_id=483)
+    )
+
+    assert loyalty_harness.bot.methods(AnswerCallbackQuery)[-1].text == FREE_PACK_PENDING_INVOICE
+    assert await _internal_purchase_count(loyalty_harness, user.id) == 0
+
+
+async def test_a_stale_free_pack_button_for_a_bought_pack_resends_the_link(
+    loyalty_harness: BotHarness,
+) -> None:
+    """Bought after the card was shown: no pack is spent, the link comes again."""
+    user = make_user(telegram_id=5410, username="boughtit")
+    await _seed_received_packs(loyalty_harness, user.id, 10)
+    product = await _product(loyalty_harness)
+    async with loyalty_harness.container.uow_factory() as uow:
+        paid = await uow.purchases.create(
+            PurchaseDraft(
+                user_id=user.id,
+                product_id=product.id,
+                provider=PaymentProvider.STARS,
+                amount=Decimal(STARS_PRICE),
+                currency=Currency.XTR,
+                external_id=uuid4().hex,
+                status=PurchaseStatus.PAID,
+            )
+        )
+        await uow.purchases.mark_delivered(paid.id, delivered_url=DELIVERY_URL)
+
+    await loyalty_harness.feed(
+        free_pack_button_update(product_id=product.id, user=user, update_id=491)
+    )
+
+    assert loyalty_harness.bot.methods(AnswerCallbackQuery)[-1].text == ALREADY_PURCHASED
+    assert len([text for text in loyalty_harness.bot.texts() if DELIVERY_URL in text]) == 1
+    assert await _internal_purchase_count(loyalty_harness, user.id) == 0
+
+
+async def test_a_free_pack_for_a_withdrawn_product_is_refused(
+    loyalty_harness: BotHarness,
+) -> None:
+    user = make_user(telegram_id=5411, username="withdrawn")
+    await _seed_received_packs(loyalty_harness, user.id, 10)
+    product = await _product(loyalty_harness)
+    await loyalty_harness.container.products.update(product.id, ProductUpdate(is_active=False))
+
+    await loyalty_harness.feed(
+        free_pack_button_update(product_id=product.id, user=user, update_id=501)
+    )
+
+    assert loyalty_harness.bot.methods(AnswerCallbackQuery)[-1].text == CARD_UNAVAILABLE
+    assert await _internal_purchase_count(loyalty_harness, user.id) == 0
+
+
+async def test_a_failing_claim_is_a_soft_error(
+    loyalty_harness: BotHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = make_user(telegram_id=5412, username="unluckyclaim")
+    await _seed_received_packs(loyalty_harness, user.id, 10)
+    product = await _product(loyalty_harness)
+
+    async def unavailable(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        message = "the database is resting"
+        raise ServiceUnavailableError(message)
+
+    monkeypatch.setattr(CheckoutService, "claim_free_pack", unavailable)
+
+    await loyalty_harness.feed(
+        free_pack_button_update(product_id=product.id, user=user, update_id=511)
+    )
+
+    assert loyalty_harness.bot.methods(AnswerCallbackQuery)[-1].text == FREE_PACK_FAILED
+    assert await _internal_purchase_count(loyalty_harness, user.id) == 0

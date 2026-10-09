@@ -1,4 +1,4 @@
-"""Loyalty programme use cases: progress, and the 50% discount's lifecycle.
+"""Loyalty programme use cases: progress, the 50% discount and the free pack.
 
 ``get_progress`` answers "how far is this buyer?" from their purchases and the
 rewards recorded so far. It never writes: opening the progress screen leaves
@@ -18,6 +18,14 @@ checkout, and locked ``FOR UPDATE`` whenever it changes.
 Settlement never fails because of the reward. Money that arrived is honoured
 and the buyer gets their pack even if the reward is not where it should be —
 the anomaly is logged, the same rule that settled referral Bug #2.
+
+The milestone-10 reward — one pack for free — has no "applied" state:
+
+    (due, no row) ≡ available ─claim─▶ consumed(P)
+
+where P is the ``internal`` purchase created in the same transaction. Here
+nothing is being paid for, so the opposite rule holds: if the reward cannot be
+consumed, the pack is not handed over either.
 """
 
 from __future__ import annotations
@@ -28,14 +36,20 @@ from typing import TYPE_CHECKING
 from app.core.exceptions import AppError, ConflictError, LoyaltyDisabledError
 from app.core.logging import get_logger
 from app.domain.enums import LoyaltyRewardStatus
-from app.domain.loyalty import DISCOUNT_MILESTONE, MilestoneRewardState, progress_of, reward_state
+from app.domain.loyalty import (
+    DISCOUNT_MILESTONE,
+    FREE_PACK_MILESTONE,
+    MilestoneRewardState,
+    progress_of,
+    reward_state,
+)
 
 if TYPE_CHECKING:
     from uuid import UUID
 
     from app.core.config import LoyaltySettings
     from app.domain.bonuses import PriceQuote
-    from app.domain.entities import Purchase
+    from app.domain.entities import LoyaltyReward, Purchase
     from app.domain.loyalty import LoyaltyProgress
     from app.domain.uow import UnitOfWork, UnitOfWorkFactory
 
@@ -44,7 +58,7 @@ logger = get_logger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class LoyaltyService:
-    """A buyer's loyalty progress, and the 50% discount as checkouts use it."""
+    """A buyer's loyalty progress, the 50% discount and the free pack."""
 
     uow_factory: UnitOfWorkFactory
     settings: LoyaltySettings
@@ -83,13 +97,7 @@ class LoyaltyService:
 
     async def discount_available(self, uow: UnitOfWork, user_id: int) -> bool:
         """Whether the 50% reward is due and unused. Read only; records nothing."""
-        completed = await uow.loyalty.count_completed(user_id)
-        if completed < DISCOUNT_MILESTONE:
-            return False
-        rewards = await uow.loyalty.rewards_of(user_id)
-        recorded = {reward.milestone: reward.status for reward in rewards}
-        state = reward_state(completed, DISCOUNT_MILESTONE, recorded.get(DISCOUNT_MILESTONE))
-        return state is MilestoneRewardState.AVAILABLE
+        return await self._available(uow, user_id, DISCOUNT_MILESTONE)
 
     async def lock_discount(self, uow: UnitOfWork, user_id: int) -> UUID | None:
         """Record the reward if it is due, lock it, and return it while available.
@@ -214,6 +222,57 @@ class LoyaltyService:
         if released:
             logger.info("loyalty_discounts_released", count=len(released))
         return len(released)
+
+    # ------------------------------------------------------------ free pack
+
+    async def free_pack_available(self, uow: UnitOfWork, user_id: int) -> bool:
+        """Whether the free pack is due and unclaimed. Read only; records nothing."""
+        return await self._available(uow, user_id, FREE_PACK_MILESTONE)
+
+    async def lock_free_pack(self, uow: UnitOfWork, user_id: int) -> LoyaltyReward | None:
+        """Record the free pack if it is due, lock it, and return it in any state.
+
+        The caller needs the consumed state too: a second press for the pack
+        already handed over is answered with that pack, not refused. The lock
+        is what keeps two claims for different products — which hold different
+        purchase locks — from both getting the one pack.
+        """
+        if await uow.loyalty.count_completed(user_id) < FREE_PACK_MILESTONE:
+            return None
+        await uow.loyalty.ensure_reward(user_id, FREE_PACK_MILESTONE)
+        return await uow.loyalty.lock_reward(user_id, FREE_PACK_MILESTONE)
+
+    async def consume_free_pack(
+        self,
+        uow: UnitOfWork,
+        reward: LoyaltyReward,
+        purchase: Purchase,
+    ) -> None:
+        """``available → consumed``, in the transaction that creates the pack.
+
+        Raises:
+            ConflictError: the reward is no longer available. It aborts the
+                internal purchase with it: no reward, no free pack.
+        """
+        await uow.loyalty.mark_consumed(reward.id, purchase.id)
+        logger.info(
+            "loyalty_free_pack_consumed",
+            purchase_id=str(purchase.id),
+            user_id=purchase.user_id,
+            reward_id=str(reward.id),
+        )
+
+    # ----------------------------------------------------------------- shared
+
+    async def _available(self, uow: UnitOfWork, user_id: int, milestone: int) -> bool:
+        """Whether one milestone reward is due and unused, from the count and its row."""
+        completed = await uow.loyalty.count_completed(user_id)
+        if completed < milestone:
+            return False
+        rewards = await uow.loyalty.rewards_of(user_id)
+        recorded = {reward.milestone: reward.status for reward in rewards}
+        state = reward_state(completed, milestone, recorded.get(milestone))
+        return state is MilestoneRewardState.AVAILABLE
 
 
 __all__ = ["LoyaltyService"]

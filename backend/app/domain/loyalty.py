@@ -23,14 +23,13 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Final, Protocol
 
 from app.domain.bonuses import PriceQuote, floor_to_step
-from app.domain.enums import LoyaltyRewardKind, LoyaltyRewardStatus
+from app.domain.enums import Currency, LoyaltyRewardKind, LoyaltyRewardStatus
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from uuid import UUID
 
-    from app.domain.entities import LoyaltyReward, Purchase
-    from app.domain.enums import Currency
+    from app.domain.entities import LoyaltyReward, Product, Purchase
     from app.domain.uow import UnitOfWork
 
 DISCOUNT_MILESTONE: Final = 5
@@ -85,6 +84,36 @@ def loyalty_quote(
         loyalty_amount=discount,
         loyalty_reward_id=reward_id,
     )
+
+
+FREE_PACK_INVOICE_PREFIX: Final = "loyalty:"
+"""Prefix of a free pack's ``external_id``; the rest is the reward's id."""
+
+
+def free_pack_value(product: Product) -> tuple[Decimal, Currency]:
+    """What a free pack is worth on paper: its Stars price, else its USDT price.
+
+    Only for the books — the pack's ``base_amount`` and the ``loyalty_amount``
+    that waives all of it. Nothing is ever billed in this currency.
+
+    Raises:
+        ValueError: the product has no price at all, which the database forbids.
+    """
+    if product.price_stars is not None:
+        return Decimal(product.price_stars), Currency.XTR
+    if product.price_usdt is not None:
+        return product.price_usdt, Currency.USDT
+    message = f"Product {product.id} has no price to value a free pack at"
+    raise ValueError(message)
+
+
+def free_pack_external_id(reward_id: UUID) -> str:
+    """The free pack's ``external_id``: one reward, one pack.
+
+    Unique per provider in the database, so the same reward can never be turned
+    into a second internal purchase, whatever happens above it.
+    """
+    return f"{FREE_PACK_INVOICE_PREFIX}{reward_id}"
 
 
 class MilestoneRewardState(StrEnum):
@@ -222,15 +251,63 @@ class LoyaltyPricing(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FreePackGrant:
+    """The internal purchase a free pack became, and whether it already existed."""
+
+    purchase: Purchase
+    repeated: bool = False
+    """``True`` when this press found the pack it had already handed over."""
+
+
+class FreePackRewards(Protocol):
+    """How the purchase side reaches the milestone-10 free pack.
+
+    Everything runs inside the caller's transaction, next to the internal
+    purchase it concerns: the reward and the pack commit together or not at all.
+    """
+
+    @property
+    def enabled(self) -> bool:
+        """Whether the programme may hand anything out right now."""
+        ...
+
+    async def free_pack_available(self, uow: UnitOfWork, user_id: int) -> bool:
+        """Whether the free pack is due and unclaimed. Read only; records nothing."""
+        ...
+
+    async def lock_free_pack(self, uow: UnitOfWork, user_id: int) -> LoyaltyReward | None:
+        """Record the reward if it is due, lock it and return it, whatever its state.
+
+        ``None`` when the milestone is not reached. The lock is held until the
+        caller's transaction ends.
+        """
+        ...
+
+    async def consume_free_pack(
+        self,
+        uow: UnitOfWork,
+        reward: LoyaltyReward,
+        purchase: Purchase,
+    ) -> None:
+        """Mark the locked reward as handed over as ``purchase`` (same transaction)."""
+        ...
+
+
 __all__ = [
     "DISCOUNT_MILESTONE",
+    "FREE_PACK_INVOICE_PREFIX",
     "FREE_PACK_MILESTONE",
     "LOYALTY_DISCOUNT_PERCENT",
     "REWARD_MILESTONES",
     "VIP_MILESTONE",
+    "FreePackGrant",
+    "FreePackRewards",
     "LoyaltyPricing",
     "LoyaltyProgress",
     "MilestoneRewardState",
+    "free_pack_external_id",
+    "free_pack_value",
     "loyalty_discount_for",
     "loyalty_quote",
     "progress_of",

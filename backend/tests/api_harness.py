@@ -155,7 +155,12 @@ def build_api_harness(
         rate_limiter=RedisRateLimiter(redis),
         crypto_payments=crypto_client,
         products=ProductService(uow_factory=uow_factory, telegram=settings.telegram),
-        purchases=PurchaseService(uow_factory=uow_factory, locks=locks, pricing=pricing),
+        purchases=PurchaseService(
+            uow_factory=uow_factory,
+            locks=locks,
+            pricing=pricing,
+            loyalty=loyalty,
+        ),
         referrals=ReferralService(
             uow_factory=uow_factory,
             telegram=settings.telegram,

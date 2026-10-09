@@ -20,6 +20,7 @@ from app.bot.texts import (
     BONUS_USE_BUTTON,
     CRYPTO_BUTTON,
     CRYPTO_PAY_BUTTON,
+    FREE_PACK_BUTTON,
     PREVIEW_BUTTON,
     PROGRESS_SECTION_BUTTON,
     STARS_BUTTON,
@@ -42,8 +43,18 @@ class PayCallback(CallbackData, prefix="pay"):
     product_id: UUID
 
 
+class FreePackCallback(CallbackData, prefix="freepack"):
+    """ "Take it for free" button payload: the product, never the buyer."""
+
+    product_id: UUID
+
+
 def payment_keyboard(card: ProductCard) -> InlineKeyboardMarkup:
-    """One button per rail that has a price. Pressing one starts the checkout."""
+    """One button per rail that has a price. Pressing one starts the checkout.
+
+    A buyer whose loyalty free pack is waiting also gets "take it for free" on
+    top. The payment buttons stay: the free pack is an offer, not a detour.
+    """
     rows = [
         [
             InlineKeyboardButton(
@@ -56,6 +67,16 @@ def payment_keyboard(card: ProductCard) -> InlineKeyboardMarkup:
         ]
         for option in card.options
     ]
+    if card.free_pack_available:
+        rows.insert(
+            0,
+            [
+                InlineKeyboardButton(
+                    text=FREE_PACK_BUTTON,
+                    callback_data=FreePackCallback(product_id=card.product.id).pack(),
+                )
+            ],
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
