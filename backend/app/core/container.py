@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from app.core.config import Settings
     from app.core.resources import Resources
     from app.domain.delivery import DeliveryGateway
+    from app.domain.loyalty import MilestoneNotifier
     from app.domain.notifications import RewardNotifier
     from app.domain.payments import StarsInvoiceSender
 
@@ -108,11 +109,16 @@ class Container:
         delivery_gateway: DeliveryGateway,
         stars: StarsInvoiceSender,
         notifier: RewardNotifier | None = None,
+        milestone_notifier: MilestoneNotifier | None = None,
     ) -> CheckoutService:
         """Wire checkout to a concrete transport (bot process or admin API)."""
         return CheckoutService(
             purchases=self.purchases,
-            delivery=self.build_delivery(delivery_gateway, notifier=notifier),
+            delivery=self.build_delivery(
+                delivery_gateway,
+                notifier=notifier,
+                milestone_notifier=milestone_notifier,
+            ),
             stars=stars,
             crypto=self.crypto_payments,
         )
@@ -122,6 +128,7 @@ class Container:
         gateway: DeliveryGateway,
         *,
         notifier: RewardNotifier | None = None,
+        milestone_notifier: MilestoneNotifier | None = None,
     ) -> DeliveryService:
         """Create the delivery service for a concrete transport.
 
@@ -135,6 +142,7 @@ class Container:
             locks=self.locks,
             settings=self.settings.delivery,
             sale_completion=self.build_bonuses(notifier=notifier),
+            milestones=milestone_notifier,
         )
 
     def build_bonuses(self, *, notifier: RewardNotifier | None = None) -> BonusService:

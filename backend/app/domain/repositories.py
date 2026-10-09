@@ -138,6 +138,14 @@ class PurchaseRepository(Protocol):
         """Return the purchase with this id, or ``None``."""
         ...
 
+    async def get_for_update(self, purchase_id: UUID) -> Purchase | None:
+        """Return the purchase with its row locked until the transaction ends.
+
+        Always read from the database, never from an earlier read in the same
+        transaction: what it returns is what every later change will start from.
+        """
+        ...
+
     async def get_by_external_id(
         self,
         provider: PaymentProvider,
@@ -472,6 +480,15 @@ class LoyaltyRepository(Protocol):
         One conditional ``UPDATE``: a released reward changes state, so it is
         never selected again, and rows a payment is settling right now are
         skipped rather than waited for.
+        """
+        ...
+
+    async def lock_progress(self, user_id: int) -> None:
+        """Serialise this buyer's deliveries until the transaction ends.
+
+        Taken by every delivery while the programme is on, so each one counts
+        the buyer's completed purchases with every earlier delivery committed —
+        which makes that count the delivery's exact rank.
         """
         ...
 

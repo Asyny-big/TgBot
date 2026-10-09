@@ -11,7 +11,12 @@ from decimal import Decimal
 from html import escape
 from typing import TYPE_CHECKING, Final
 
-from app.domain.loyalty import MilestoneRewardState
+from app.domain.loyalty import (
+    DISCOUNT_MILESTONE,
+    FREE_PACK_MILESTONE,
+    VIP_MILESTONE,
+    MilestoneRewardState,
+)
 
 if TYPE_CHECKING:
     from app.domain.cards import ProductCard
@@ -265,6 +270,28 @@ FREE_PACK_DELIVERY_FAILED: Final = (
     "Пак ваш, но отправить ссылку не удалось. "
     "Нажмите «🎁 Забрать бесплатно» ещё раз или откройте ссылку на товар — бот выдаст доступ."
 )
+
+LOYALTY_MILESTONE_NOTICES: Final[dict[int, str]] = {
+    DISCOUNT_MILESTONE: (
+        "🎉 Поздравляем! Это ваша 5-я покупка. Вам доступна скидка 50% на следующий пак "
+        "— она применится автоматически при оплате."
+    ),
+    FREE_PACK_MILESTONE: (
+        "🎁 10 покупок! Вам доступен бесплатный пак. "
+        "Откройте любой пак и нажмите «🎁 Забрать бесплатно»."
+    ),
+    VIP_MILESTONE: "👑 15 покупок — поздравляем! Вы достигли VIP-статуса.",
+}
+
+
+def loyalty_milestone_notice(milestone: int) -> str:
+    """The message a delivery sends when it reaches 5, 10 or 15 purchases.
+
+    Raises:
+        KeyError: for anything else — no other rank is ever announced.
+    """
+    return LOYALTY_MILESTONE_NOTICES[milestone]
+
 
 _PLURAL_FEW_MIN: Final = 2
 _PLURAL_FEW_MAX: Final = 4

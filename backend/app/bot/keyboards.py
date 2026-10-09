@@ -186,6 +186,20 @@ def start_menu_keyboard(*, bonuses: bool, progress: bool) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
+def progress_keyboard() -> InlineKeyboardMarkup:
+    """The "🏆 My progress" button alone, under a loyalty milestone notice."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=PROGRESS_SECTION_BUTTON,
+                    callback_data=ProgressCallback().pack(),
+                )
+            ]
+        ]
+    )
+
+
 def bonus_hint_keyboard() -> InlineKeyboardMarkup:
     """Offer the bonus section after a completed purchase. Never required."""
     return InlineKeyboardMarkup(

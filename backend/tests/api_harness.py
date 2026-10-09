@@ -29,7 +29,11 @@ from app.core.container import Container
 from app.infrastructure.cache.rate_limit import RedisRateLimiter
 from app.infrastructure.db.uow import SqlAlchemyUnitOfWorkFactory
 from app.infrastructure.payments.cryptobot import CryptoBotClient
-from app.infrastructure.telegram.factory import create_delivery_gateway, create_stars_sender
+from app.infrastructure.telegram.factory import (
+    create_delivery_gateway,
+    create_loyalty_notifier,
+    create_stars_sender,
+)
 from app.main import create_app
 from app.services.auth import AuthService
 from app.services.bonuses import BonusService
@@ -176,6 +180,7 @@ def build_api_harness(
     checkout = container.build_checkout(
         delivery_gateway=create_delivery_gateway(bot),
         stars=create_stars_sender(bot),
+        milestone_notifier=create_loyalty_notifier(bot),
     )
 
     app = create_app(settings)

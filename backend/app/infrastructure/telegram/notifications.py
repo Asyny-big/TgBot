@@ -1,4 +1,4 @@
-"""Telegram implementation of the bonus notification port.
+"""Telegram implementations of the bonus and loyalty notification ports.
 
 Both messages this sends are courtesies. Neither is allowed to matter: a reward
 that reached the ledger stays there even if the inviter has blocked the bot, and
@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from app.bot.keyboards import bonus_hint_keyboard
-from app.bot.texts import PURCHASE_COMPLETE_HINT, reward_notice
+from app.bot.keyboards import bonus_hint_keyboard, progress_keyboard
+from app.bot.texts import PURCHASE_COMPLETE_HINT, loyalty_milestone_notice, reward_notice
 from app.core.logging import get_logger
 
 if TYPE_CHECKING:
@@ -61,4 +61,25 @@ class TelegramBonusNotifier:
         logger.info("purchase_hint_sent", user_id=user_id)
 
 
-__all__ = ["TelegramBonusNotifier"]
+class TelegramLoyaltyNotifier:
+    """Sends the loyalty milestone notices (5, 10, 15 completed purchases)."""
+
+    def __init__(self, bot: Bot) -> None:
+        self._bot = bot
+
+    async def notify_milestone(self, user_id: int, milestone: int) -> None:
+        """Tell the buyer what their latest delivery reached.
+
+        Sent once per milestone, because the caller only reaches this for the
+        one delivery whose rank is that milestone, after it committed.
+        """
+        await self._bot.send_message(
+            chat_id=user_id,
+            text=loyalty_milestone_notice(milestone),
+            reply_markup=progress_keyboard(),
+            disable_web_page_preview=True,
+        )
+        logger.info("loyalty_milestone_announced", user_id=user_id, milestone=milestone)
+
+
+__all__ = ["TelegramBonusNotifier", "TelegramLoyaltyNotifier"]

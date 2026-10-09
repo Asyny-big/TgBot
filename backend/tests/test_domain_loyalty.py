@@ -14,7 +14,13 @@ from uuid import uuid4
 
 import pytest
 
-from app.bot.texts import FREE_PACK_PROGRESS_HINT, loyalty_progress
+from app.bot.keyboards import ProgressCallback, progress_keyboard
+from app.bot.texts import (
+    FREE_PACK_PROGRESS_HINT,
+    PROGRESS_SECTION_BUTTON,
+    loyalty_milestone_notice,
+    loyalty_progress,
+)
 from app.domain.entities import LoyaltyReward, Product
 from app.domain.enums import Currency, LoyaltyRewardKind, LoyaltyRewardStatus
 from app.domain.loyalty import (
@@ -25,6 +31,7 @@ from app.domain.loyalty import (
     MilestoneRewardState,
     free_pack_external_id,
     free_pack_value,
+    milestone_of,
     progress_of,
     reward_state,
 )
@@ -296,3 +303,33 @@ def test_one_reward_names_one_free_pack() -> None:
     reward_id = uuid4()
     assert free_pack_external_id(reward_id) == f"loyalty:{reward_id}"
     assert free_pack_external_id(reward_id) != free_pack_external_id(uuid4())
+
+
+# --------------------------------------------------------------------------- #
+# Milestone notices                                                           #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("rank", range(1, 31))
+def test_only_the_fifth_tenth_and_fifteenth_delivery_reach_a_milestone(rank: int) -> None:
+    assert milestone_of(rank) == (rank if rank in (5, 10, 15) else None)
+
+
+def test_the_milestone_notices_read_exactly_as_agreed() -> None:
+    assert loyalty_milestone_notice(5) == (
+        "🎉 Поздравляем! Это ваша 5-я покупка. Вам доступна скидка 50% на следующий пак "
+        "— она применится автоматически при оплате."
+    )
+    assert loyalty_milestone_notice(10) == (
+        "🎁 10 покупок! Вам доступен бесплатный пак. "
+        "Откройте любой пак и нажмите «🎁 Забрать бесплатно»."
+    )
+    assert loyalty_milestone_notice(15) == "👑 15 покупок — поздравляем! Вы достигли VIP-статуса."
+    with pytest.raises(KeyError):
+        loyalty_milestone_notice(6)
+
+
+def test_a_notice_carries_the_progress_button_alone() -> None:
+    ((button,),) = progress_keyboard().inline_keyboard
+    assert button.text == PROGRESS_SECTION_BUTTON
+    assert button.callback_data == ProgressCallback().pack()

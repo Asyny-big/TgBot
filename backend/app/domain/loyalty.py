@@ -50,6 +50,12 @@ REWARD_MILESTONES: Final[dict[int, LoyaltyRewardKind]] = {
 LOYALTY_DISCOUNT_PERCENT: Final = 50
 """Share of a list price the milestone-5 reward takes off one paid pack."""
 
+ANNOUNCED_MILESTONES: Final = (DISCOUNT_MILESTONE, FREE_PACK_MILESTONE, VIP_MILESTONE)
+"""Ranks at which a delivery tells the buyer what they have just reached."""
+
+PROGRESS_LOCK_NAMESPACE: Final = "loyalty_progress"
+"""Prefix of the per-buyer lock that serialises deliveries while ranking them."""
+
 _PERCENT: Final = Decimal(100)
 
 
@@ -114,6 +120,15 @@ def free_pack_external_id(reward_id: UUID) -> str:
     into a second internal purchase, whatever happens above it.
     """
     return f"{FREE_PACK_INVOICE_PREFIX}{reward_id}"
+
+
+def milestone_of(rank: int) -> int | None:
+    """The milestone a delivery of this rank reaches, if any.
+
+    ``rank`` is the delivery's place among the buyer's completed purchases —
+    the 5th, 10th and 15th reach something; every other one reaches nothing.
+    """
+    return rank if rank in ANNOUNCED_MILESTONES else None
 
 
 class MilestoneRewardState(StrEnum):
@@ -294,22 +309,65 @@ class FreePackRewards(Protocol):
         ...
 
 
+class LoyaltyMilestones(Protocol):
+    """How a delivery learns which milestone it reached.
+
+    Both run inside the delivery's own transaction: the lock first, then — only
+    for a genuine ``paid → delivered`` transition — the rank.
+    """
+
+    @property
+    def enabled(self) -> bool:
+        """Whether the programme may rank anything right now."""
+        ...
+
+    async def lock_progress(self, uow: UnitOfWork, user_id: int) -> None:
+        """Serialise this buyer's deliveries until the transaction ends."""
+        ...
+
+    async def milestone_reached(self, uow: UnitOfWork, user_id: int) -> int | None:
+        """The milestone the delivery just recorded reaches, if any."""
+        ...
+
+
+class PurchaseLoyalty(FreePackRewards, LoyaltyMilestones, Protocol):
+    """Everything the purchase side asks of the loyalty programme."""
+
+
+class MilestoneNotifier(Protocol):
+    """Port: tell a buyer which milestone a delivery just reached.
+
+    A courtesy, never a transaction. Called only after the delivery committed,
+    and whatever it raises is logged and forgotten.
+    """
+
+    async def notify_milestone(self, user_id: int, milestone: int) -> None:
+        """Send the milestone notice."""
+        ...
+
+
 __all__ = [
+    "ANNOUNCED_MILESTONES",
     "DISCOUNT_MILESTONE",
     "FREE_PACK_INVOICE_PREFIX",
     "FREE_PACK_MILESTONE",
     "LOYALTY_DISCOUNT_PERCENT",
+    "PROGRESS_LOCK_NAMESPACE",
     "REWARD_MILESTONES",
     "VIP_MILESTONE",
     "FreePackGrant",
     "FreePackRewards",
+    "LoyaltyMilestones",
     "LoyaltyPricing",
     "LoyaltyProgress",
+    "MilestoneNotifier",
     "MilestoneRewardState",
+    "PurchaseLoyalty",
     "free_pack_external_id",
     "free_pack_value",
     "loyalty_discount_for",
     "loyalty_quote",
+    "milestone_of",
     "progress_of",
     "reward_state",
 ]

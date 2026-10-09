@@ -55,6 +55,7 @@ from app.bot.texts import (
     FREE_PACK_PENDING_INVOICE,
     FREE_PACK_PROGRESS_HINT,
     FREE_PACK_RESENT,
+    LOYALTY_MILESTONE_NOTICES,
     NO_DEEP_LINK,
     PAYMENT_IN_PROGRESS,
     PAYMENT_UNAVAILABLE,
@@ -2477,3 +2478,69 @@ async def test_a_failing_claim_is_a_soft_error(
 
     assert loyalty_harness.bot.methods(AnswerCallbackQuery)[-1].text == FREE_PACK_FAILED
     assert await _internal_purchase_count(loyalty_harness, user.id) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Loyalty: milestone notices through the bot
+# --------------------------------------------------------------------------- #
+async def _pay_with_stars(
+    harness: BotHarness,
+    *,
+    user: TelegramUser,
+    product: Product,
+    first_update: int,
+) -> None:
+    await harness.feed(start_update(product.slug, user=user, update_id=first_update))
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=user,
+            update_id=first_update + 1,
+        )
+    )
+    payload = await _stars_payload(harness)
+    await harness.feed(
+        successful_payment_update(
+            payload=payload,
+            amount=STARS_PRICE,
+            charge_id=f"charge-{first_update}",
+            user=user,
+            update_id=first_update + 2,
+        )
+    )
+
+
+async def test_the_fifth_purchase_announces_the_discount_after_the_link(
+    loyalty_harness: BotHarness,
+) -> None:
+    user = make_user(telegram_id=5501, username="fifth")
+    await _seed_received_packs(loyalty_harness, user.id, 4)
+    product = await _product(loyalty_harness)
+
+    await _pay_with_stars(loyalty_harness, user=user, product=product, first_update=521)
+
+    texts = loyalty_harness.bot.texts()
+    notice = LOYALTY_MILESTONE_NOTICES[5]
+    assert texts.count(notice) == 1
+    link = next(index for index, text in enumerate(texts) if DELIVERY_URL in text)
+    assert link < texts.index(notice)
+    sent = next(m for m in loyalty_harness.bot.methods(SendMessage) if m.text == notice)
+    assert sent.chat_id == user.id
+    assert _labels(sent) == [PROGRESS_SECTION_BUTTON]
+
+    # The button under it opens the buyer's own progress.
+    await loyalty_harness.feed(progress_button_update(user=user, update_id=531))
+    assert "Покупок: 5" in loyalty_harness.bot.last_text()
+
+
+async def test_no_milestone_notice_while_the_programme_is_off(harness: BotHarness) -> None:
+    user = make_user(telegram_id=5502, username="fifthoff")
+    await _seed_received_packs(harness, user.id, 4)
+    product = await _product(harness)
+
+    await _pay_with_stars(harness, user=user, product=product, first_update=541)
+
+    texts = harness.bot.texts()
+    assert any(DELIVERY_URL in text for text in texts)
+    assert not [text for text in texts if text in LOYALTY_MILESTONE_NOTICES.values()]

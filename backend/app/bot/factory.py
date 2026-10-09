@@ -17,6 +17,7 @@ from app.core.logging import get_logger
 from app.infrastructure.telegram.factory import (
     create_bonus_notifier,
     create_delivery_gateway,
+    create_loyalty_notifier,
     create_stars_sender,
 )
 
@@ -33,12 +34,14 @@ def create_checkout(container: Container, bot: Bot) -> CheckoutService:
     """Wire the checkout service to this process's Telegram transport.
 
     The bonus notifier is supplied here too: telling an inviter they earned
-    bonuses needs a bot, and only this process has one.
+    bonuses needs a bot, and only this process has one. So is the loyalty
+    milestone notifier, which the admin API wires as well.
     """
     return container.build_checkout(
         delivery_gateway=create_delivery_gateway(bot),
         stars=create_stars_sender(bot),
         notifier=create_bonus_notifier(bot),
+        milestone_notifier=create_loyalty_notifier(bot),
     )
 
 

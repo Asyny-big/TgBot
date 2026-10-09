@@ -31,6 +31,7 @@ from app.core.logging import get_logger
 from app.domain.bonuses import plain_quote
 from app.domain.cards import PaymentOption, ProductCard
 from app.domain.commands import PurchaseDraft
+from app.domain.delivery import RecordedDelivery
 from app.domain.enums import (
     PAYABLE_PROVIDERS,
     LoyaltyRewardStatus,
@@ -54,7 +55,7 @@ if TYPE_CHECKING:
     from app.domain.entities import LoyaltyReward, Product, Purchase, User
     from app.domain.enums import Currency
     from app.domain.locks import LockManager
-    from app.domain.loyalty import FreePackRewards
+    from app.domain.loyalty import PurchaseLoyalty
     from app.domain.uow import UnitOfWork, UnitOfWorkFactory
 
 logger = get_logger(__name__)
@@ -78,9 +79,11 @@ class PurchaseService:
     below therefore has exactly one extra branch, and the default path through
     it is byte for byte the old behaviour.
     """
-    loyalty: FreePackRewards | None = None
-    """Optional loyalty free pack. With ``None`` — or the programme switched
-    off — no card offers it and nothing can claim it.
+    loyalty: PurchaseLoyalty | None = None
+    """Optional loyalty programme: the free pack and the milestone ranking.
+
+    With ``None`` — or the programme switched off — no card offers the free
+    pack, nothing can claim it, and a delivery is recorded exactly as before.
     """
 
     async def open_card(self, profile: UserDraft, slug: str) -> ProductCard:
@@ -554,19 +557,59 @@ class PurchaseService:
         return confirmed
 
     async def mark_delivered(self, purchase_id: UUID, *, delivered_url: str) -> Purchase:
-        """Record that the buyer received the link. Called by ``DeliveryService``.
+        """Record that the buyer received the link. See ``record_delivery``.
 
         Raises:
             PurchaseNotFoundError: no purchase with this id.
             ConflictError: the purchase is not paid.
         """
+        recorded = await self.record_delivery(purchase_id, delivered_url=delivered_url)
+        return recorded.purchase
+
+    async def record_delivery(self, purchase_id: UUID, *, delivered_url: str) -> RecordedDelivery:
+        """Record that the buyer received the link, and which milestone that reached.
+
+        Called by ``DeliveryService`` once the link is sent. The one place a
+        loyalty milestone is decided, and only while the programme is on — off,
+        this is the same single ``UPDATE`` it always was, with no lock and no
+        count.
+
+        On, in one transaction: the purchase row is locked and read fresh, then
+        the buyer's progress lock is taken — the same per-buyer key on every
+        path that delivers — then the purchase is marked delivered. Only a
+        genuine ``paid → delivered`` is ranked; a purchase delivered already
+        reaches nothing, however often it is recorded again. The caller sends
+        any notice after this returns, i.e. after the commit.
+
+        Raises:
+            PurchaseNotFoundError: no purchase with this id.
+            ConflictError: the purchase is not paid.
+        """
+        loyalty = self.loyalty if self.loyalty is not None and self.loyalty.enabled else None
+        milestone: int | None = None
         async with self.uow_factory() as uow:
-            delivered = await uow.purchases.mark_delivered(
-                purchase_id,
-                delivered_url=delivered_url,
-            )
+            if loyalty is None:
+                delivered = await uow.purchases.mark_delivered(
+                    purchase_id,
+                    delivered_url=delivered_url,
+                )
+            else:
+                before = await uow.purchases.get_for_update(purchase_id)
+                if before is None:
+                    raise PurchaseNotFoundError(purchase_id=str(purchase_id))
+                await loyalty.lock_progress(uow, before.user_id)
+                delivered = await uow.purchases.mark_delivered(
+                    purchase_id,
+                    delivered_url=delivered_url,
+                )
+                transitioned = (
+                    before.status is PurchaseStatus.PAID
+                    and delivered.status is PurchaseStatus.DELIVERED
+                )
+                if transitioned:
+                    milestone = await loyalty.milestone_reached(uow, delivered.user_id)
         logger.info("purchase_delivered", purchase_id=str(purchase_id))
-        return delivered
+        return RecordedDelivery(purchase=delivered, milestone=milestone)
 
     async def refund(self, purchase_id: UUID) -> Purchase:
         """Revoke access after a refund. Idempotent.

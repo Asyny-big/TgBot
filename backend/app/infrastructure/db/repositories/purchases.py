@@ -75,6 +75,17 @@ class SqlAlchemyPurchaseRepository:
         model = await self._session.get(PurchaseModel, purchase_id)
         return to_purchase(model) if model is not None else None
 
+    async def get_for_update(self, purchase_id: UUID) -> Purchase | None:
+        statement = (
+            select(PurchaseModel)
+            .where(PurchaseModel.id == purchase_id)
+            .with_for_update()
+            # Whatever this session read before, the locked row is the truth.
+            .execution_options(populate_existing=True)
+        )
+        model = (await self._session.execute(statement)).scalar_one_or_none()
+        return to_purchase(model) if model is not None else None
+
     async def get_by_external_id(
         self,
         provider: PaymentProvider,

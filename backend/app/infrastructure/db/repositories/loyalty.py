@@ -23,7 +23,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import ConflictError
 from app.domain.enums import LoyaltyRewardStatus, PurchaseStatus
-from app.domain.loyalty import REWARD_MILESTONES
+from app.domain.loyalty import PROGRESS_LOCK_NAMESPACE, REWARD_MILESTONES
 from app.infrastructure.db.errors import violated_constraint
 from app.infrastructure.db.mappers import to_loyalty_reward
 from app.infrastructure.db.models import LoyaltyRewardModel, PurchaseModel
@@ -168,6 +168,15 @@ class SqlAlchemyLoyaltyRepository:
         )
         released = (await self._session.execute(statement)).scalars().all()
         return tuple(released)
+
+    async def lock_progress(self, user_id: int) -> None:
+        # A transaction-scoped advisory lock: released by the commit or rollback
+        # that ends the delivery, never left behind. One key per buyer, derived
+        # the same way on every path that delivers.
+        key = f"{PROGRESS_LOCK_NAMESPACE}:{user_id}"
+        await self._session.execute(
+            select(func.pg_advisory_xact_lock(func.hashtextextended(key, 0)))
+        )
 
     # ----------------------------------------------------------------- helpers
 

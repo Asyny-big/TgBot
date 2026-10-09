@@ -26,6 +26,11 @@ The milestone-10 reward — one pack for free — has no "applied" state:
 where P is the ``internal`` purchase created in the same transaction. Here
 nothing is being paid for, so the opposite rule holds: if the reward cannot be
 consumed, the pack is not handed over either.
+
+Milestones (5, 10, 15) are announced from the delivery that reaches them. The
+delivery's transaction takes a per-buyer lock and then counts the buyer's
+completed purchases: with every earlier delivery committed, that count is the
+delivery's exact rank — each milestone is reached by exactly one delivery.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ from app.domain.loyalty import (
     DISCOUNT_MILESTONE,
     FREE_PACK_MILESTONE,
     MilestoneRewardState,
+    milestone_of,
     progress_of,
     reward_state,
 )
@@ -261,6 +267,25 @@ class LoyaltyService:
             user_id=purchase.user_id,
             reward_id=str(reward.id),
         )
+
+    # ------------------------------------------------------------- milestones
+
+    async def lock_progress(self, uow: UnitOfWork, user_id: int) -> None:
+        """Serialise this buyer's deliveries until the caller's transaction ends."""
+        await uow.loyalty.lock_progress(user_id)
+
+    async def milestone_reached(self, uow: UnitOfWork, user_id: int) -> int | None:
+        """The milestone the delivery just recorded reaches, if any.
+
+        Only meaningful under ``lock_progress`` and right after a genuine
+        ``paid → delivered`` in the same transaction: the count then includes
+        that delivery and every earlier one, and nothing later.
+        """
+        rank = await uow.loyalty.count_completed(user_id)
+        milestone = milestone_of(rank)
+        if milestone is not None:
+            logger.info("loyalty_milestone_reached", user_id=user_id, milestone=milestone)
+        return milestone
 
     # ----------------------------------------------------------------- shared
 

@@ -264,6 +264,9 @@ class FakePurchaseRepository:
     async def get(self, purchase_id: UUID) -> Purchase | None:
         return self.items.get(purchase_id)
 
+    async def get_for_update(self, purchase_id: UUID) -> Purchase | None:
+        return self.items.get(purchase_id)
+
     async def get_by_external_id(
         self,
         provider: PaymentProvider,
@@ -673,6 +676,8 @@ class FakeLoyaltyRepository:
     def __init__(self, purchases: FakePurchaseRepository) -> None:
         self.purchases = purchases
         self.rewards: list[LoyaltyReward] = []
+        self.progress_locks: list[int] = []
+        """Buyers whose progress lock was taken, in order. One process: no waiting."""
 
     async def count_completed(self, user_id: int) -> int:
         return sum(
@@ -788,6 +793,9 @@ class FakeLoyaltyRepository:
                 )
                 released.append(reward.id)
         return tuple(released)
+
+    async def lock_progress(self, user_id: int) -> None:
+        self.progress_locks.append(user_id)
 
     def _require(self, reward_id: UUID) -> LoyaltyReward:
         for reward in self.rewards:
