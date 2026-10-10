@@ -13,6 +13,7 @@ from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
+from app.infrastructure.telegram.daily import TelegramDailyContentSender
 from app.infrastructure.telegram.gateways import (
     TelegramDeliveryGateway,
     TelegramStarsInvoiceSender,
@@ -23,7 +24,7 @@ from app.infrastructure.telegram.notifications import (
 )
 
 if TYPE_CHECKING:
-    from app.core.config import Settings
+    from app.core.config import DailySettings, Settings
 
 
 def create_bot(settings: Settings) -> Bot:
@@ -32,6 +33,26 @@ def create_bot(settings: Settings) -> Bot:
         token=settings.telegram.bot_token.get_secret_value(),
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+
+
+def create_daily_bot(settings: DailySettings) -> Bot:
+    """The Daily Content bot: its own token, the same HTML default as the shop bot.
+
+    Raises:
+        RuntimeError: ``DAILY_BOT_TOKEN`` is not set.
+    """
+    if settings.bot_token is None:
+        message = "DAILY_BOT_TOKEN is not set"
+        raise RuntimeError(message)
+    return Bot(
+        token=settings.bot_token.get_secret_value(),
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+
+
+def create_daily_sender(bot: Bot) -> TelegramDailyContentSender:
+    """The Daily Content item sender for the Daily bot."""
+    return TelegramDailyContentSender(bot)
 
 
 def create_delivery_gateway(bot: Bot) -> TelegramDeliveryGateway:

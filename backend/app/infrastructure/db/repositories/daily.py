@@ -319,6 +319,24 @@ class SqlAlchemyDailyContentRepository:
         return to_daily_content(model)
 
     async def pick_for(self, user_id: int) -> DailyContent | None:
+        statement = (
+            select(DailyContentModel)
+            .where(*self._available_to(user_id))
+            .order_by(func.random())
+            .limit(1)
+        )
+        model = (await self._session.execute(statement)).scalar_one_or_none()
+        return to_daily_content(model) if model is not None else None
+
+    async def count_available_for(self, user_id: int) -> int:
+        statement = (
+            select(func.count()).select_from(DailyContentModel).where(*self._available_to(user_id))
+        )
+        return int(await self._session.scalar(statement) or 0)
+
+    @staticmethod
+    def _available_to(user_id: int) -> tuple[ColumnElement[bool], ...]:
+        """Active, and neither received by nor held for this buyer."""
         held = (
             select(DailyDeliveryModel.id)
             .where(
@@ -328,17 +346,7 @@ class SqlAlchemyDailyContentRepository:
             )
             .correlate(DailyContentModel)
         )
-        statement = (
-            select(DailyContentModel)
-            .where(
-                DailyContentModel.status == DailyContentStatus.ACTIVE,
-                ~held.exists(),
-            )
-            .order_by(func.random())
-            .limit(1)
-        )
-        model = (await self._session.execute(statement)).scalar_one_or_none()
-        return to_daily_content(model) if model is not None else None
+        return (DailyContentModel.status == DailyContentStatus.ACTIVE, ~held.exists())
 
     async def count_active(self) -> int:
         statement = (
@@ -658,6 +666,17 @@ class SqlAlchemyDailyDeliveryRepository:
         )
         models = (await self._session.execute(statement)).scalars().all()
         return tuple(to_daily_attempt(model) for model in models)
+
+    async def count_sent(self, user_id: int) -> int:
+        statement = (
+            select(func.count())
+            .select_from(DailyDeliveryModel)
+            .where(
+                DailyDeliveryModel.user_id == user_id,
+                DailyDeliveryModel.status == DailyDeliveryStatus.SENT,
+            )
+        )
+        return int(await self._session.scalar(statement) or 0)
 
     # ----------------------------------------------------------------- helpers
 

@@ -431,10 +431,58 @@ class DailySettings(BaseSettings):
     protect_content: bool = True
     """Send items with Telegram's ``protect_content``: no forwarding or saving."""
 
+    # The Daily Content bot is its own Telegram bot, run by its own process.
+    # Every field below is optional here, so the API and the shop bot start
+    # without them; the Daily bot process checks them before it starts.
+    bot_token: SecretStr | None = None
+    bot_username: str | None = None
+    use_webhook: bool = True
+    webhook_base_url: str | None = None
+    webhook_path: str = "/webhook/daily"
+    webhook_secret: SecretStr | None = None
+    bot_host: str = "0.0.0.0"  # noqa: S104 — only reachable through nginx
+    bot_port: int = Field(default=8082, ge=1, le=65535)
+    drop_pending_updates: bool = True
+
     @field_validator("beta_user_ids", "admin_telegram_ids", mode="before")
     @classmethod
     def _split_ids(cls, value: object) -> object:
         return _split_telegram_ids(value)
+
+    @field_validator("bot_token")
+    @classmethod
+    def _validate_bot_token(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not _BOT_TOKEN_RE.match(value.get_secret_value()):
+            msg = "bot_token does not look like a Telegram bot token (<id>:<secret>)"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("bot_username", mode="before")
+    @classmethod
+    def _normalise_bot_username(cls, value: object) -> object:
+        if not isinstance(value, str) or not value.strip():
+            return None if isinstance(value, str) else value
+        candidate = value.strip().removeprefix("@")
+        if not _BOT_USERNAME_RE.match(candidate):
+            msg = "bot_username must be a valid Telegram username without '@'"
+            raise ValueError(msg)
+        return candidate
+
+    @field_validator("webhook_path")
+    @classmethod
+    def _validate_webhook_path(cls, value: str) -> str:
+        if not value.startswith("/"):
+            msg = "webhook_path must start with '/'"
+            raise ValueError(msg)
+        return value.rstrip("/")
+
+    @field_validator("webhook_secret")
+    @classmethod
+    def _validate_webhook_secret(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and len(value.get_secret_value()) < MIN_WEBHOOK_SECRET_LENGTH:
+            msg = f"webhook_secret must be at least {MIN_WEBHOOK_SECRET_LENGTH} characters long"
+            raise ValueError(msg)
+        return value
 
     @field_validator("beta_user_ids", "admin_telegram_ids")
     @classmethod
@@ -468,6 +516,27 @@ class DailySettings(BaseSettings):
     def no_content_recheck(self) -> timedelta:
         """``no_content_recheck_seconds`` as a duration."""
         return timedelta(seconds=self.no_content_recheck_seconds)
+
+    def bot_problems(self) -> tuple[str, ...]:
+        """What keeps the Daily bot process from starting; empty when nothing does."""
+        problems: list[str] = []
+        if self.bot_token is None:
+            problems.append("DAILY_BOT_TOKEN is not set")
+        if not self.bot_username:
+            problems.append("DAILY_BOT_USERNAME is not set")
+        if self.use_webhook and not self.webhook_base_url:
+            problems.append("DAILY_WEBHOOK_BASE_URL is required in webhook mode")
+        if self.use_webhook and self.webhook_secret is None:
+            problems.append("DAILY_WEBHOOK_SECRET is required in webhook mode")
+        return tuple(problems)
+
+    @property
+    def webhook_url(self) -> str:
+        """Absolute URL registered in Telegram via ``setWebhook``."""
+        if self.webhook_base_url is None:
+            message = "webhook_url is only available when webhook mode is configured"
+            raise RuntimeError(message)
+        return f"{self.webhook_base_url.rstrip('/')}{self.webhook_path}"
 
 
 class SecuritySettings(BaseSettings):

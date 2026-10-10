@@ -774,6 +774,47 @@ async def test_cancel_closes_a_dead_attempt_too(store: UnitOfWorkFactory) -> Non
     assert picked is not None  # cancelled: the item is offered again
 
 
+async def _counts(store: UnitOfWorkFactory, user_id: int = BUYER) -> tuple[int, int]:
+    """(received, still available) — what the buyer's status shows."""
+    async with store() as uow:
+        return (
+            await uow.daily_deliveries.count_sent(user_id),
+            await uow.daily_content.count_available_for(user_id),
+        )
+
+
+async def test_the_status_counts_follow_what_was_sent_and_what_is_held(
+    store: UnitOfWorkFactory,
+) -> None:
+    await _subscriber(store)
+    await _subscriber(store, OTHER)
+    items = await _library(store, 4)
+    async with store() as uow:
+        await uow.daily_content.set_status(items[3].id, DailyContentStatus.DISABLED, at=NOW)
+    assert await _counts(store) == (0, 3)
+
+    today = await _open(store)
+    attempt = await _start(store, today, items[0].id)
+    assert await _counts(store) == (0, 2)  # held while it is being sent
+
+    async with store() as uow:
+        await uow.daily_deliveries.finish_sent(attempt.lease_token, at=NOW, telegram_message_id=1)
+    assert await _counts(store) == (1, 2)
+
+    later = NOW + timedelta(days=1)
+    tomorrow = await _open(store, DAY_TWO)
+    refused = await _start(store, tomorrow, items[1].id, now=later)
+    async with store() as uow:
+        await uow.daily_deliveries.finish_failed(
+            refused.lease_token,
+            at=later,
+            outcome=DailyAttemptOutcome.BLOCKED,
+            error="Forbidden: bot was blocked by the user",
+        )
+    assert await _counts(store) == (1, 2)  # a failed send gives the item back
+    assert await _counts(store, OTHER) == (0, 3)  # counts are per buyer
+
+
 # --------------------------------------------------------------------------- #
 # PostgreSQL only: concurrency and the schema's own checks                    #
 # --------------------------------------------------------------------------- #

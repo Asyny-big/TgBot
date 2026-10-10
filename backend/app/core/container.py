@@ -19,6 +19,8 @@ from app.infrastructure.payments.cryptobot import CryptoBotClient
 from app.services.auth import AuthService
 from app.services.bonuses import BonusService
 from app.services.checkout import CheckoutService
+from app.services.daily_delivery import DailyDeliveryService
+from app.services.daily_subscriptions import DailySubscriptionService
 from app.services.delivery import DeliveryService
 from app.services.loyalty import LoyaltyService
 from app.services.pricing import PricingService
@@ -30,6 +32,7 @@ from app.services.stats import StatsService
 if TYPE_CHECKING:
     from app.core.config import Settings
     from app.core.resources import Resources
+    from app.domain.daily import DailyContentSender
     from app.domain.delivery import DeliveryGateway
     from app.domain.loyalty import MilestoneNotifier
     from app.domain.notifications import RewardNotifier
@@ -144,6 +147,22 @@ class Container:
             sale_completion=self.build_bonuses(notifier=notifier),
             milestones=milestone_notifier,
         )
+
+    def build_daily_delivery(self, sender: DailyContentSender) -> DailyDeliveryService:
+        """The Daily Content delivery engine, sending through the Daily bot.
+
+        The Daily bot is its own Telegram bot, created by the process that runs
+        it, so the sender is supplied here rather than stored on the container.
+        """
+        return DailyDeliveryService(
+            uow_factory=self.uow_factory,
+            sender=sender,
+            settings=self.settings.daily,
+        )
+
+    def build_daily_subscriptions(self) -> DailySubscriptionService:
+        """The buyer's side of the Daily Content bot."""
+        return DailySubscriptionService(uow_factory=self.uow_factory, settings=self.settings.daily)
 
     def build_bonuses(self, *, notifier: RewardNotifier | None = None) -> BonusService:
         """The bonus service, optionally able to tell an inviter they earned.

@@ -111,6 +111,10 @@ ignore = [
 "app/infrastructure/telegram/errors.py" = ["PLR0911"]
 # User facing texts are Russian on purpose.
 "app/bot/texts.py" = ["RUF001"]
+# The Daily Content bot follows the same two rules as the shop bot.
+"app/daily_bot/handlers/**" = ["TC001", "TC002", "TC003", "PLR0911"]
+"app/daily_bot/texts.py" = ["RUF001"]
+"tests/test_daily_bot_flow.py" = ["RUF001"]  # asserts the approved texts verbatim
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"

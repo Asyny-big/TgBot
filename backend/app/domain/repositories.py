@@ -653,6 +653,10 @@ class DailyContentRepository(Protocol):
         """How many items take part in deliveries."""
         ...
 
+    async def count_available_for(self, user_id: int) -> int:
+        """How many active items this buyer has neither received nor holds."""
+        ...
+
 
 class DailyDeliveryRepository(Protocol):
     """Daily deliveries: the job and its record in one row.
@@ -805,4 +809,8 @@ class DailyDeliveryRepository(Protocol):
 
     async def attempts_of(self, delivery_id: int) -> tuple[DailyDeliveryAttempt, ...]:
         """Every attempt of a delivery, in order."""
+        ...
+
+    async def count_sent(self, user_id: int) -> int:
+        """How many items this buyer has received."""
         ...

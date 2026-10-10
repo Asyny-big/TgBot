@@ -1240,6 +1240,16 @@ class FakeDailyContentRepository:
     async def count_active(self) -> int:
         return sum(1 for item in self.items.values() if item.is_active)
 
+    async def count_available_for(self, user_id: int) -> int:
+        held = {
+            delivery.content_id
+            for delivery in self.deliveries.items.values()
+            if delivery.user_id == user_id
+            and delivery.content_id is not None
+            and delivery.status in _DAILY_HOLDING
+        }
+        return sum(1 for item in self.items.values() if item.is_active and item.id not in held)
+
     def _refuse_live_duplicate(self, file_unique_id: str, *, keep: int | None) -> None:
         for item in self.items.values():
             live = item.status is not DailyContentStatus.ARCHIVED
@@ -1565,6 +1575,13 @@ class FakeDailyDeliveryRepository:
     async def attempts_of(self, delivery_id: int) -> tuple[DailyDeliveryAttempt, ...]:
         found = [item for item in self.attempts.values() if item.delivery_id == delivery_id]
         return tuple(sorted(found, key=lambda item: item.attempt_no))
+
+    async def count_sent(self, user_id: int) -> int:
+        return sum(
+            1
+            for item in self.items.values()
+            if item.user_id == user_id and item.status is DailyDeliveryStatus.SENT
+        )
 
     def _holder(self, lease_token: UUID) -> DailyDelivery | None:
         for item in self.items.values():
