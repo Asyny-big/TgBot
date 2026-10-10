@@ -574,6 +574,28 @@ class SqlAlchemyDailyDeliveryRepository:
         await self._close_attempt(lease_token, at=at, outcome=outcome, error=error)
         return await self._save(model)
 
+    async def finish_rejected(
+        self,
+        lease_token: UUID,
+        *,
+        at: datetime,
+        outcome: DailyAttemptOutcome,
+        error: str,
+        next_attempt_at: datetime,
+    ) -> DailyDelivery | None:
+        model = await self._locked(DailyDeliveryModel.lease_token == lease_token)
+        if model is None:
+            await self._record_lost_lease(lease_token, at=at, outcome=outcome, error=error)
+            return None
+        model.status = DailyDeliveryStatus.PENDING
+        model.content_id = None
+        model.next_attempt_at = next_attempt_at
+        model.last_outcome = outcome
+        model.last_error = error
+        self._release(model)
+        await self._close_attempt(lease_token, at=at, outcome=outcome, error=error)
+        return await self._save(model)
+
     async def mark_no_content(
         self,
         delivery_id: int,
@@ -591,11 +613,20 @@ class SqlAlchemyDailyDeliveryRepository:
         return await self._save(model)
 
     async def cancel(self, delivery_id: int, *, at: datetime) -> DailyDelivery | None:
-        del at
         model = await self._locked(DailyDeliveryModel.id == delivery_id)
-        if model is None or model.status not in _WAITING_STATUSES:
+        if model is None:
             return None
+        dead_lease = (
+            model.status is DailyDeliveryStatus.SENDING
+            and model.lease_until is not None
+            and model.lease_until <= at
+        )
+        if model.status not in _WAITING_STATUSES and not dead_lease:
+            return None
+        if dead_lease:
+            await self._close_dangling(model, at=at)
         model.status = DailyDeliveryStatus.CANCELLED
+        self._release(model)
         return await self._save(model)
 
     async def expire_overdue(self, *, now: datetime, limit: int = 100) -> int:

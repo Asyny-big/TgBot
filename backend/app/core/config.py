@@ -419,6 +419,18 @@ class DailySettings(BaseSettings):
     max_attempts: int = Field(default=10, ge=1, le=50)
     """Send attempts per delivery before the day is given up."""
 
+    retry_initial_seconds: int = Field(default=30, ge=1, le=3600)
+    """First pause after a temporary failure; it doubles with every attempt."""
+
+    retry_max_seconds: int = Field(default=900, ge=1, le=7200)
+    """Longest pause between two attempts (Telegram's ``retry_after`` may exceed it)."""
+
+    no_content_recheck_seconds: int = Field(default=900, ge=60, le=86400)
+    """How often a buyer with nothing left is looked at again during their day."""
+
+    protect_content: bool = True
+    """Send items with Telegram's ``protect_content``: no forwarding or saving."""
+
     @field_validator("beta_user_ids", "admin_telegram_ids", mode="before")
     @classmethod
     def _split_ids(cls, value: object) -> object:
@@ -436,6 +448,26 @@ class DailySettings(BaseSettings):
     def recovery(self) -> timedelta:
         """``recovery_hours`` as a duration."""
         return timedelta(hours=self.recovery_hours)
+
+    @property
+    def lease(self) -> timedelta:
+        """``lease_seconds`` as a duration."""
+        return timedelta(seconds=self.lease_seconds)
+
+    @property
+    def retry_initial(self) -> timedelta:
+        """``retry_initial_seconds`` as a duration."""
+        return timedelta(seconds=self.retry_initial_seconds)
+
+    @property
+    def retry_max(self) -> timedelta:
+        """``retry_max_seconds`` as a duration."""
+        return timedelta(seconds=self.retry_max_seconds)
+
+    @property
+    def no_content_recheck(self) -> timedelta:
+        """``no_content_recheck_seconds`` as a duration."""
+        return timedelta(seconds=self.no_content_recheck_seconds)
 
 
 class SecuritySettings(BaseSettings):

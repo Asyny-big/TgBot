@@ -28,13 +28,16 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from typing import TYPE_CHECKING, Final
+from enum import StrEnum
+from typing import TYPE_CHECKING, Final, Protocol
 from zoneinfo import ZoneInfo
 
 from app.domain.loyalty import CONTENT_SUGGESTION_MILESTONE, VIP_MILESTONE
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from app.domain.entities import DailyContent
 
 DAILY_TIMEZONE: Final = ZoneInfo("Europe/Moscow")
 """The one timezone of Daily Content: windows, dates and "today" are Moscow's."""
@@ -311,12 +314,77 @@ def summarize_stock(
     )
 
 
+# --------------------------------------------------------------------------- #
+# Sending                                                                     #
+# --------------------------------------------------------------------------- #
+
+
+class DailyContentSender(Protocol):
+    """Port: put one library item in front of a buyer.
+
+    Implementations translate their transport's failures into the
+    ``DailySend*Error`` family, saying whether Telegram *definitely* did not
+    take the message (blocked, rejected) or the outcome is uncertain
+    (transient).
+    """
+
+    async def send(self, chat_id: int, content: DailyContent, *, protect_content: bool) -> int:
+        """Send the item; return the Telegram message id of what the buyer got.
+
+        Raises:
+            DailySendTransientError: a temporary, possibly ambiguous failure.
+            DailySendBlockedError: the buyer cannot receive messages.
+            DailyContentRejectedError: Telegram refused this item.
+            DailySendRejectedError: Telegram refused the message otherwise.
+        """
+        ...
+
+
+class DeliveryStep(StrEnum):
+    """What one pass over a delivery did — for callers, logs and tests."""
+
+    SENT = "sent"
+    """Telegram accepted the item. The day is done."""
+
+    ALREADY_SENT = "already_sent"
+    """The day was done before: nothing was sent again."""
+
+    RETRY_SCHEDULED = "retry_scheduled"
+    """A temporary failure: the same item goes again later."""
+
+    ITEM_RELEASED = "item_released"
+    """Telegram refused the item: it was given back and another one is due."""
+
+    FAILED = "failed"
+    """Given up for the day: refused for good, or out of attempts."""
+
+    BLOCKED = "blocked"
+    """The buyer blocked the bot: the day is closed and the buyer marked."""
+
+    NO_CONTENT = "no_content"
+    """Nothing the buyer has not received yet: looked at again later."""
+
+    CANCELLED = "cancelled"
+    """The buyer paused, blocked the bot or lost access before the send."""
+
+    LEASE_LOST = "lease_lost"
+    """Reported after another worker had taken the delivery over."""
+
+    NOT_DUE = "not_due"
+    """Not attemptable now: somebody else is sending it, or it is not due yet."""
+
+    DISABLED = "disabled"
+    """Daily Content is switched off: nothing was looked at."""
+
+
 __all__ = [
     "DAILY_ACCESS_MILESTONE",
     "DAILY_TIMEZONE",
     "MAX_RECOVERY",
     "MINUTES_PER_DAY",
     "WINDOW_HALF_WIDTH",
+    "DailyContentSender",
+    "DeliveryStep",
     "DeliveryWindow",
     "StockSummary",
     "activation_window",

@@ -282,6 +282,68 @@ class DailyContentDuplicateError(ConflictError):
         self.existing_id = existing_id
 
 
+class DailySendError(AppError):
+    """Telegram did not take a Daily Content item. Subclasses say how sure that is."""
+
+    status_code = HTTPStatus.BAD_GATEWAY
+    code = "daily_send_failed"
+    message = "The Daily Content item was not sent"
+
+
+class DailySendTransientError(DailySendError):
+    """A temporary failure: the network, Telegram's servers, flood control.
+
+    *Ambiguous*: Telegram may have taken the message before the failure was
+    noticed (a timeout). The same item is therefore sent again later — never a
+    different one on the same day. ``retry_after`` is Telegram's own hint.
+    """
+
+    code = "daily_send_transient"
+    message = "Temporary failure sending the Daily Content item"
+
+    def __init__(
+        self,
+        message: str | None = None,
+        /,
+        *,
+        retry_after: float | None = None,
+        **details: object,
+    ) -> None:
+        super().__init__(message, **details)
+        self.retry_after = retry_after
+
+
+class DailySendBlockedError(DailySendError):
+    """The buyer cannot receive anything: the bot is blocked, the chat is gone.
+
+    Definite: nothing was delivered.
+    """
+
+    code = "daily_send_blocked"
+    message = "The buyer cannot receive messages from the bot"
+
+
+class DailyContentRejectedError(DailySendError):
+    """Telegram refused the item itself: an unusable file, an invalid caption.
+
+    Definite: nothing was delivered. The item is taken out of deliveries and
+    another one is sent instead.
+    """
+
+    code = "daily_content_rejected"
+    message = "Telegram refused the Daily Content item"
+
+
+class DailySendRejectedError(DailySendError):
+    """Telegram refused the message for another reason it will not change its mind on.
+
+    Definite: nothing was delivered.
+    """
+
+    code = "daily_send_rejected"
+    message = "Telegram refused the Daily Content message"
+
+
 class DeliveryError(AppError):
     """Base class for delivery transport failures."""
 

@@ -1469,6 +1469,34 @@ class FakeDailyDeliveryRepository:
             )
         )
 
+    async def finish_rejected(
+        self,
+        lease_token: UUID,
+        *,
+        at: datetime,
+        outcome: DailyAttemptOutcome,
+        error: str,
+        next_attempt_at: datetime,
+    ) -> DailyDelivery | None:
+        item = self._holder(lease_token)
+        if item is None:
+            self._lost(lease_token, at=at, outcome=outcome, error=error)
+            return None
+        self._close(lease_token, at=at, outcome=outcome, error=error)
+        return self._store(
+            replace(
+                item,
+                status=DailyDeliveryStatus.PENDING,
+                content_id=None,
+                next_attempt_at=next_attempt_at,
+                last_outcome=outcome,
+                last_error=error,
+                lease_token=None,
+                lease_until=None,
+                updated_at=at,
+            )
+        )
+
     async def mark_no_content(
         self,
         delivery_id: int,
@@ -1491,9 +1519,26 @@ class FakeDailyDeliveryRepository:
 
     async def cancel(self, delivery_id: int, *, at: datetime) -> DailyDelivery | None:
         item = self.items.get(delivery_id)
-        if item is None or item.status not in _DAILY_WAITING:
+        if item is None:
             return None
-        return self._store(replace(item, status=DailyDeliveryStatus.CANCELLED, updated_at=at))
+        dead_lease = (
+            item.status is DailyDeliveryStatus.SENDING
+            and item.lease_until is not None
+            and item.lease_until <= at
+        )
+        if item.status not in _DAILY_WAITING and not dead_lease:
+            return None
+        if dead_lease:
+            item = self._close_dangling(item, at=at)
+        return self._store(
+            replace(
+                item,
+                status=DailyDeliveryStatus.CANCELLED,
+                lease_token=None,
+                lease_until=None,
+                updated_at=at,
+            )
+        )
 
     async def expire_overdue(self, *, now: datetime, limit: int = 100) -> int:
         overdue = sorted(

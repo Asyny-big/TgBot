@@ -716,6 +716,64 @@ async def test_overdue_deliveries_expire_and_give_their_item_back(
     assert picked is not None  # the item it held is offered again
 
 
+async def test_a_definite_refusal_gives_the_item_back_and_keeps_the_day(
+    store: UnitOfWorkFactory,
+) -> None:
+    await _subscriber(store)
+    first_item, second_item = await _library(store, 2)
+    delivery = await _open(store)
+    attempt = await _start(store, delivery, first_item.id)
+    async with store() as uow:
+        reopened = await uow.daily_deliveries.finish_rejected(
+            attempt.lease_token,
+            at=NOW,
+            outcome=DailyAttemptOutcome.PERMANENT,
+            error="Bad Request: something new",
+            next_attempt_at=NOW,
+        )
+        replay = await uow.daily_deliveries.finish_rejected(
+            attempt.lease_token,
+            at=NOW,
+            outcome=DailyAttemptOutcome.PERMANENT,
+            error="again",
+            next_attempt_at=NOW,
+        )
+    assert reopened is not None
+    assert reopened.status is DailyDeliveryStatus.PENDING
+    assert reopened.content_id is None
+    assert reopened.lease_token is None
+    assert reopened.last_outcome is DailyAttemptOutcome.PERMANENT
+    assert replay is None
+
+    # Another item may go out now, and the refused one is offered again later.
+    second = await _start(store, delivery, second_item.id)
+    assert second.attempt_no == 2
+    picked = await _pick(store)
+    assert picked is not None
+    assert picked.id == first_item.id
+    async with store() as uow:
+        first, _ = await uow.daily_deliveries.attempts_of(delivery.id)
+    assert first.outcome is DailyAttemptOutcome.PERMANENT
+
+
+async def test_cancel_closes_a_dead_attempt_too(store: UnitOfWorkFactory) -> None:
+    await _subscriber(store)
+    (item,) = await _library(store, 1)
+    delivery = await _open(store)
+    await _start(store, delivery, item.id)
+    async with store() as uow:
+        live = await uow.daily_deliveries.cancel(delivery.id, at=NOW + LEASE / 2)
+        dead = await uow.daily_deliveries.cancel(delivery.id, at=NOW + LEASE)
+        (attempt,) = await uow.daily_deliveries.attempts_of(delivery.id)
+    assert live is None  # still in flight
+    assert dead is not None
+    assert dead.status is DailyDeliveryStatus.CANCELLED
+    assert dead.lease_token is None
+    assert attempt.outcome is DailyAttemptOutcome.CRASHED
+    picked = await _pick(store)
+    assert picked is not None  # cancelled: the item is offered again
+
+
 # --------------------------------------------------------------------------- #
 # PostgreSQL only: concurrency and the schema's own checks                    #
 # --------------------------------------------------------------------------- #

@@ -757,6 +757,23 @@ class DailyDeliveryRepository(Protocol):
         """
         ...
 
+    async def finish_rejected(
+        self,
+        lease_token: UUID,
+        *,
+        at: datetime,
+        outcome: DailyAttemptOutcome,
+        error: str,
+        next_attempt_at: datetime,
+    ) -> DailyDelivery | None:
+        """Telegram definitely refused the item: give it back, keep the day open.
+
+        Only for a refusal that leaves no doubt the buyer got nothing: the item
+        is released — offered again later — and the next attempt picks another
+        one. ``None`` when the lease was taken over meanwhile.
+        """
+        ...
+
     async def mark_no_content(
         self,
         delivery_id: int,
@@ -772,7 +789,11 @@ class DailyDeliveryRepository(Protocol):
         ...
 
     async def cancel(self, delivery_id: int, *, at: datetime) -> DailyDelivery | None:
-        """Close an open delivery nobody is sending right now; ``None`` otherwise."""
+        """Close an open delivery nobody is sending right now; ``None`` otherwise.
+
+        "Nobody" includes an attempt whose lease ran out: it is closed as
+        ``CRASHED`` together with the delivery.
+        """
         ...
 
     async def expire_overdue(self, *, now: datetime, limit: int = 100) -> int:
