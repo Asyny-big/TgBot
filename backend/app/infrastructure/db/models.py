@@ -8,7 +8,7 @@ recorded once" are constraints, not conventions.
 from __future__ import annotations
 
 import enum
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Final
 from uuid import UUID, uuid4
@@ -17,8 +17,10 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     Enum,
     ForeignKey,
+    Identity,
     Index,
     Integer,
     Numeric,
@@ -28,11 +30,19 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.domain.daily import MINUTES_PER_DAY
 from app.domain.enums import (
     BonusTransactionType,
     Currency,
+    DailyAttemptOutcome,
+    DailyContentKind,
+    DailyContentStatus,
+    DailyDeliveryStatus,
+    DailyDeliveryTrigger,
+    DailySubscriptionStatus,
     LoyaltyRewardKind,
     LoyaltyRewardStatus,
     PaymentProvider,
@@ -85,6 +95,58 @@ _REWARD_STATE_SHAPE_SQL: Final = (
 _REWARD_FREE_PACK_NEVER_APPLIED_SQL: Final = (
     "kind::text <> 'free_pack' OR status::text <> 'applied'"
 )
+
+# Daily Content. These types are created together with the tables that use
+# them, so their literals are safe to use in the checks and index predicates.
+_DAILY_SUBSCRIPTION_SHAPE_SQL: Final = (
+    "(status = 'inactive' AND activated_at IS NULL AND anchor_minute IS NULL "
+    "AND paused_at IS NULL) "
+    "OR (status = 'active' AND activated_at IS NOT NULL AND anchor_minute IS NOT NULL "
+    "AND paused_at IS NULL) "
+    "OR (status = 'paused' AND activated_at IS NOT NULL AND anchor_minute IS NOT NULL "
+    "AND paused_at IS NOT NULL)"
+)
+_DAILY_ANCHOR_RANGE_SQL: Final = (
+    f"anchor_minute IS NULL OR (anchor_minute >= 0 AND anchor_minute < {MINUTES_PER_DAY})"
+)
+_DAILY_ACTIVATION_ORDER_SQL: Final = "activated_at IS NULL OR activated_at >= first_interaction_at"
+_DAILY_SUBSCRIPTION_DELIVERABLE_SQL: Final = "status = 'active' AND blocked_at IS NULL"
+
+_DAILY_CONTENT_SHAPE_SQL: Final = (
+    "(kind = 'text' AND file_id IS NULL AND file_unique_id IS NULL AND body IS NOT NULL) "
+    "OR (kind <> 'text' AND file_id IS NOT NULL AND file_unique_id IS NOT NULL)"
+)
+_DAILY_CONTENT_BODY_LENGTH_SQL: Final = "body IS NULL OR char_length(body) BETWEEN 1 AND 4096"
+_DAILY_CONTENT_SIZES_SQL: Final = (
+    "(file_size IS NULL OR file_size >= 0) AND (duration IS NULL OR duration >= 0) "
+    "AND (width IS NULL OR width >= 0) AND (height IS NULL OR height >= 0)"
+)
+_DAILY_CONTENT_FILE_LIVE_SQL: Final = "file_unique_id IS NOT NULL AND status <> 'archived'"
+
+_DAILY_DELIVERY_SENT_SHAPE_SQL: Final = (
+    "(status = 'sent' AND content_id IS NOT NULL AND sent_at IS NOT NULL "
+    "AND telegram_message_id IS NOT NULL) "
+    "OR (status <> 'sent' AND sent_at IS NULL AND telegram_message_id IS NULL)"
+)
+_DAILY_DELIVERY_LEASE_SHAPE_SQL: Final = (
+    "(status = 'sending' AND content_id IS NOT NULL AND lease_token IS NOT NULL "
+    "AND lease_until IS NOT NULL) "
+    "OR (status <> 'sending' AND lease_token IS NULL AND lease_until IS NULL)"
+)
+_DAILY_DELIVERY_NO_CONTENT_SQL: Final = "status <> 'no_content' OR content_id IS NULL"
+_DAILY_DELIVERY_WINDOW_ORDER_SQL: Final = (
+    "window_opens_at <= scheduled_for AND scheduled_for <= window_closes_at "
+    "AND window_closes_at <= deadline_at"
+)
+# A buyer never holds the same item twice: not in two open deliveries at once,
+# and never again once it was sent. A delivery that failed, expired or was
+# cancelled gives its item back.
+_DAILY_DELIVERY_HOLDS_CONTENT_SQL: Final = (
+    "content_id IS NOT NULL AND status IN ('pending', 'sending', 'sent')"
+)
+_DAILY_DELIVERY_DUE_SQL: Final = "status IN ('pending', 'no_content')"
+
+_DAILY_ATTEMPT_SHAPE_SQL: Final = "(finished_at IS NULL) = (outcome IS NULL)"
 
 #: Operator class that makes ``ILIKE '%term%'`` index-assisted.
 _TRGM_OPS: Final = "gin_trgm_ops"
@@ -488,4 +550,240 @@ class LoyaltyRewardModel(Base):
             unique=True,
             postgresql_where=text("consumed_purchase_id IS NOT NULL"),
         ),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Daily Content                                                               #
+# --------------------------------------------------------------------------- #
+
+
+class DailySubscriptionModel(TimestampMixin, Base):
+    """One buyer's relationship with the Daily Content bot.
+
+    Written the first time the buyer writes to the bot, whatever their access.
+    The activation — the first interaction while they have access — fixes the
+    anchor of their personal daily window and never moves it.
+    """
+
+    __tablename__ = "daily_subscriptions"
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_id", ondelete="RESTRICT"),
+        primary_key=True,
+        autoincrement=False,
+    )
+    status: Mapped[DailySubscriptionStatus] = mapped_column(
+        _enum_column(DailySubscriptionStatus, "daily_subscription_status"),
+        nullable=False,
+        server_default=text("'inactive'"),
+    )
+    first_interaction_at: Mapped[datetime] = mapped_column(nullable=False)
+    activated_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    anchor_minute: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    paused_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    blocked_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    exhausted_notified_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(_DAILY_SUBSCRIPTION_SHAPE_SQL, name="state_shape"),
+        CheckConstraint(_DAILY_ANCHOR_RANGE_SQL, name="anchor_minute_range"),
+        CheckConstraint(_DAILY_ACTIVATION_ORDER_SQL, name="activation_after_first_interaction"),
+        # The planner's question — whose window opens around now? — over the
+        # buyers it may actually send to.
+        Index(
+            "ix_daily_subscriptions_deliverable_anchor",
+            "anchor_minute",
+            postgresql_where=text(_DAILY_SUBSCRIPTION_DELIVERABLE_SQL),
+        ),
+    )
+
+
+class DailyContentModel(TimestampMixin, Base):
+    """One item of the Daily Content library.
+
+    Never physically deleted: archiving is the delete. Every delivery that ever
+    sent the item keeps pointing at it, and that history is what stops a buyer
+    from receiving the same item twice.
+    """
+
+    __tablename__ = "daily_content"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    status: Mapped[DailyContentStatus] = mapped_column(
+        _enum_column(DailyContentStatus, "daily_content_status"),
+        nullable=False,
+        server_default=text("'active'"),
+    )
+    kind: Mapped[DailyContentKind] = mapped_column(
+        _enum_column(DailyContentKind, "daily_content_kind"),
+        nullable=False,
+    )
+    body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """The message text, or the media caption."""
+
+    entities: Mapped[list[dict[str, object]] | None] = mapped_column(JSONB, nullable=True)
+    """Telegram formatting entities of ``body``, exactly as Telegram sent them."""
+
+    file_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_unique_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    file_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    duration: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    added_by: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status_changed_at: Mapped[datetime] = mapped_column(
+        server_default=text("now()"),
+        nullable=False,
+    )
+    status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        # The same Telegram message is one item, however often its update is
+        # delivered to the bot.
+        UniqueConstraint(
+            "source_chat_id",
+            "source_message_id",
+            name="uq_daily_content_source",
+        ),
+        CheckConstraint(_DAILY_CONTENT_SHAPE_SQL, name="kind_shape"),
+        CheckConstraint(_DAILY_CONTENT_BODY_LENGTH_SQL, name="body_length"),
+        CheckConstraint(_DAILY_CONTENT_SIZES_SQL, name="sizes_non_negative"),
+        # The same file is in the library once while it is not archived.
+        Index(
+            "uq_daily_content_file_unique_id",
+            "file_unique_id",
+            unique=True,
+            postgresql_where=text(_DAILY_CONTENT_FILE_LIVE_SQL),
+        ),
+        Index("ix_daily_content_status_created_at", "status", "created_at"),
+    )
+
+
+class DailyDeliveryModel(TimestampMixin, Base):
+    """One buyer's delivery for one Moscow date — and, once sent, their history.
+
+    The row is the job and its record at once: the database decides that a
+    buyer has one delivery per date and never the same item twice, and the
+    lease columns decide who may send it right now.
+    """
+
+    __tablename__ = "daily_deliveries"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("daily_subscriptions.user_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    delivery_date: Mapped[date] = mapped_column(Date, nullable=False)
+    trigger: Mapped[DailyDeliveryTrigger] = mapped_column(
+        _enum_column(DailyDeliveryTrigger, "daily_delivery_trigger"),
+        nullable=False,
+    )
+    status: Mapped[DailyDeliveryStatus] = mapped_column(
+        _enum_column(DailyDeliveryStatus, "daily_delivery_status"),
+        nullable=False,
+        server_default=text("'pending'"),
+    )
+    content_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("daily_content.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    scheduled_for: Mapped[datetime] = mapped_column(nullable=False)
+    window_opens_at: Mapped[datetime] = mapped_column(nullable=False)
+    window_closes_at: Mapped[datetime] = mapped_column(nullable=False)
+    deadline_at: Mapped[datetime] = mapped_column(nullable=False)
+    next_attempt_at: Mapped[datetime] = mapped_column(nullable=False)
+    attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("0"))
+    lease_token: Mapped[UUID | None] = mapped_column(nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_outcome: Mapped[DailyAttemptOutcome | None] = mapped_column(
+        _enum_column(DailyAttemptOutcome, "daily_attempt_outcome"),
+        nullable=True,
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        # At most one delivery per buyer and date, whatever runs twice.
+        UniqueConstraint("user_id", "delivery_date", name="uq_daily_deliveries_user_date"),
+        CheckConstraint(_DAILY_DELIVERY_SENT_SHAPE_SQL, name="sent_shape"),
+        CheckConstraint(_DAILY_DELIVERY_LEASE_SHAPE_SQL, name="lease_shape"),
+        CheckConstraint(_DAILY_DELIVERY_NO_CONTENT_SQL, name="no_content_shape"),
+        CheckConstraint(_DAILY_DELIVERY_WINDOW_ORDER_SQL, name="window_order"),
+        CheckConstraint("attempts >= 0", name="attempts_non_negative"),
+        Index(
+            "uq_daily_deliveries_user_content",
+            "user_id",
+            "content_id",
+            unique=True,
+            postgresql_where=text(_DAILY_DELIVERY_HOLDS_CONTENT_SQL),
+        ),
+        Index(
+            "ix_daily_deliveries_due",
+            "next_attempt_at",
+            postgresql_where=text(_DAILY_DELIVERY_DUE_SQL),
+        ),
+        Index(
+            "ix_daily_deliveries_lease_until",
+            "lease_until",
+            postgresql_where=text("status = 'sending'"),
+        ),
+        Index("ix_daily_deliveries_user_id_status", "user_id", "status"),
+        Index(
+            "ix_daily_deliveries_content_id_sent",
+            "content_id",
+            postgresql_where=text("status = 'sent'"),
+        ),
+        Index("ix_daily_deliveries_sent_at", "sent_at"),
+        Index("ix_daily_deliveries_delivery_date_status", "delivery_date", "status"),
+    )
+
+
+class DailyDeliveryAttemptModel(Base):
+    """One attempt to send a delivery's item — the delivery's own history."""
+
+    __tablename__ = "daily_delivery_attempts"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    delivery_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("daily_deliveries.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    attempt_no: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    lease_token: Mapped[UUID] = mapped_column(nullable=False)
+    content_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("daily_content.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    started_at: Mapped[datetime] = mapped_column(nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    outcome: Mapped[DailyAttemptOutcome | None] = mapped_column(
+        _enum_column(DailyAttemptOutcome, "daily_attempt_outcome"),
+        nullable=True,
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retry_after_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "delivery_id",
+            "attempt_no",
+            name="uq_daily_delivery_attempts_delivery_attempt",
+        ),
+        UniqueConstraint("lease_token", name="uq_daily_delivery_attempts_lease_token"),
+        CheckConstraint("attempt_no >= 1", name="attempt_no_positive"),
+        CheckConstraint(_DAILY_ATTEMPT_SHAPE_SQL, name="outcome_shape"),
+        Index("ix_daily_delivery_attempts_finished_at", "finished_at"),
     )

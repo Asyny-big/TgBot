@@ -6,6 +6,11 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from app.infrastructure.db.repositories.bonuses import SqlAlchemyBonusRepository
+from app.infrastructure.db.repositories.daily import (
+    SqlAlchemyDailyContentRepository,
+    SqlAlchemyDailyDeliveryRepository,
+    SqlAlchemyDailySubscriptionRepository,
+)
 from app.infrastructure.db.repositories.loyalty import SqlAlchemyLoyaltyRepository
 from app.infrastructure.db.repositories.products import SqlAlchemyProductRepository
 from app.infrastructure.db.repositories.purchases import SqlAlchemyPurchaseRepository
@@ -33,6 +38,9 @@ class SqlAlchemyUnitOfWork:
         self._bonuses = SqlAlchemyBonusRepository(session)
         self._stats = SqlAlchemyStatsRepository(session)
         self._loyalty = SqlAlchemyLoyaltyRepository(session)
+        self._daily_subscriptions = SqlAlchemyDailySubscriptionRepository(session)
+        self._daily_content = SqlAlchemyDailyContentRepository(session)
+        self._daily_deliveries = SqlAlchemyDailyDeliveryRepository(session)
 
     @property
     def session(self) -> AsyncSession:
@@ -65,6 +73,18 @@ class SqlAlchemyUnitOfWork:
     @property
     def loyalty(self) -> SqlAlchemyLoyaltyRepository:
         return self._loyalty
+
+    @property
+    def daily_subscriptions(self) -> SqlAlchemyDailySubscriptionRepository:
+        return self._daily_subscriptions
+
+    @property
+    def daily_content(self) -> SqlAlchemyDailyContentRepository:
+        return self._daily_content
+
+    @property
+    def daily_deliveries(self) -> SqlAlchemyDailyDeliveryRepository:
+        return self._daily_deliveries
 
     async def commit(self) -> None:
         await self._session.commit()

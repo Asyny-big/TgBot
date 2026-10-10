@@ -15,6 +15,9 @@ if TYPE_CHECKING:
 
     from app.domain.repositories import (
         BonusRepository,
+        DailyContentRepository,
+        DailyDeliveryRepository,
+        DailySubscriptionRepository,
         LoyaltyRepository,
         ProductRepository,
         PurchaseRepository,
@@ -60,6 +63,21 @@ class UnitOfWork(Protocol):
     @property
     def loyalty(self) -> LoyaltyRepository:
         """Loyalty progress and rewards repository bound to this transaction."""
+        ...
+
+    @property
+    def daily_subscriptions(self) -> DailySubscriptionRepository:
+        """Daily Content subscriptions bound to this transaction."""
+        ...
+
+    @property
+    def daily_content(self) -> DailyContentRepository:
+        """The Daily Content library bound to this transaction."""
+        ...
+
+    @property
+    def daily_deliveries(self) -> DailyDeliveryRepository:
+        """Daily Content deliveries bound to this transaction."""
         ...
 
     async def commit(self) -> None:

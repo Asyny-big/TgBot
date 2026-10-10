@@ -271,6 +271,17 @@ class FreePackPendingCheckoutError(ConflictError):
     message = "An unpaid invoice for this product exists"
 
 
+class DailyContentDuplicateError(ConflictError):
+    """The same file is already in the Daily Content library."""
+
+    code = "daily_content_duplicate"
+    message = "This file is already in the library"
+
+    def __init__(self, *, existing_id: int, **details: object) -> None:
+        super().__init__(existing_id=existing_id, **details)
+        self.existing_id = existing_id
+
+
 class DeliveryError(AppError):
     """Base class for delivery transport failures."""
 

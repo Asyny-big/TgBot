@@ -37,6 +37,23 @@ if TYPE_CHECKING:
     from app.domain.entities import LoyaltyReward
 
 
+def completed_purchase_condition() -> ColumnElement[bool]:
+    """The one definition of a *completed* purchase, as SQL.
+
+    Delivered, or refunded after it had been delivered. Loyalty progress, its
+    milestones, VIP and Daily Content access are all read off this expression
+    — never off a counter of their own — so no two features can ever disagree
+    about how many purchases a buyer has completed.
+    """
+    return or_(
+        PurchaseModel.status == PurchaseStatus.DELIVERED,
+        and_(
+            PurchaseModel.status == PurchaseStatus.REFUNDED,
+            PurchaseModel.delivered_at.is_not(None),
+        ),
+    )
+
+
 class SqlAlchemyLoyaltyRepository:
     """Loyalty progress and rewards, in PostgreSQL."""
 
@@ -49,16 +66,7 @@ class SqlAlchemyLoyaltyRepository:
         statement = (
             select(func.count())
             .select_from(PurchaseModel)
-            .where(
-                PurchaseModel.user_id == user_id,
-                or_(
-                    PurchaseModel.status == PurchaseStatus.DELIVERED,
-                    and_(
-                        PurchaseModel.status == PurchaseStatus.REFUNDED,
-                        PurchaseModel.delivered_at.is_not(None),
-                    ),
-                ),
-            )
+            .where(PurchaseModel.user_id == user_id, completed_purchase_condition())
         )
         return int(await self._session.scalar(statement) or 0)
 
@@ -223,4 +231,4 @@ class SqlAlchemyLoyaltyRepository:
         return to_loyalty_reward(model)
 
 
-__all__ = ["SqlAlchemyLoyaltyRepository"]
+__all__ = ["SqlAlchemyLoyaltyRepository", "completed_purchase_condition"]

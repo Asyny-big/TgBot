@@ -48,6 +48,10 @@ ALEMBIC_DSN_ENV_VAR = "ALEMBIC_DATABASE_DSN"
 # Order matters only for readability: TRUNCATE ... CASCADE handles the foreign
 # keys. The referral tables come first because they reference both of the others.
 TABLES_TO_TRUNCATE = (
+    "daily_delivery_attempts",
+    "daily_deliveries",
+    "daily_content",
+    "daily_subscriptions",
     "loyalty_rewards",
     "bonus_transactions",
     "referrals",

@@ -9,6 +9,7 @@ runtime failure in the middle of a payment flow.
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
@@ -380,6 +381,63 @@ class LoyaltySettings(BaseSettings):
     enabled: bool = False
 
 
+def _split_telegram_ids(value: object) -> object:
+    """``"1, 2,3"`` → ``(1, 2, 3)``; anything else is left for pydantic to judge."""
+    if isinstance(value, str):
+        return tuple(int(part) for part in value.replace(" ", "").split(",") if part)
+    return value
+
+
+class DailySettings(BaseSettings):
+    """Daily Content bot: the switch, the people it trusts, and delivery timing.
+
+    Off by default. While it is off no item is planned or sent and no buyer is
+    activated; the schema is in place either way.
+    """
+
+    model_config = _settings_config("DAILY_")
+
+    enabled: bool = False
+
+    beta_user_ids: Annotated[tuple[int, ...], NoDecode] = ()
+    """When set, only these buyers are activated and served: a staged launch."""
+
+    admin_telegram_ids: Annotated[tuple[int, ...], NoDecode] = ()
+    """The owner's Telegram accounts: they add content and receive alerts."""
+
+    recovery_hours: int = Field(default=12, ge=1, le=22)
+    """How long after the window's centre a missed delivery may still go out."""
+
+    lease_seconds: int = Field(default=300, ge=60, le=3600)
+    """How long one send attempt owns its delivery before it counts as dead.
+
+    Must comfortably exceed the Telegram request timeout: a lease that runs
+    out while the request is still in flight lets a second worker send the
+    same item again.
+    """
+
+    max_attempts: int = Field(default=10, ge=1, le=50)
+    """Send attempts per delivery before the day is given up."""
+
+    @field_validator("beta_user_ids", "admin_telegram_ids", mode="before")
+    @classmethod
+    def _split_ids(cls, value: object) -> object:
+        return _split_telegram_ids(value)
+
+    @field_validator("beta_user_ids", "admin_telegram_ids")
+    @classmethod
+    def _positive_ids(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        if any(telegram_id <= 0 for telegram_id in value):
+            msg = "Telegram ids must be positive integers"
+            raise ValueError(msg)
+        return value
+
+    @property
+    def recovery(self) -> timedelta:
+        """``recovery_hours`` as a duration."""
+        return timedelta(hours=self.recovery_hours)
+
+
 class SecuritySettings(BaseSettings):
     """Admin authentication and browser-facing security policy."""
 
@@ -440,6 +498,7 @@ class Settings(BaseModel):
     delivery: DeliverySettings
     referral: ReferralSettings
     loyalty: LoyaltySettings
+    daily: DailySettings
     security: SecuritySettings
 
 
@@ -461,5 +520,6 @@ def get_settings() -> Settings:
         delivery=_load(DeliverySettings),
         referral=_load(ReferralSettings),
         loyalty=_load(LoyaltySettings),
+        daily=_load(DailySettings),
         security=_load(SecuritySettings),
     )

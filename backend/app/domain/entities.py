@@ -12,9 +12,16 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Final
 
 from app.domain.enums import (
+    DAILY_DELIVERY_OPEN_STATUSES,
     PAYABLE_PROVIDERS,
     BonusTransactionType,
     Currency,
+    DailyAttemptOutcome,
+    DailyContentKind,
+    DailyContentStatus,
+    DailyDeliveryStatus,
+    DailyDeliveryTrigger,
+    DailySubscriptionStatus,
     LoyaltyRewardKind,
     LoyaltyRewardStatus,
     PaymentProvider,
@@ -22,7 +29,7 @@ from app.domain.enums import (
 )
 
 if TYPE_CHECKING:
-    from datetime import datetime
+    from datetime import date, datetime
     from uuid import UUID
 
 _NO_MONEY: Final = Decimal(0)
@@ -272,3 +279,142 @@ class ReferralRecord:
     referred: User
     referred_purchase_count: int
     reward_total: int
+
+
+# ------------------------------------------------------------- Daily Content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailySubscription:
+    """One buyer's relationship with the Daily Content bot.
+
+    Created the first time the buyer writes to the bot. Activated — and given
+    their personal delivery window — the first time they write while they have
+    access; until then it stays inactive and nothing is ever sent.
+    """
+
+    user_id: int
+    status: DailySubscriptionStatus
+    first_interaction_at: datetime
+    activated_at: datetime | None = None
+    anchor_minute: int | None = None
+    """Minute of the day (Europe/Moscow) of the activation: the centre of the
+    buyer's daily window, which runs one hour either side of it."""
+
+    paused_at: datetime | None = None
+    blocked_at: datetime | None = None
+    """Set while the buyer has the bot blocked; cleared when they unblock it."""
+
+    exhausted_notified_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    @property
+    def is_blocked(self) -> bool:
+        """Whether the buyer currently has the bot blocked."""
+        return self.blocked_at is not None
+
+    @property
+    def receives_deliveries(self) -> bool:
+        """Activated, not paused and not blocked: due an item every day."""
+        return self.status is DailySubscriptionStatus.ACTIVE and not self.is_blocked
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailyContent:
+    """One item of the shared Daily Content library.
+
+    Stored as Telegram identifiers, never as a downloaded file: ``file_id`` is
+    what the bot sends again, ``file_unique_id`` recognises the same file
+    forwarded twice, and the source chat/message records where the owner
+    added it from.
+    """
+
+    id: int
+    status: DailyContentStatus
+    kind: DailyContentKind
+    source_chat_id: int
+    source_message_id: int
+    added_by: int
+    created_at: datetime
+    updated_at: datetime
+    status_changed_at: datetime
+    body: str | None = None
+    """The message text, or the media caption."""
+
+    entities: tuple[dict[str, object], ...] = ()
+    """Telegram formatting entities of ``body``, as Telegram sent them."""
+
+    file_id: str | None = None
+    file_unique_id: str | None = None
+    file_size: int | None = None
+    file_name: str | None = None
+    mime_type: str | None = None
+    duration: int | None = None
+    width: int | None = None
+    height: int | None = None
+    status_reason: str | None = None
+
+    @property
+    def is_active(self) -> bool:
+        """Whether the item takes part in deliveries."""
+        return self.status is DailyContentStatus.ACTIVE
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailyDelivery:
+    """One buyer's Daily Content delivery for one day.
+
+    ``delivery_date`` is the Europe/Moscow date of the window's centre, and a
+    buyer has at most one delivery per date — whatever retries, restarts or
+    concurrent workers happen. Once an item is chosen for a delivery it never
+    changes: a retry sends the same item again.
+    """
+
+    id: int
+    user_id: int
+    delivery_date: date
+    trigger: DailyDeliveryTrigger
+    status: DailyDeliveryStatus
+    scheduled_for: datetime
+    window_opens_at: datetime
+    window_closes_at: datetime
+    deadline_at: datetime
+    next_attempt_at: datetime
+    attempts: int
+    created_at: datetime
+    updated_at: datetime
+    content_id: int | None = None
+    lease_token: UUID | None = None
+    lease_until: datetime | None = None
+    sent_at: datetime | None = None
+    telegram_message_id: int | None = None
+    last_outcome: DailyAttemptOutcome | None = None
+    last_error: str | None = None
+
+    @property
+    def is_open(self) -> bool:
+        """Whether this delivery can still be sent or closed."""
+        return self.status in DAILY_DELIVERY_OPEN_STATUSES
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailyDeliveryAttempt:
+    """One attempt to send a delivery's item, for the delivery history.
+
+    ``finished_at`` is empty while the attempt runs — and stays empty if the
+    process dies mid-send, until the lease runs out and it is closed as
+    ``CRASHED``.
+    """
+
+    id: int
+    delivery_id: int
+    attempt_no: int
+    lease_token: UUID
+    started_at: datetime
+    content_id: int | None = None
+    finished_at: datetime | None = None
+    outcome: DailyAttemptOutcome | None = None
+    error: str | None = None
+    retry_after_seconds: int | None = None
+    telegram_message_id: int | None = None

@@ -39,7 +39,12 @@ FREE_PACK_MILESTONE: Final = 10
 """Completed purchases that earn one free pack."""
 
 VIP_MILESTONE: Final = 15
-"""Completed purchases from which a buyer is VIP. A status, not a reward."""
+"""Completed purchases from which a buyer is VIP. A status, not a reward.
+
+VIP opens the Daily Content bot."""
+
+CONTENT_SUGGESTION_MILESTONE: Final = 20
+"""Completed purchases from which a buyer may suggest Daily Content."""
 
 REWARD_MILESTONES: Final[dict[int, LoyaltyRewardKind]] = {
     DISCOUNT_MILESTONE: LoyaltyRewardKind.DISCOUNT_50_PERCENT,
@@ -348,6 +353,7 @@ class MilestoneNotifier(Protocol):
 
 __all__ = [
     "ANNOUNCED_MILESTONES",
+    "CONTENT_SUGGESTION_MILESTONE",
     "DISCOUNT_MILESTONE",
     "FREE_PACK_INVOICE_PREFIX",
     "FREE_PACK_MILESTONE",

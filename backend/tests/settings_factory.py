@@ -13,6 +13,7 @@ from app.core.config import (
     AppSettings,
     BotSettings,
     CryptoBotSettings,
+    DailySettings,
     DeliverySettings,
     Environment,
     LogFormat,
@@ -69,6 +70,8 @@ def build_settings(**overrides: Any) -> Settings:
         # Off, as in production until it is switched on: the loyalty
         # programme's tests enable it explicitly.
         "loyalty": LoyaltySettings(enabled=False),
+        # Off too: Daily Content's tests enable it explicitly.
+        "daily": DailySettings(enabled=False),
         "security": SecuritySettings(
             jwt_secret=SecretStr("a" * 48),
             admin_username="administrator",

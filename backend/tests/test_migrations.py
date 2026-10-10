@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
 SEED_USER = 990000001
 PENDING_CRYPTO_INDEX = "uq_purchases_user_product_pending_crypto"
+HEAD = "0006"
 
 
 def test_migrations_match_the_orm_metadata(migrated_database: str) -> None:
@@ -86,7 +87,15 @@ _SEED_BUYER_AND_PRODUCT = (
 def _remove_seed(dsn: str) -> None:
     """Delete everything seeded for ``SEED_USER``, whatever the schema revision."""
     has_rewards = _scalar(dsn, "SELECT to_regclass('loyalty_rewards') IS NOT NULL")
+    has_daily = _scalar(dsn, "SELECT to_regclass('daily_subscriptions') IS NOT NULL")
+    daily = [
+        "DELETE FROM daily_delivery_attempts",
+        "DELETE FROM daily_deliveries",
+        "DELETE FROM daily_content",
+        "DELETE FROM daily_subscriptions",
+    ]
     statements = [
+        *(daily if has_daily else []),
         *(["DELETE FROM loyalty_rewards WHERE user_id = :user_id"] if has_rewards else []),
         "DELETE FROM purchases WHERE user_id = :user_id",
         "DELETE FROM products WHERE slug LIKE 'seed%'",
@@ -174,7 +183,7 @@ def test_0004_refuses_to_run_over_duplicate_pending_crypto_checkouts(
 def test_0005_upgrade_adds_the_internal_provider_and_the_loyalty_schema(
     migrated_database: str,
 ) -> None:
-    assert _version(migrated_database) == "0005"
+    assert _version(migrated_database) == HEAD
     assert _provider_values(migrated_database) == ["stars", "crypto", "internal"]
     assert _purchase_checks(migrated_database) >= {
         "ck_purchases_amount_matches_provider",
@@ -251,7 +260,7 @@ def test_0005_downgrade_on_an_empty_database_restores_0004_exactly(
         in (after["pending_crypto_index"])
     )
     # …and the round trip leaves the schema matching the models again.
-    assert _version(migrated_database) == "0005"
+    assert _version(migrated_database) == HEAD
     command.check(config)
 
 
@@ -326,7 +335,8 @@ def test_0005_downgrade_refuses_while_history_depends_on_it(
         with pytest.raises(RuntimeError, match=reason):
             command.downgrade(config, "0004")
 
-        assert _version(migrated_database) == "0005"
+        # One transaction: the refusal also undid the 0006 step before it.
+        assert _version(migrated_database) == HEAD
         assert _provider_values(migrated_database) == ["stars", "crypto", "internal"]
         assert "ck_purchases_amount_matches_provider" in _purchase_checks(migrated_database)
         assert _scalar(migrated_database, "SELECT to_regclass('loyalty_rewards') IS NOT NULL")
@@ -337,6 +347,125 @@ def test_0005_downgrade_refuses_while_history_depends_on_it(
             user_id=SEED_USER,
         )
         assert kept == sum(1 for statement in seed if "INTO purchases" in statement)
+    finally:
+        _remove_seed(migrated_database)
+    command.check(config)
+
+
+# --------------------------------------------------------------------------- #
+# 0006 — Daily Content core                                                   #
+# --------------------------------------------------------------------------- #
+
+_DAILY_TABLES = (
+    "daily_subscriptions",
+    "daily_content",
+    "daily_deliveries",
+    "daily_delivery_attempts",
+)
+_DAILY_TYPES = (
+    "daily_subscription_status",
+    "daily_content_status",
+    "daily_content_kind",
+    "daily_delivery_trigger",
+    "daily_delivery_status",
+    "daily_attempt_outcome",
+)
+_DAILY_INDEXES = (
+    "uq_daily_deliveries_user_date",
+    "uq_daily_deliveries_user_content",
+    "uq_daily_content_source",
+    "uq_daily_content_file_unique_id",
+    "uq_daily_delivery_attempts_lease_token",
+    "ix_daily_deliveries_due",
+    "ix_daily_deliveries_lease_until",
+    "ix_daily_subscriptions_deliverable_anchor",
+)
+
+
+def _daily_tables(dsn: str) -> int:
+    names = ",".join(f"'{name}'" for name in _DAILY_TABLES)
+    return int(
+        _scalar(
+            dsn,
+            f"SELECT count(*) FROM pg_tables WHERE tablename IN ({names})",  # noqa: S608 — fixed names
+        )
+    )
+
+
+def _daily_types(dsn: str) -> int:
+    names = ",".join(f"'{name}'" for name in _DAILY_TYPES)
+    return int(
+        _scalar(dsn, f"SELECT count(*) FROM pg_type WHERE typname IN ({names})")  # noqa: S608
+    )
+
+
+def test_0006_upgrade_creates_the_daily_content_schema(migrated_database: str) -> None:
+    assert _version(migrated_database) == HEAD
+    assert _daily_tables(migrated_database) == len(_DAILY_TABLES)
+    assert _daily_types(migrated_database) == len(_DAILY_TYPES)
+    for index in _DAILY_INDEXES:
+        assert _index_definition(migrated_database, index) is not None, index
+    holds = _index_definition(migrated_database, "uq_daily_deliveries_user_content")
+    assert holds is not None
+    assert "'pending'" in holds
+    assert "'sent'" in holds
+    assert "'failed'" not in holds
+
+
+def test_0006_downgrade_on_an_empty_schema_removes_it_and_comes_back(
+    migrated_database: str,
+) -> None:
+    config = alembic_config(migrated_database)
+    command.downgrade(config, "0005")
+    try:
+        assert _version(migrated_database) == "0005"
+        assert _daily_tables(migrated_database) == 0
+        assert _daily_types(migrated_database) == 0
+        # Loyalty, below it, is untouched.
+        assert _scalar(migrated_database, "SELECT to_regclass('loyalty_rewards') IS NOT NULL")
+    finally:
+        command.upgrade(config, "head")
+    assert _daily_tables(migrated_database) == len(_DAILY_TABLES)
+    command.check(config)
+
+
+_DAILY_SUBSCRIPTION = (
+    "INSERT INTO daily_subscriptions (user_id, status, first_interaction_at) "
+    "VALUES (:user_id, 'inactive', now())"
+)
+_DAILY_CONTENT = (
+    "INSERT INTO daily_content (kind, body, source_chat_id, source_message_id, added_by) "
+    "VALUES ('text', 'Seeded', 1, 1, 1)"
+)
+
+
+@pytest.mark.parametrize(
+    ("seed", "reason"),
+    [
+        ((_DAILY_SUBSCRIPTION,), "daily_subscriptions"),
+        ((_DAILY_CONTENT,), "daily_content"),
+    ],
+    ids=["subscription", "library-item"],
+)
+def test_0006_downgrade_refuses_while_daily_history_exists(
+    migrated_database: str,
+    seed: tuple[str, ...],
+    reason: str,
+) -> None:
+    """Refuse, and change nothing: the library and the history exist nowhere else."""
+    config = alembic_config(migrated_database)
+    _sql(
+        migrated_database,
+        *_SEED_BUYER_AND_PRODUCT,
+        *seed,
+        user_id=SEED_USER,
+        slug="seeddaily",
+    )
+    try:
+        with pytest.raises(RuntimeError, match=reason):
+            command.downgrade(config, "0005")
+        assert _version(migrated_database) == HEAD
+        assert _daily_tables(migrated_database) == len(_DAILY_TABLES)
     finally:
         _remove_seed(migrated_database)
     command.check(config)

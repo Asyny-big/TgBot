@@ -11,11 +11,13 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from datetime import datetime
+    from datetime import date, datetime
     from uuid import UUID
 
     from app.domain.commands import (
         BonusTransactionDraft,
+        DailyContentDraft,
+        DailyDeliveryDraft,
         ProductDraft,
         ProductUpdate,
         PurchaseDraft,
@@ -24,6 +26,10 @@ if TYPE_CHECKING:
     )
     from app.domain.entities import (
         BonusTransaction,
+        DailyContent,
+        DailyDelivery,
+        DailyDeliveryAttempt,
+        DailySubscription,
         LoyaltyReward,
         Product,
         Purchase,
@@ -32,7 +38,13 @@ if TYPE_CHECKING:
         ReferralRecord,
         User,
     )
-    from app.domain.enums import BonusTransactionType, PaymentProvider, PurchaseStatus
+    from app.domain.enums import (
+        BonusTransactionType,
+        DailyAttemptOutcome,
+        DailyContentStatus,
+        PaymentProvider,
+        PurchaseStatus,
+    )
     from app.domain.pagination import (
         Page,
         PageRequest,
@@ -512,4 +524,264 @@ class StatsRepository(Protocol):
 
     async def recent_purchases(self, *, limit: int = 10) -> tuple[PurchaseRecord, ...]:
         """Latest paid or delivered purchases, newest first."""
+        ...
+
+
+# ------------------------------------------------------------- Daily Content
+
+
+class DailySubscriptionRepository(Protocol):
+    """Buyers' relationship with the Daily Content bot.
+
+    Every change starts from the row locked ``FOR UPDATE`` and checks the
+    status it starts from, so two updates of one buyer cannot interleave.
+    """
+
+    async def get(self, user_id: int) -> DailySubscription | None:
+        """The buyer's subscription, or ``None`` if they never wrote to the bot."""
+        ...
+
+    async def lock(self, user_id: int) -> DailySubscription | None:
+        """The subscription, locked until the transaction ends."""
+        ...
+
+    async def record_first_interaction(self, user_id: int, *, at: datetime) -> DailySubscription:
+        """Create an inactive subscription unless one exists, and return it locked.
+
+        Idempotent: a second call keeps the first interaction's time.
+        """
+        ...
+
+    async def activate(
+        self,
+        user_id: int,
+        *,
+        at: datetime,
+        anchor_minute: int,
+    ) -> DailySubscription:
+        """``inactive → active``, fixing the window's anchor for good.
+
+        Raises:
+            ConflictError: no subscription, or it is not inactive.
+        """
+        ...
+
+    async def pause(self, user_id: int, *, at: datetime) -> DailySubscription:
+        """``active → paused``. Idempotent for a paused one.
+
+        Raises:
+            ConflictError: no subscription, or it was never activated.
+        """
+        ...
+
+    async def resume(self, user_id: int, *, at: datetime) -> DailySubscription:
+        """``paused → active``. Idempotent for an active one.
+
+        Raises:
+            ConflictError: no subscription, or it was never activated.
+        """
+        ...
+
+    async def mark_blocked(self, user_id: int, *, at: datetime) -> DailySubscription | None:
+        """Record that the buyer blocked the bot; keeps the first time. ``None``: no row."""
+        ...
+
+    async def mark_unblocked(self, user_id: int) -> DailySubscription | None:
+        """Clear the block. ``None``: no row."""
+        ...
+
+    async def deliverable(
+        self,
+        *,
+        min_completed: int,
+        after_user_id: int | None = None,
+        limit: int = 100,
+        only: tuple[int, ...] = (),
+    ) -> tuple[DailySubscription, ...]:
+        """Active, unblocked subscriptions of buyers who have the access.
+
+        "Have the access" is the loyalty programme's own count of completed
+        purchases — the same predicate, never a counter of its own. Ordered by
+        buyer for keyset paging; ``only`` restricts it to those buyers.
+        """
+        ...
+
+
+class DailyContentRepository(Protocol):
+    """The Daily Content library. Items are archived, never deleted."""
+
+    async def add(self, draft: DailyContentDraft) -> tuple[DailyContent, bool]:
+        """Add an item; return it and whether this call created it.
+
+        Idempotent per source message: the same message added again returns the
+        item it already became.
+
+        Raises:
+            DailyContentDuplicateError: the same file is already in the library.
+        """
+        ...
+
+    async def get(self, content_id: int) -> DailyContent | None:
+        """One item, or ``None``."""
+        ...
+
+    async def set_status(
+        self,
+        content_id: int,
+        status: DailyContentStatus,
+        *,
+        at: datetime,
+        reason: str | None = None,
+    ) -> DailyContent:
+        """Move an item between active, disabled and archived. Idempotent.
+
+        Raises:
+            ConflictError: no such item.
+            DailyContentDuplicateError: bringing it back would put the same
+                file into the library twice.
+        """
+        ...
+
+    async def pick_for(self, user_id: int) -> DailyContent | None:
+        """A random active item this buyer has neither received nor holds.
+
+        ``None`` when the buyer has received everything there is.
+        """
+        ...
+
+    async def count_active(self) -> int:
+        """How many items take part in deliveries."""
+        ...
+
+
+class DailyDeliveryRepository(Protocol):
+    """Daily deliveries: the job and its record in one row.
+
+    Who may send a delivery right now is decided by a lease: a random token
+    stored on the row together with its expiry. Every outcome is written
+    against that token, so an attempt whose lease was taken over can never
+    overwrite what its successor did.
+    """
+
+    async def open(self, draft: DailyDeliveryDraft) -> DailyDelivery | None:
+        """Create the buyer's delivery for the window's date.
+
+        ``None`` when they already have one for that date: the database keeps
+        it to one per buyer and date, however many planners run.
+        """
+        ...
+
+    async def get(self, delivery_id: int) -> DailyDelivery | None:
+        """One delivery, or ``None``."""
+        ...
+
+    async def for_date(self, user_id: int, delivery_date: date) -> DailyDelivery | None:
+        """The buyer's delivery for a date, or ``None``."""
+        ...
+
+    async def lock(self, delivery_id: int) -> DailyDelivery | None:
+        """One delivery, locked until the transaction ends."""
+        ...
+
+    async def lock_due(self, *, now: datetime, limit: int) -> tuple[DailyDelivery, ...]:
+        """Lock the deliveries that may be attempted now, skipping locked ones.
+
+        Pending and no-content deliveries whose next attempt is due, and sending
+        ones whose lease ran out — the attempt died — all before their deadline.
+        """
+        ...
+
+    async def start_attempt(
+        self,
+        delivery_id: int,
+        *,
+        content_id: int,
+        now: datetime,
+        lease_until: datetime,
+    ) -> DailyDeliveryAttempt:
+        """Take the lease and record a new attempt for this item.
+
+        The item is fixed by the first attempt: later ones must name the same
+        item. An attempt left unfinished by a dead process is closed as
+        ``CRASHED`` first. The caller holds the row's lock.
+
+        Raises:
+            ConflictError: the delivery cannot be attempted (closed, or its
+                lease is still live), or the item is held for this buyer
+                elsewhere, or a retry names a different item.
+        """
+        ...
+
+    async def finish_sent(
+        self,
+        lease_token: UUID,
+        *,
+        at: datetime,
+        telegram_message_id: int,
+    ) -> DailyDelivery | None:
+        """The attempt holding ``lease_token`` was accepted by Telegram.
+
+        ``None`` when the lease was taken over meanwhile: the attempt is
+        recorded as ``LEASE_LOST`` and the delivery is left to its new owner.
+        """
+        ...
+
+    async def finish_retry(  # noqa: PLR0913 — one outcome, this many facts
+        self,
+        lease_token: UUID,
+        *,
+        at: datetime,
+        outcome: DailyAttemptOutcome,
+        error: str,
+        next_attempt_at: datetime,
+        retry_after_seconds: int | None = None,
+    ) -> DailyDelivery | None:
+        """The attempt failed for now: release the lease, retry the same item later.
+
+        ``None`` when the lease was taken over meanwhile (see ``finish_sent``).
+        """
+        ...
+
+    async def finish_failed(
+        self,
+        lease_token: UUID,
+        *,
+        at: datetime,
+        outcome: DailyAttemptOutcome,
+        error: str,
+    ) -> DailyDelivery | None:
+        """The attempt failed for good: the delivery is closed as failed.
+
+        The item is given back: it was not delivered. ``None`` when the lease
+        was taken over meanwhile.
+        """
+        ...
+
+    async def mark_no_content(
+        self,
+        delivery_id: int,
+        *,
+        at: datetime,
+        recheck_at: datetime,
+    ) -> DailyDelivery:
+        """Nothing left to send this buyer: look again at ``recheck_at``.
+
+        Raises:
+            ConflictError: the delivery holds an item or is not open.
+        """
+        ...
+
+    async def cancel(self, delivery_id: int, *, at: datetime) -> DailyDelivery | None:
+        """Close an open delivery nobody is sending right now; ``None`` otherwise."""
+        ...
+
+    async def expire_overdue(self, *, now: datetime, limit: int = 100) -> int:
+        """Close open deliveries whose deadline passed; return how many.
+
+        An attempt still unfinished there is closed as ``CRASHED``.
+        """
+        ...
+
+    async def attempts_of(self, delivery_id: int) -> tuple[DailyDeliveryAttempt, ...]:
+        """Every attempt of a delivery, in order."""
         ...

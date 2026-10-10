@@ -161,3 +161,119 @@ class LoyaltyRewardStatus(StrEnum):
     AVAILABLE = "available"
     APPLIED = "applied"
     CONSUMED = "consumed"
+
+
+# ------------------------------------------------------------- Daily Content
+
+
+class DailySubscriptionStatus(StrEnum):
+    """Where a buyer stands with the Daily Content bot.
+
+    ``INACTIVE`` — wrote to the bot, but had no access then: nothing is sent.
+    ``ACTIVE`` — activated; receives one item a day in their own window.
+    ``PAUSED`` — activated, but asked not to receive anything for now.
+
+    A blocked bot is not a status of its own: it is a fact recorded next to
+    whichever of these applies, and unblocking simply clears it.
+    """
+
+    INACTIVE = "inactive"
+    ACTIVE = "active"
+    PAUSED = "paused"
+
+
+class DailyContentStatus(StrEnum):
+    """Whether an item of the library takes part in deliveries.
+
+    ``ACTIVE`` — offered to everybody who has not received it yet.
+    ``DISABLED`` — taken out of deliveries for now, by the owner or because
+        Telegram no longer accepts its file; can be enabled again.
+    ``ARCHIVED`` — the soft delete: hidden from deliveries and from the
+        default library view. Rows are never physically deleted — they are
+        part of every buyer's delivery history.
+    """
+
+    ACTIVE = "active"
+    DISABLED = "disabled"
+    ARCHIVED = "archived"
+
+
+class DailyContentKind(StrEnum):
+    """The kinds of Telegram message the library can hold and send again."""
+
+    TEXT = "text"
+    PHOTO = "photo"
+    VIDEO = "video"
+    ANIMATION = "animation"
+    DOCUMENT = "document"
+    AUDIO = "audio"
+    VOICE = "voice"
+    VIDEO_NOTE = "video_note"
+
+
+class DailyDeliveryTrigger(StrEnum):
+    """Why a delivery exists.
+
+    ``ACTIVATION`` — the item sent right away when the buyer first used the bot;
+        it is that day's delivery.
+    ``SCHEDULE`` — the daily item, due in the buyer's personal window.
+    """
+
+    ACTIVATION = "activation"
+    SCHEDULE = "schedule"
+
+
+class DailyDeliveryStatus(StrEnum):
+    """Lifecycle of one buyer's delivery for one day.
+
+    ``PENDING`` — waiting for its first or next attempt.
+    ``SENDING`` — an attempt holds the row under a lease right now. A lease
+        that runs out means the attempt died: the row is taken over and the
+        *same* item is sent again.
+    ``SENT`` — Telegram accepted the item. Final.
+    ``NO_CONTENT`` — nothing left that the buyer has not received; looked at
+        again until the day's deadline, in case new items arrive.
+    ``FAILED`` — Telegram refused for good (the bot is blocked, the chat is
+        gone, the item is unusable). Final.
+    ``EXPIRED`` — the day's deadline passed without a successful send. Final.
+    ``CANCELLED`` — the buyer paused or lost access before it was sent. Final.
+    """
+
+    PENDING = "pending"
+    SENDING = "sending"
+    SENT = "sent"
+    NO_CONTENT = "no_content"
+    FAILED = "failed"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+
+
+DAILY_DELIVERY_OPEN_STATUSES: tuple[DailyDeliveryStatus, ...] = (
+    DailyDeliveryStatus.PENDING,
+    DailyDeliveryStatus.SENDING,
+    DailyDeliveryStatus.NO_CONTENT,
+)
+"""Statuses a delivery can still leave on its way to being sent or closed."""
+
+
+class DailyAttemptOutcome(StrEnum):
+    """How one send attempt ended.
+
+    ``SENT`` — Telegram accepted the message.
+    ``TRANSIENT`` — a temporary failure (network, 5xx, flood control): retried.
+    ``PERMANENT`` — Telegram refused for a reason a retry cannot fix.
+    ``BLOCKED`` — the buyer blocked the bot or deleted their account.
+    ``CONTENT_INVALID`` — Telegram no longer accepts the item's file.
+    ``LEASE_LOST`` — the attempt finished after its lease had been taken over;
+        its result was not applied to the delivery.
+    ``CRASHED`` — found unfinished when its lease ran out: the process died
+        mid-send. Telegram may or may not have accepted the message.
+    """
+
+    SENT = "sent"
+    TRANSIENT = "transient"
+    PERMANENT = "permanent"
+    BLOCKED = "blocked"
+    CONTENT_INVALID = "content_invalid"
+    LEASE_LOST = "lease_lost"
+    CRASHED = "crashed"

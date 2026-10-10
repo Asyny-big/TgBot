@@ -10,11 +10,15 @@ from app.core.exceptions import InvalidPriceError
 from app.domain.patch import UNSET, Maybe, is_set
 
 if TYPE_CHECKING:
+    from datetime import datetime
     from uuid import UUID
 
+    from app.domain.daily import DeliveryWindow
     from app.domain.enums import (
         BonusTransactionType,
         Currency,
+        DailyContentKind,
+        DailyDeliveryTrigger,
         PaymentProvider,
         PurchaseStatus,
     )
@@ -125,3 +129,41 @@ class BonusTransactionDraft:
     referral_id: UUID | None = None
     purchase_id: UUID | None = None
     stars_per_usdt: Decimal | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailyContentDraft:
+    """A Telegram message the owner added to the Daily Content library.
+
+    Identifiers only — the file itself stays in Telegram and is sent again by
+    its ``file_id``. ``source_chat_id``/``source_message_id`` name the owner's
+    message, so the same update delivered twice adds one item.
+    """
+
+    kind: DailyContentKind
+    source_chat_id: int
+    source_message_id: int
+    added_by: int
+    body: str | None = None
+    """The message text, or the media caption."""
+
+    entities: tuple[dict[str, object], ...] = ()
+    file_id: str | None = None
+    file_unique_id: str | None = None
+    file_size: int | None = None
+    file_name: str | None = None
+    mime_type: str | None = None
+    duration: int | None = None
+    width: int | None = None
+    height: int | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailyDeliveryDraft:
+    """One buyer's delivery for one day, as it is planned."""
+
+    user_id: int
+    trigger: DailyDeliveryTrigger
+    window: DeliveryWindow
+    first_attempt_at: datetime
+    """When the first attempt is due — inside ``window``."""
