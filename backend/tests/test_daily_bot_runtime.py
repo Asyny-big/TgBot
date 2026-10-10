@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from aiogram import Dispatcher
+from aiogram.methods import SetMyCommands
+from aiogram.types import BotCommandScopeAllPrivateChats, BotCommandScopeChat
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from pydantic import SecretStr, ValidationError
@@ -17,8 +19,15 @@ from pydantic import SecretStr, ValidationError
 from app import __version__
 from app.bot.webhooks import HEALTH_PATH
 from app.core.config import DailySettings
-from app.daily_bot.runner import ALLOWED_UPDATES, build_webhook_app, configuration_problems
+from app.daily_bot.middlewares import DailyThrottleMiddleware
+from app.daily_bot.runner import (
+    ALLOWED_UPDATES,
+    _publish_commands,
+    build_webhook_app,
+    configuration_problems,
+)
 from tests.daily_bot_harness import DAILY_BOT_TOKEN, DailyRecordingBot, buyer, message_update
+from tests.fakes import FakeLockManager
 from tests.settings_factory import VALID_BOT_TOKEN, build_settings
 
 if TYPE_CHECKING:
@@ -127,6 +136,65 @@ def test_the_webhook_app_refuses_to_exist_without_a_secret() -> None:
 def test_the_bot_hears_about_being_blocked() -> None:
     assert "my_chat_member" in ALLOWED_UPDATES
     assert "message" in ALLOWED_UPDATES
+
+
+def test_the_owners_intake_needs_no_other_updates() -> None:
+    """No ``edited_message``: an edited caption does not change the library."""
+    assert ALLOWED_UPDATES == ("message", "callback_query", "my_chat_member")
+
+
+async def test_the_owner_gets_a_command_menu_of_their_own() -> None:
+    bot = DailyRecordingBot()
+
+    await _publish_commands(bot, (101, 202))
+    await bot.session.close()
+
+    calls = [call for call in bot.calls if isinstance(call, SetMyCommands)]
+    assert [type(call.scope) for call in calls] == [
+        BotCommandScopeAllPrivateChats,
+        BotCommandScopeChat,
+        BotCommandScopeChat,
+    ]
+    assert [getattr(call.scope, "chat_id", None) for call in calls[1:]] == [101, 202]
+    assert [command.command for command in calls[1].commands] == ["stats", "item", "help"]
+
+
+# --------------------------------------------------------------------------- #
+# Throttling                                                                  #
+# --------------------------------------------------------------------------- #
+
+OWNER = 7001
+BUYER = 7002
+
+
+async def _through_throttle(user_id: int, locks: FakeLockManager) -> bool:
+    """Whether a message from ``user_id`` reached its handler."""
+    middleware = DailyThrottleMiddleware(locks, window_seconds=1.5, exempt=frozenset({OWNER}))
+    reached: list[bool] = []
+
+    async def handler(event: Any, data: dict[str, Any]) -> None:
+        reached.append(True)
+
+    update = message_update("x", user=buyer(user_id))
+    assert update.message is not None
+    await middleware(handler, update.message, {"event_from_user": buyer(user_id)})
+    return bool(reached)
+
+
+async def test_the_owner_passes_before_any_lock_is_taken() -> None:
+    locks = FakeLockManager()
+    locks.busy_keys = {f"daily-throttle:{OWNER}", f"daily-throttle:{BUYER}"}
+
+    assert await _through_throttle(OWNER, locks)
+    assert locks.acquired == []  # never even asked for
+    assert not await _through_throttle(BUYER, locks)
+
+
+async def test_a_buyer_is_throttled_as_before() -> None:
+    locks = FakeLockManager()
+
+    assert await _through_throttle(BUYER, locks)
+    assert [key for key, _ in locks.acquired] == [f"daily-throttle:{BUYER}"]
 
 
 # --------------------------------------------------------------------------- #

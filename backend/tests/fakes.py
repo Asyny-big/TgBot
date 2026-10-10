@@ -33,6 +33,7 @@ from app.core.exceptions import (
 )
 from app.domain.bonuses import BonusPolicy, reward_bonuses
 from app.domain.commands import BonusTransactionDraft
+from app.domain.daily import LibraryStats
 from app.domain.entities import (
     BonusTransaction,
     DailyContent,
@@ -53,6 +54,7 @@ from app.domain.enums import (
     BonusTransactionType,
     Currency,
     DailyAttemptOutcome,
+    DailyContentKind,
     DailyContentStatus,
     DailyDeliveryStatus,
     DailySubscriptionStatus,
@@ -66,7 +68,7 @@ from app.domain.patch import is_set
 from app.domain.stats import RevenueSummary, StatsPeriod
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Callable, Sequence
     from datetime import date
 
     from app.domain.commands import (
@@ -1164,6 +1166,8 @@ class FakeDailyContentRepository:
                 return item, False
         if draft.file_unique_id is not None:
             self._refuse_live_duplicate(draft.file_unique_id, keep=None)
+        if draft.kind is DailyContentKind.TEXT and draft.body is not None:
+            self._refuse_live_text_twin(draft.body, keep=None)
         now = datetime.now(UTC)
         item = DailyContent(
             id=self._next_id,
@@ -1193,6 +1197,29 @@ class FakeDailyContentRepository:
     async def get(self, content_id: int) -> DailyContent | None:
         return self.items.get(content_id)
 
+    async def lock(self, content_id: int) -> DailyContent | None:
+        return self.items.get(content_id)
+
+    async def find_by_file(self, file_unique_id: str) -> DailyContent | None:
+        return self._find(lambda item: item.file_unique_id == file_unique_id)
+
+    async def find_by_text(self, body: str) -> DailyContent | None:
+        return self._find(lambda item: item.kind is DailyContentKind.TEXT and item.body == body)
+
+    async def stats(self) -> LibraryStats:
+        by_status = dict.fromkeys(DailyContentStatus, 0)
+        active_by_kind: dict[DailyContentKind, int] = {}
+        for item in self.items.values():
+            by_status[item.status] += 1
+            if item.is_active:
+                active_by_kind[item.kind] = active_by_kind.get(item.kind, 0) + 1
+        return LibraryStats(
+            active=by_status[DailyContentStatus.ACTIVE],
+            disabled=by_status[DailyContentStatus.DISABLED],
+            archived=by_status[DailyContentStatus.ARCHIVED],
+            active_by_kind=active_by_kind,
+        )
+
     async def set_status(
         self,
         content_id: int,
@@ -1213,6 +1240,8 @@ class FakeDailyContentRepository:
         )
         if leaving_archive and current.file_unique_id is not None:
             self._refuse_live_duplicate(current.file_unique_id, keep=content_id)
+        if leaving_archive and current.kind is DailyContentKind.TEXT and current.body is not None:
+            self._refuse_live_text_twin(current.body, keep=content_id)
         updated = replace(
             current,
             status=status,
@@ -1255,6 +1284,21 @@ class FakeDailyContentRepository:
             live = item.status is not DailyContentStatus.ARCHIVED
             if item.id != keep and live and item.file_unique_id == file_unique_id:
                 raise DailyContentDuplicateError(existing_id=item.id)
+
+    def _refuse_live_text_twin(self, body: str, *, keep: int | None) -> None:
+        for content_id in sorted(self.items):
+            item = self.items[content_id]
+            live = item.status is not DailyContentStatus.ARCHIVED
+            text = item.kind is DailyContentKind.TEXT
+            if content_id != keep and live and text and item.body == body:
+                raise DailyContentDuplicateError(existing_id=content_id)
+
+    def _find(self, matches: Callable[[DailyContent], bool]) -> DailyContent | None:
+        found = [item for item in self.items.values() if matches(item)]
+        live = [item for item in found if item.status is not DailyContentStatus.ARCHIVED]
+        if live:
+            return live[0]
+        return max(found, key=lambda item: item.id) if found else None
 
 
 class FakeDailyDeliveryRepository:

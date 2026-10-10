@@ -26,12 +26,13 @@ that number is their stock in days.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, Protocol
 from zoneinfo import ZoneInfo
 
+from app.domain.enums import DailyContentKind, DailyContentStatus
 from app.domain.loyalty import CONTENT_SUGGESTION_MILESTONE, VIP_MILESTONE
 
 if TYPE_CHECKING:
@@ -315,6 +316,84 @@ def summarize_stock(
 
 
 # --------------------------------------------------------------------------- #
+# The library                                                                 #
+# --------------------------------------------------------------------------- #
+
+
+class LibraryAction(StrEnum):
+    """What the owner can do to an item of the library. Nothing deletes."""
+
+    DISABLE = "disable"
+    """Take it out of deliveries for now."""
+
+    ENABLE = "enable"
+    """Put a disabled item back into deliveries."""
+
+    ARCHIVE = "archive"
+    """The soft delete: out of deliveries and out of the way."""
+
+    UNDO = "undo"
+    """Archive an item the owner has just added by mistake."""
+
+    RESTORE = "restore"
+    """Bring an archived item back into deliveries."""
+
+
+_TRANSITIONS: Final[
+    dict[LibraryAction, tuple[frozenset[DailyContentStatus], DailyContentStatus]]
+] = {
+    LibraryAction.DISABLE: (frozenset({DailyContentStatus.ACTIVE}), DailyContentStatus.DISABLED),
+    LibraryAction.ENABLE: (frozenset({DailyContentStatus.DISABLED}), DailyContentStatus.ACTIVE),
+    LibraryAction.ARCHIVE: (
+        frozenset({DailyContentStatus.ACTIVE, DailyContentStatus.DISABLED}),
+        DailyContentStatus.ARCHIVED,
+    ),
+    LibraryAction.UNDO: (
+        frozenset({DailyContentStatus.ACTIVE, DailyContentStatus.DISABLED}),
+        DailyContentStatus.ARCHIVED,
+    ),
+    LibraryAction.RESTORE: (frozenset({DailyContentStatus.ARCHIVED}), DailyContentStatus.ACTIVE),
+}
+"""For each action: the statuses it may start from, and the one it leads to."""
+
+
+def next_content_status(
+    current: DailyContentStatus,
+    action: LibraryAction,
+) -> DailyContentStatus | None:
+    """The status ``action`` takes an item in ``current`` to; ``None`` when not allowed.
+
+    An item already where the action leads stays there (``current`` comes
+    back): pressing a button twice changes nothing. An archived item comes
+    back only through ``RESTORE``, which is where the duplicate check lives.
+    """
+    allowed_from, target = _TRANSITIONS[action]
+    if current is target:
+        return current
+    return target if current in allowed_from else None
+
+
+def owner_reason(action: LibraryAction) -> str:
+    """``status_reason`` of an owner's change; the delivery engine writes its own."""
+    return f"owner:{action.value}"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LibraryStats:
+    """How many items the library holds, by status, and the active ones by kind."""
+
+    active: int = 0
+    disabled: int = 0
+    archived: int = 0
+    active_by_kind: dict[DailyContentKind, int] = field(default_factory=dict)
+
+    @property
+    def total(self) -> int:
+        """Every item ever added: nothing is deleted."""
+        return self.active + self.disabled + self.archived
+
+
+# --------------------------------------------------------------------------- #
 # Sending                                                                     #
 # --------------------------------------------------------------------------- #
 
@@ -386,6 +465,8 @@ __all__ = [
     "DailyContentSender",
     "DeliveryStep",
     "DeliveryWindow",
+    "LibraryAction",
+    "LibraryStats",
     "StockSummary",
     "activation_window",
     "anchor_minute_of",
@@ -394,6 +475,8 @@ __all__ = [
     "due_window",
     "has_daily_access",
     "moscow_date_of",
+    "next_content_status",
+    "owner_reason",
     "percentile",
     "remaining_content",
     "retry_delay",

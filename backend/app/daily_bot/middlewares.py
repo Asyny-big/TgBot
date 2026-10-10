@@ -3,6 +3,9 @@
 Log context comes from the shop bot's own ``LogContextMiddleware``, used as is.
 Throttling is the same TTL-bounded Redis lock, under a key of its own: a buyer
 writing to both bots at once must not be slowed down by the other one.
+
+The owner is never throttled: an album arrives as several messages within the
+same instant, and every one of them must reach the library.
 """
 
 from __future__ import annotations
@@ -19,8 +22,10 @@ from app.daily_bot.texts import TOO_FAST
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from app.daily_bot.albums import AlbumCollector
     from app.domain.locks import LockManager
     from app.services.daily_delivery import DailyDeliveryService
+    from app.services.daily_library import DailyLibraryService
     from app.services.daily_subscriptions import DailySubscriptionService
 
 logger = get_logger(__name__)
@@ -37,9 +42,13 @@ class DailyServices:
         *,
         subscriptions: DailySubscriptionService,
         delivery: DailyDeliveryService,
+        library: DailyLibraryService,
+        albums: AlbumCollector,
     ) -> None:
         self.subscriptions = subscriptions
         self.delivery = delivery
+        self.library = library
+        self.albums = albums
 
 
 class DailyServicesMiddleware(BaseMiddleware):
@@ -59,11 +68,22 @@ class DailyServicesMiddleware(BaseMiddleware):
 
 
 class DailyThrottleMiddleware(BaseMiddleware):
-    """One in-flight message per buyer; the rest are answered "too fast"."""
+    """One in-flight message per buyer; the rest are answered "too fast".
 
-    def __init__(self, locks: LockManager, *, window_seconds: float) -> None:
+    ``exempt`` accounts — the owner's — pass straight through, before any lock
+    is taken.
+    """
+
+    def __init__(
+        self,
+        locks: LockManager,
+        *,
+        window_seconds: float,
+        exempt: frozenset[int] = frozenset(),
+    ) -> None:
         self._locks = locks
         self._window = window_seconds
+        self._exempt = exempt
 
     async def __call__(
         self,
@@ -72,7 +92,7 @@ class DailyThrottleMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         user = data.get("event_from_user")
-        if user is None or self._window <= 0:
+        if user is None or self._window <= 0 or user.id in self._exempt:
             return await handler(event, data)
         key = _THROTTLE_KEY_TEMPLATE.format(user_id=user.id)
         try:

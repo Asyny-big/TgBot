@@ -22,8 +22,10 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import ConflictError, DailyContentDuplicateError
+from app.domain.daily import LibraryStats
 from app.domain.enums import (
     DailyAttemptOutcome,
+    DailyContentKind,
     DailyContentStatus,
     DailyDeliveryStatus,
     DailySubscriptionStatus,
@@ -61,6 +63,8 @@ if TYPE_CHECKING:
 
 _CONTENT_SOURCE_CONSTRAINT = "uq_daily_content_source"
 _CONTENT_FILE_CONSTRAINT = "uq_daily_content_file_unique_id"
+_TEXT_LOCK_NAMESPACE = "daily-content-text"
+"""Advisory lock keys for text items: no index can hold a whole text unique."""
 _DELIVERY_DATE_CONSTRAINT = "uq_daily_deliveries_user_date"
 _DELIVERY_CONTENT_CONSTRAINT = "uq_daily_deliveries_user_content"
 
@@ -231,6 +235,19 @@ class SqlAlchemyDailyContentRepository:
         self._session = session
 
     async def add(self, draft: DailyContentDraft) -> tuple[DailyContent, bool]:
+        if draft.kind is DailyContentKind.TEXT and draft.body is not None:
+            # Texts have no unique index; the lock queues the same text, so the
+            # second one sees the first once it is committed.
+            await self._lock_text(draft.body)
+            twin = await self._live_text_twin(
+                draft.body,
+                other_than=and_(
+                    DailyContentModel.source_chat_id == draft.source_chat_id,
+                    DailyContentModel.source_message_id == draft.source_message_id,
+                ),
+            )
+            if twin is not None:
+                raise DailyContentDuplicateError(existing_id=twin)
         statement = (
             insert(DailyContentModel)
             .values(
@@ -282,6 +299,38 @@ class SqlAlchemyDailyContentRepository:
         model = await self._session.get(DailyContentModel, content_id)
         return to_daily_content(model) if model is not None else None
 
+    async def lock(self, content_id: int) -> DailyContent | None:
+        model = await self._locked_item(content_id)
+        return to_daily_content(model) if model is not None else None
+
+    async def find_by_file(self, file_unique_id: str) -> DailyContent | None:
+        return await self._find(DailyContentModel.file_unique_id == file_unique_id)
+
+    async def find_by_text(self, body: str) -> DailyContent | None:
+        return await self._find(
+            DailyContentModel.kind == DailyContentKind.TEXT,
+            DailyContentModel.body == body,
+        )
+
+    async def stats(self) -> LibraryStats:
+        statement = select(
+            DailyContentModel.status,
+            DailyContentModel.kind,
+            func.count(),
+        ).group_by(DailyContentModel.status, DailyContentModel.kind)
+        by_status = dict.fromkeys(DailyContentStatus, 0)
+        active_by_kind: dict[DailyContentKind, int] = {}
+        for status, kind, count in (await self._session.execute(statement)).tuples():
+            by_status[status] += count
+            if status is DailyContentStatus.ACTIVE:
+                active_by_kind[kind] = count
+        return LibraryStats(
+            active=by_status[DailyContentStatus.ACTIVE],
+            disabled=by_status[DailyContentStatus.DISABLED],
+            archived=by_status[DailyContentStatus.ARCHIVED],
+            active_by_kind=active_by_kind,
+        )
+
     async def set_status(
         self,
         content_id: int,
@@ -290,18 +339,24 @@ class SqlAlchemyDailyContentRepository:
         at: datetime,
         reason: str | None = None,
     ) -> DailyContent:
-        statement = (
-            select(DailyContentModel)
-            .where(DailyContentModel.id == content_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        model = (await self._session.execute(statement)).scalar_one_or_none()
+        model = await self._locked_item(content_id)
         if model is None:
             message = "No such Daily Content item"
             raise ConflictError(message, content_id=content_id)
         if model.status is status:
             return to_daily_content(model)
+        leaving_archive = (
+            model.status is DailyContentStatus.ARCHIVED
+            and status is not DailyContentStatus.ARCHIVED
+        )
+        if leaving_archive and model.kind is DailyContentKind.TEXT and model.body is not None:
+            await self._lock_text(model.body)
+            twin = await self._live_text_twin(
+                model.body,
+                other_than=DailyContentModel.id == content_id,
+            )
+            if twin is not None:
+                raise DailyContentDuplicateError(existing_id=twin)
         # Read before the savepoint: a refused flush expires the model's fields.
         file_unique_id = model.file_unique_id
         try:
@@ -355,6 +410,51 @@ class SqlAlchemyDailyContentRepository:
             .where(DailyContentModel.status == DailyContentStatus.ACTIVE)
         )
         return int(await self._session.scalar(statement) or 0)
+
+    async def _locked_item(self, content_id: int) -> DailyContentModel | None:
+        statement = (
+            select(DailyContentModel)
+            .where(DailyContentModel.id == content_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return (await self._session.execute(statement)).scalar_one_or_none()
+
+    async def _find(self, *conditions: ColumnElement[bool]) -> DailyContent | None:
+        statement = (
+            select(DailyContentModel)
+            .where(*conditions)
+            # The live item first (there is at most one), else the newest archived.
+            .order_by(
+                (DailyContentModel.status == DailyContentStatus.ARCHIVED).asc(),
+                DailyContentModel.id.desc(),
+            )
+            .limit(1)
+        )
+        model = (await self._session.execute(statement)).scalar_one_or_none()
+        return to_daily_content(model) if model is not None else None
+
+    async def _lock_text(self, body: str) -> None:
+        # Transaction-scoped: released by the commit or rollback, never left behind.
+        key = f"{_TEXT_LOCK_NAMESPACE}:{body}"
+        await self._session.execute(
+            select(func.pg_advisory_xact_lock(func.hashtextextended(key, 0)))
+        )
+
+    async def _live_text_twin(self, body: str, *, other_than: ColumnElement[bool]) -> int | None:
+        """A text item with exactly this body, not archived, other than the one named."""
+        statement = (
+            select(DailyContentModel.id)
+            .where(
+                DailyContentModel.kind == DailyContentKind.TEXT,
+                DailyContentModel.body == body,
+                DailyContentModel.status != DailyContentStatus.ARCHIVED,
+                ~other_than,
+            )
+            .order_by(DailyContentModel.id)
+            .limit(1)
+        )
+        return (await self._session.execute(statement)).scalar_one_or_none()
 
     async def _duplicate_of(self, file_unique_id: str) -> DailyContentDuplicateError:
         statement = select(DailyContentModel.id).where(

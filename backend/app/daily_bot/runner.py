@@ -20,7 +20,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats
+from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
@@ -31,7 +31,7 @@ from app.core.container import Container
 from app.core.logging import configure_logging, get_logger
 from app.core.resources import Resources
 from app.daily_bot.factory import create_daily_dispatcher, create_daily_services
-from app.daily_bot.texts import COMMANDS
+from app.daily_bot.texts import COMMANDS, OWNER_COMMANDS
 from app.infrastructure.telegram.factory import create_daily_bot
 
 if TYPE_CHECKING:
@@ -140,13 +140,21 @@ async def run_webhook(runtime: DailyRuntime, stop: asyncio.Event) -> None:
         await runner.cleanup()
 
 
-async def _publish_commands(bot: Bot) -> None:
-    """The bot's command menu. Cosmetic: a failure is logged, not raised."""
+async def _publish_commands(bot: Bot, owner_ids: tuple[int, ...]) -> None:
+    """The command menus: the buyers', and the owner's in the owner's own chats.
+
+    Cosmetic: a failure is logged, not raised.
+    """
     try:
         await bot.set_my_commands(
             [BotCommand(command=command, description=text) for command, text in COMMANDS],
             scope=BotCommandScopeAllPrivateChats(),
         )
+        for owner_id in owner_ids:
+            await bot.set_my_commands(
+                [BotCommand(command=command, description=text) for command, text in OWNER_COMMANDS],
+                scope=BotCommandScopeChat(chat_id=owner_id),
+            )
     except Exception as error:
         logger.warning("daily_bot_commands_not_published", error=str(error))
 
@@ -177,7 +185,7 @@ async def main() -> None:
 
     checks = await resources.check()
     logger.info("daily_bot_dependencies_checked", enabled=settings.daily.enabled, **checks)
-    await _publish_commands(bot)
+    await _publish_commands(bot, settings.daily.admin_telegram_ids)
 
     stop = asyncio.Event()
     _install_signal_handlers(stop)
@@ -187,6 +195,7 @@ async def main() -> None:
         else:
             await run_polling(runtime, stop)
     finally:
+        await services.albums.drain()
         await bot.session.close()
         await container.crypto_payments.close()
         await resources.close()

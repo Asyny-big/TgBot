@@ -20,6 +20,7 @@ from app.services.auth import AuthService
 from app.services.bonuses import BonusService
 from app.services.checkout import CheckoutService
 from app.services.daily_delivery import DailyDeliveryService
+from app.services.daily_library import DailyLibraryService
 from app.services.daily_subscriptions import DailySubscriptionService
 from app.services.delivery import DeliveryService
 from app.services.loyalty import LoyaltyService
@@ -163,6 +164,14 @@ class Container:
     def build_daily_subscriptions(self) -> DailySubscriptionService:
         """The buyer's side of the Daily Content bot."""
         return DailySubscriptionService(uow_factory=self.uow_factory, settings=self.settings.daily)
+
+    def build_daily_library(self, sender: DailyContentSender) -> DailyLibraryService:
+        """The owner's library; ``sender`` shows an item to the owner as buyers get it."""
+        return DailyLibraryService(
+            uow_factory=self.uow_factory,
+            settings=self.settings.daily,
+            sender=sender,
+        )
 
     def build_bonuses(self, *, notifier: RewardNotifier | None = None) -> BonusService:
         """The bonus service, optionally able to tell an inviter they earned.

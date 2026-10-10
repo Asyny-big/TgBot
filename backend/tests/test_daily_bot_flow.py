@@ -8,12 +8,8 @@ buyer's anchor.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -23,34 +19,28 @@ from aiogram.methods import LeaveChat, SendMessage, SendVideo
 from aiogram.types import ReplyKeyboardMarkup
 from sqlalchemy import text
 
-from app.core.config import DailySettings
 from app.daily_bot import texts
-from app.daily_bot.factory import create_daily_dispatcher
-from app.daily_bot.middlewares import DailyServices
-from app.domain.commands import DailyContentDraft, ProductDraft, PurchaseDraft, UserDraft
+from app.domain.commands import DailyContentDraft
 from app.domain.daily import DeliveryStep
 from app.domain.enums import (
-    Currency,
     DailyContentKind,
     DailyDeliveryStatus,
     DailyDeliveryTrigger,
     DailySubscriptionStatus,
-    PaymentProvider,
-    PurchaseStatus,
 )
-from app.infrastructure.telegram.daily import TelegramDailyContentSender
-from app.services.daily_delivery import DailyDeliveryService
-from app.services.daily_subscriptions import DailySubscriptionService
+from tests.concurrency import Gate, all_at_once, gated, warm_pool
 from tests.daily_bot_harness import (
-    DailyRecordingBot,
+    Clock,
+    DailyHarness,
+    build_daily_harness,
     buyer,
+    completed_purchase,
     membership_update,
     message_update,
+    seed_buyer,
 )
 
 if TYPE_CHECKING:
-    from aiogram import Dispatcher
-
     from app.domain.entities import DailyDelivery, DailySubscription
     from app.infrastructure.cache.locks import RedisLockManager
     from app.infrastructure.db.uow import SqlAlchemyUnitOfWorkFactory
@@ -63,96 +53,7 @@ WELCOME_AT_1235 = (
     "здесь будет новый материал. Вот первый:"
 )
 
-
-@dataclass
-class Clock:
-    now: datetime = T0
-
-    def __call__(self) -> datetime:
-        return self.now
-
-    def advance(self, **delta: float) -> None:
-        self.now += timedelta(**delta)
-
-
-@dataclass
-class DailyHarness:
-    bot: DailyRecordingBot
-    dispatcher: Dispatcher
-    services: DailyServices
-    uow_factory: SqlAlchemyUnitOfWorkFactory
-    clock: Clock
-    settings: DailySettings = field(repr=False)
-
-    async def feed(self, update: Any) -> None:
-        await self.dispatcher.feed_update(self.bot, update)
-
-    async def send(self, text: str, user_id: int = BUYER) -> None:
-        await self.feed(message_update(text, user=buyer(user_id)))
-
-
 Factory = Callable[..., DailyHarness]
-
-
-class Gate:
-    """Holds every first contact right after it read the subscription.
-
-    It opens once all ``parties`` have read it — or, after ``patience``, once it
-    is clear they cannot: the row lock is queueing them behind the first one.
-    """
-
-    def __init__(self, parties: int, *, patience: float = 0.3) -> None:
-        self._parties = parties
-        self._arrived = 0
-        self._open = asyncio.Event()
-        self._patience = patience
-
-    async def wait(self) -> None:
-        self._arrived += 1
-        if self._arrived >= self._parties:
-            self._open.set()
-        try:
-            await asyncio.wait_for(self._open.wait(), self._patience)
-        except TimeoutError:
-            self._open.set()
-
-
-class _GatedSubscriptions:
-    def __init__(self, inner: Any, gate: Gate) -> None:
-        self._inner = inner
-        self._gate = gate
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
-
-    async def record_first_interaction(self, user_id: int, *, at: datetime) -> Any:
-        recorded = await self._inner.record_first_interaction(user_id, at=at)
-        await self._gate.wait()
-        return recorded
-
-
-class _GatedUnitOfWork:
-    def __init__(self, inner: Any, gate: Gate) -> None:
-        self._inner = inner
-        self._gate = gate
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
-
-    @property
-    def daily_subscriptions(self) -> _GatedSubscriptions:
-        return _GatedSubscriptions(self._inner.daily_subscriptions, self._gate)
-
-
-def _gated(factory: SqlAlchemyUnitOfWorkFactory, gate: Gate) -> Any:
-    """``factory``, with every first contact held at ``gate``."""
-
-    @asynccontextmanager
-    async def unit_of_work() -> AsyncIterator[_GatedUnitOfWork]:
-        async with factory() as uow:
-            yield _GatedUnitOfWork(uow, gate)
-
-    return unit_of_work
 
 
 @pytest.fixture
@@ -160,49 +61,38 @@ async def make_daily(
     live_uow_factory: SqlAlchemyUnitOfWorkFactory,
     live_locks: RedisLockManager,
 ) -> AsyncIterator[Factory]:
-    """Build a Daily bot over the live stores; ``settings`` override DAILY_*."""
+    """Build a Daily bot over the live stores; ``settings`` override DAILY_*.
+
+    ``gate`` holds every first contact right after it read the subscription.
+    """
     built: list[DailyHarness] = []
 
     def build(*, gate: Gate | None = None, **settings: Any) -> DailyHarness:
-        values: dict[str, Any] = {
-            "enabled": True,
-            "admin_telegram_ids": (OWNER,),
-            "lease_seconds": 300,
-            "recovery_hours": 12,
-            "max_attempts": 5,
-            "use_webhook": False,
-        }
-        values.update(settings)
-        daily_settings = DailySettings(**values)
-        clock = Clock()
-        bot = DailyRecordingBot()
-        delivery = DailyDeliveryService(
-            uow_factory=live_uow_factory,
-            sender=TelegramDailyContentSender(bot),
-            settings=daily_settings,
-            clock=clock,
-            jitter=lambda: 0.0,
+        subscriptions_uow = (
+            None
+            if gate is None
+            else gated(
+                live_uow_factory,
+                gate,
+                repository="daily_subscriptions",
+                method="record_first_interaction",
+            )
         )
-        subscriptions = DailySubscriptionService(
-            uow_factory=live_uow_factory if gate is None else _gated(live_uow_factory, gate),
-            settings=daily_settings,
-            clock=clock,
-        )
-        services = DailyServices(subscriptions=subscriptions, delivery=delivery)
-        harness = DailyHarness(
-            bot=bot,
-            dispatcher=create_daily_dispatcher(services, locks=live_locks, throttle_seconds=0.0),
-            services=services,
-            uow_factory=live_uow_factory,
-            clock=clock,
-            settings=daily_settings,
+        harness = build_daily_harness(
+            live_uow_factory,
+            live_locks,
+            clock=Clock(T0),
+            owner=OWNER,
+            default_user=BUYER,
+            subscriptions_uow=subscriptions_uow,
+            **settings,
         )
         built.append(harness)
         return harness
 
     yield build
     for harness in built:
-        await harness.bot.session.close()
+        await harness.close()
 
 
 @pytest.fixture
@@ -216,34 +106,7 @@ def daily(make_daily: Factory) -> DailyHarness:
 
 
 async def _buyer(daily: DailyHarness, user_id: int = BUYER, *, completed: int = 15) -> None:
-    async with daily.uow_factory() as uow:
-        await uow.users.upsert(UserDraft(telegram_id=user_id))
-        for _ in range(completed):
-            await _completed_purchase(uow, user_id)
-
-
-async def _completed_purchase(uow: Any, user_id: int) -> None:
-    product = await uow.products.create(
-        ProductDraft(
-            slug=f"d{uuid4().hex[:10]}",
-            title="Pack",
-            description="",
-            delivery_url="https://t.me/+pack",
-            price_stars=100,
-        )
-    )
-    paid = await uow.purchases.create(
-        PurchaseDraft(
-            user_id=user_id,
-            product_id=product.id,
-            provider=PaymentProvider.STARS,
-            amount=Decimal(100),
-            currency=Currency.XTR,
-            external_id=uuid4().hex,
-            status=PurchaseStatus.PAID,
-        )
-    )
-    await uow.purchases.mark_delivered(paid.id, delivered_url="https://t.me/+pack")
+    await seed_buyer(daily.uow_factory, user_id, completed=completed)
 
 
 async def _library(daily: DailyHarness, count: int) -> None:
@@ -276,31 +139,9 @@ async def _deliveries(daily: DailyHarness, user_id: int = BUYER) -> list[DailyDe
     return [delivery for delivery in found if delivery is not None]
 
 
-async def _warm_pool(daily: DailyHarness, connections: int) -> None:
-    """Open the connections up front, so parallel updates really start together.
-
-    Otherwise the first update runs on the one open connection while the others
-    are still connecting, and finishes its writes before they begin.
-    """
-
-    async def hold() -> None:
-        async with daily.uow_factory() as uow:
-            await uow.session.execute(text("SELECT 1"))
-            await asyncio.sleep(0.05)
-
-    await asyncio.gather(*(hold() for _ in range(connections)))
-
-
 async def _all_at_once(daily: DailyHarness, text: str, *, times: int) -> None:
-    """Send the same message ``times`` times at once; every one must be handled.
-
-    All of them are awaited even when one fails, so nothing is left running
-    into the next test.
-    """
-    results = await asyncio.gather(
-        *(daily.send(text) for _ in range(times)),
-        return_exceptions=True,
-    )
+    """Send the same message ``times`` times at once; every one must be handled."""
+    results = await all_at_once(*(daily.send(text) for _ in range(times)))
     assert [result for result in results if isinstance(result, BaseException)] == []
 
 
@@ -388,7 +229,7 @@ async def test_an_early_contact_never_becomes_the_anchor(daily: DailyHarness) ->
 
     # The 15th purchase arrives; the buyer writes again six hours later.
     async with daily.uow_factory() as uow:
-        await _completed_purchase(uow, BUYER)
+        await completed_purchase(uow, BUYER)
     daily.clock.advance(hours=6)  # 18:35 in Moscow
     await daily.send("/start")
 
@@ -429,9 +270,9 @@ async def test_parallel_updates_send_one_item(daily: DailyHarness, wrote_before:
     if wrote_before:
         await daily.send("/start")
         async with daily.uow_factory() as uow:
-            await _completed_purchase(uow, BUYER)
+            await completed_purchase(uow, BUYER)
     before = len(daily.bot.texts_to(BUYER))
-    await _warm_pool(daily, 6)
+    await warm_pool(daily.uow_factory, 6)
 
     await _all_at_once(daily, "/start", times=5)
 
@@ -450,7 +291,7 @@ async def test_contacts_that_read_together_still_activate_once(make_daily: Facto
     await _library(daily, 3)
     async with daily.uow_factory() as uow:  # wrote earlier, with fewer purchases
         await uow.daily_subscriptions.record_first_interaction(BUYER, at=T0 - timedelta(days=3))
-    await _warm_pool(daily, 6)
+    await warm_pool(daily.uow_factory, 6)
 
     await _all_at_once(daily, "/start", times=5)
 

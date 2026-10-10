@@ -9,6 +9,7 @@ transactions at once) and the schema's own checks.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -38,6 +39,7 @@ from app.domain.enums import (
     PaymentProvider,
     PurchaseStatus,
 )
+from tests.concurrency import Gate, all_at_once, gated
 from tests.fakes import FakeUnitOfWorkFactory
 
 if TYPE_CHECKING:
@@ -417,6 +419,91 @@ async def test_items_are_switched_off_never_deleted(store: UnitOfWorkFactory) ->
     with pytest.raises(ConflictError):
         async with store() as uow:
             await uow.daily_content.set_status(10_000, DailyContentStatus.ARCHIVED, at=NOW)
+
+
+def _text(number: int, body: str = "Мысль дня") -> DailyContentDraft:
+    return DailyContentDraft(
+        kind=DailyContentKind.TEXT,
+        source_chat_id=1,
+        source_message_id=number,
+        added_by=1,
+        body=body,
+    )
+
+
+async def test_exactly_the_same_text_is_a_duplicate(store: UnitOfWorkFactory) -> None:
+    async with store() as uow:
+        first, _ = await uow.daily_content.add(_text(1))
+        replay, created = await uow.daily_content.add(_text(1))
+        other, other_created = await uow.daily_content.add(_text(2, body="Мысль дня!"))
+    assert replay.id == first.id
+    assert not created
+    assert other_created
+    assert other.id != first.id
+
+    with pytest.raises(DailyContentDuplicateError) as caught:
+        async with store() as uow:
+            await uow.daily_content.add(_text(3))
+    assert caught.value.existing_id == first.id
+
+
+async def test_an_archived_text_may_come_in_again_but_not_back_beside_its_twin(
+    store: UnitOfWorkFactory,
+) -> None:
+    async with store() as uow:
+        first, _ = await uow.daily_content.add(_text(1))
+        await uow.daily_content.set_status(first.id, DailyContentStatus.ARCHIVED, at=NOW)
+        readded, created = await uow.daily_content.add(_text(2))
+    assert created
+
+    with pytest.raises(DailyContentDuplicateError) as caught:
+        async with store() as uow:
+            await uow.daily_content.set_status(first.id, DailyContentStatus.ACTIVE, at=NOW)
+    assert caught.value.existing_id == readded.id
+
+    async with store() as uow:
+        await uow.daily_content.set_status(readded.id, DailyContentStatus.ARCHIVED, at=NOW)
+        back = await uow.daily_content.set_status(first.id, DailyContentStatus.ACTIVE, at=NOW)
+    assert back.status is DailyContentStatus.ACTIVE
+
+
+async def test_items_are_found_by_file_and_by_text_live_first(store: UnitOfWorkFactory) -> None:
+    async with store() as uow:
+        assert await uow.daily_content.find_by_file("unique-1") is None
+        assert await uow.daily_content.find_by_text("Мысль дня") is None
+        video, _ = await uow.daily_content.add(_draft(1))
+        text, _ = await uow.daily_content.add(_text(2))
+        await uow.daily_content.set_status(video.id, DailyContentStatus.ARCHIVED, at=NOW)
+        await uow.daily_content.set_status(text.id, DailyContentStatus.ARCHIVED, at=NOW)
+        archived_video = await uow.daily_content.find_by_file("unique-1")
+        archived_text = await uow.daily_content.find_by_text("Мысль дня")
+        live_video, _ = await uow.daily_content.add(replace(_draft(3), file_unique_id="unique-1"))
+        live_text, _ = await uow.daily_content.add(_text(4))
+        found_video = await uow.daily_content.find_by_file("unique-1")
+        found_text = await uow.daily_content.find_by_text("Мысль дня")
+        caption_is_not_text = await uow.daily_content.find_by_text("Caption 1")
+    assert archived_video is not None
+    assert archived_video.id == video.id
+    assert archived_text is not None
+    assert archived_text.id == text.id
+    assert found_video == live_video
+    assert found_text == live_text
+    assert caption_is_not_text is None
+
+
+async def test_stats_count_every_item_by_status(store: UnitOfWorkFactory) -> None:
+    items = await _library(store, 4)
+    async with store() as uow:
+        await uow.daily_content.add(_text(10))
+        await uow.daily_content.set_status(items[0].id, DailyContentStatus.DISABLED, at=NOW)
+        await uow.daily_content.set_status(items[1].id, DailyContentStatus.ARCHIVED, at=NOW)
+        stats = await uow.daily_content.stats()
+        locked = await uow.daily_content.lock(items[2].id)
+        missing = await uow.daily_content.lock(10_000)
+    assert (stats.active, stats.disabled, stats.archived) == (3, 1, 1)
+    assert stats.active_by_kind == {DailyContentKind.VIDEO: 2, DailyContentKind.TEXT: 1}
+    assert locked == items[2]
+    assert missing is None
 
 
 async def test_only_active_items_nobody_holds_are_picked(store: UnitOfWorkFactory) -> None:
@@ -818,6 +905,58 @@ async def test_the_status_counts_follow_what_was_sent_and_what_is_held(
 # --------------------------------------------------------------------------- #
 # PostgreSQL only: concurrency and the schema's own checks                    #
 # --------------------------------------------------------------------------- #
+
+
+async def test_the_same_text_from_two_messages_at_once_is_added_once(
+    live_uow_factory: SqlAlchemyUnitOfWorkFactory,
+) -> None:
+    """Both would read "no such text yet" if nothing queued them; the lock does."""
+    gate = Gate(2)
+    racing = gated(live_uow_factory, gate, repository="daily_content", method="add")
+
+    async def add(number: int) -> Any:
+        async with racing() as uow:
+            return await uow.daily_content.add(_text(number))
+
+    results = await all_at_once(add(1), add(2))
+
+    added = [result for result in results if isinstance(result, tuple)]
+    refused = [result for result in results if isinstance(result, DailyContentDuplicateError)]
+    assert len(added) == 1
+    assert len(refused) == 1
+    assert refused[0].existing_id == added[0][0].id
+    async with live_uow_factory() as uow:
+        assert (await uow.daily_content.stats()).active == 1
+
+
+async def test_the_same_message_twice_at_once_is_one_item(
+    live_uow_factory: SqlAlchemyUnitOfWorkFactory,
+) -> None:
+    racing = gated(live_uow_factory, Gate(2), repository="daily_content", method="add")
+
+    async def add() -> Any:
+        async with racing() as uow:
+            return await uow.daily_content.add(_draft(1))
+
+    first, second = await all_at_once(add(), add())
+
+    assert {first[1], second[1]} == {True, False}
+    assert first[0].id == second[0].id
+
+
+async def test_the_same_file_from_two_messages_at_once_is_added_once(
+    live_uow_factory: SqlAlchemyUnitOfWorkFactory,
+) -> None:
+    racing = gated(live_uow_factory, Gate(2), repository="daily_content", method="add")
+
+    async def add(number: int) -> Any:
+        async with racing() as uow:
+            return await uow.daily_content.add(replace(_draft(number), file_unique_id="same"))
+
+    results = await all_at_once(add(1), add(2))
+
+    assert sum(1 for result in results if isinstance(result, tuple)) == 1
+    assert sum(1 for result in results if isinstance(result, DailyContentDuplicateError)) == 1
 
 
 async def test_concurrent_planners_open_one_delivery(

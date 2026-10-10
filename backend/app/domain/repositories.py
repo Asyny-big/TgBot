@@ -24,6 +24,7 @@ if TYPE_CHECKING:
         ReferralDraft,
         UserDraft,
     )
+    from app.domain.daily import LibraryStats
     from app.domain.entities import (
         BonusTransaction,
         DailyContent,
@@ -617,12 +618,29 @@ class DailyContentRepository(Protocol):
         item it already became.
 
         Raises:
-            DailyContentDuplicateError: the same file is already in the library.
+            DailyContentDuplicateError: the same file, or the very same text,
+                is already in the library and not archived.
         """
         ...
 
     async def get(self, content_id: int) -> DailyContent | None:
         """One item, or ``None``."""
+        ...
+
+    async def lock(self, content_id: int) -> DailyContent | None:
+        """One item, locked until the end of the transaction; ``None`` if missing."""
+        ...
+
+    async def find_by_file(self, file_unique_id: str) -> DailyContent | None:
+        """The item holding this file: the live one, else the newest archived one."""
+        ...
+
+    async def find_by_text(self, body: str) -> DailyContent | None:
+        """The text item with exactly this body: the live one, else the newest archived."""
+        ...
+
+    async def stats(self) -> LibraryStats:
+        """How many items there are, by status; the active ones by kind."""
         ...
 
     async def set_status(
@@ -638,7 +656,7 @@ class DailyContentRepository(Protocol):
         Raises:
             ConflictError: no such item.
             DailyContentDuplicateError: bringing it back would put the same
-                file into the library twice.
+                file, or the same text, into the library twice.
         """
         ...
 

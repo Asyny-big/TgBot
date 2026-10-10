@@ -19,14 +19,14 @@ from aiogram.filters import Command, CommandStart
 
 from app.core.logging import get_logger
 from app.daily_bot import texts
-from app.daily_bot.keyboards import menu_keyboard
+from app.daily_bot.keyboards import LibraryCallback, menu_keyboard
 from app.daily_bot.middlewares import DailyServices
 from app.domain.daily import DeliveryStep
 from app.domain.enums import DailySubscriptionStatus
 from app.services.daily_subscriptions import ContactOutcome, ContactResult
 
 if TYPE_CHECKING:
-    from aiogram.types import Message
+    from aiogram.types import CallbackQuery, Message
 
     from app.domain.entities import DailySubscription
 
@@ -163,6 +163,15 @@ async def _show_status(message: Message, daily: DailyServices) -> None:
     )
 
 
+async def handle_foreign_button(callback: CallbackQuery) -> None:
+    """An owner's button pressed by somebody else — a forged callback.
+
+    Answered without a word: nothing changes, and a buyer learns nothing.
+    """
+    logger.warning("daily_foreign_library_button", telegram_id=callback.from_user.id)
+    await callback.answer()
+
+
 def build_router() -> Router:
     """A fresh router; aiogram allows one parent dispatcher per router instance."""
     router = Router(name="daily_subscriber")
@@ -176,6 +185,7 @@ def build_router() -> Router:
     router.message(F.text == texts.RESUME_BUTTON, private)(handle_resume)
     router.message(Command("help"), private)(handle_help)
     router.message(private)(handle_anything_else)
+    router.callback_query(LibraryCallback.filter())(handle_foreign_button)
     return router
 
 
