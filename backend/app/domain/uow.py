@@ -19,6 +19,8 @@ if TYPE_CHECKING:
         DailyContentRepository,
         DailyDeliveryRepository,
         DailyOutboxRepository,
+        DailyReportRepository,
+        DailyRequestRepository,
         DailySubscriptionRepository,
         LoyaltyRepository,
         ProductRepository,
@@ -90,6 +92,16 @@ class UnitOfWork(Protocol):
     @property
     def daily_alerts(self) -> DailyAlertRepository:
         """The owner's Daily alerts bound to this transaction."""
+        ...
+
+    @property
+    def daily_requests(self) -> DailyRequestRepository:
+        """Buyers' content requests bound to this transaction."""
+        ...
+
+    @property
+    def daily_reports(self) -> DailyReportRepository:
+        """The admin panel's Daily reads bound to this transaction."""
         ...
 
     async def commit(self) -> None:

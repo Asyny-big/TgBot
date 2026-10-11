@@ -19,12 +19,14 @@ from app.infrastructure.payments.cryptobot import CryptoBotClient
 from app.services.auth import AuthService
 from app.services.bonuses import BonusService
 from app.services.checkout import CheckoutService
+from app.services.daily_admin import DailyAdminService
 from app.services.daily_alerts import DailyAlertService
 from app.services.daily_delivery import DailyDeliveryService
 from app.services.daily_library import DailyLibraryService
 from app.services.daily_notices import DailyNoticeService
 from app.services.daily_outbox import DailyOutboxService
 from app.services.daily_planning import DailyPlanningService
+from app.services.daily_requests import DailyRequestService
 from app.services.daily_stock import DailyStockService
 from app.services.daily_subscriptions import DailySubscriptionService
 from app.services.delivery import DeliveryService
@@ -173,8 +175,11 @@ class Container:
         """The buyer's side of the Daily Content bot."""
         return DailySubscriptionService(uow_factory=self.uow_factory, settings=self.settings.daily)
 
-    def build_daily_library(self, sender: DailyContentSender) -> DailyLibraryService:
-        """The owner's library; ``sender`` shows an item to the owner as buyers get it."""
+    def build_daily_library(self, sender: DailyContentSender | None = None) -> DailyLibraryService:
+        """The owner's library; ``sender`` shows an item to the owner as buyers get it.
+
+        Without one — in the admin API — previews go through the outbox instead.
+        """
         return DailyLibraryService(
             uow_factory=self.uow_factory,
             settings=self.settings.daily,
@@ -188,12 +193,31 @@ class Container:
     def build_daily_outbox(
         self,
         senders: Mapping[DailyOutboxChannel, DailyTextSender],
+        item_sender: DailyContentSender | None = None,
     ) -> DailyOutboxService:
-        """The outbox sender; ``senders`` are the bots of the two channels."""
+        """The outbox sender; ``senders`` are the bots of the two channels, and
+        ``item_sender`` the Daily bot sending the items the admin panel asked for."""
         return DailyOutboxService(
             uow_factory=self.uow_factory,
             settings=self.settings.daily,
             senders=senders,
+            item_sender=item_sender,
+        )
+
+    def build_daily_requests(self) -> DailyRequestService:
+        """Buyers' content requests, as the Daily bot takes them."""
+        return DailyRequestService(
+            uow_factory=self.uow_factory,
+            settings=self.settings.daily,
+            locks=self.locks,
+        )
+
+    def build_daily_admin(self) -> DailyAdminService:
+        """The admin panel's Daily Content: reads, the library, requests, answers."""
+        return DailyAdminService(
+            uow_factory=self.uow_factory,
+            settings=self.settings.daily,
+            library=self.build_daily_library(),
         )
 
     def build_daily_alerts(self) -> DailyAlertService:

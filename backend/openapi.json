@@ -823,6 +823,1056 @@
           }
         ]
       }
+    },
+    "/api/v1/daily/overview": {
+      "get": {
+        "tags": [
+          "daily"
+        ],
+        "summary": "Daily Content overview",
+        "description": "Subscriptions, today's deliveries (Moscow date), requests, the outbox,\nthe library and the alerts.",
+        "operationId": "overview_api_v1_daily_overview_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyOverviewResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/daily/alerts": {
+      "get": {
+        "tags": [
+          "daily"
+        ],
+        "summary": "The owner's alerts",
+        "description": "Every alert evaluated so far, firing or resolved.",
+        "operationId": "alerts_api_v1_daily_alerts_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DailyAlertResponse"
+                  },
+                  "type": "array",
+                  "title": "Response Alerts Api V1 Daily Alerts Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/daily/library": {
+      "get": {
+        "tags": [
+          "daily"
+        ],
+        "summary": "List the library",
+        "description": "Items, newest first. ``search`` matches the number, the text or caption,\nor the file name.",
+        "operationId": "list_library_api_v1_daily_library_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/DailyContentStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/DailyContentKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 255
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Search"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageResponse_DailyContentResponse_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/daily/library/{content_id}": {
+      "get": {
+        "tags": [
+          "daily"
+        ],
+        "summary": "Read a library item",
+        "description": "Raises: DailyContentNotFoundError.",
+        "operationId": "get_library_item_api_v1_daily_library__content_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "content_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Content Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyContentResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/daily/library/{content_id}/status": {
+      "post": {
+        "tags": [
+          "daily"
+        ],
+        "summary": "Disable, enable, archive or restore a library item",
+        "description": "Exactly what the owner's buttons do, under the same lock; attributed\n``admin:<username>:<action>``. Repeating an action changes nothing.\n\nRaises:\n    DailyContentNotFoundError: no such item.\n    DailyLibraryActionError: the item's status does not allow the action.\n    DailyContentDuplicateError: restoring it would duplicate a live item.",
+        "operationId": "change_library_status_api_v1_daily_library__content_id__status_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "content_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Content Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DailyLibraryStatusRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyContentResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/daily/library/{content_id}/send-to-me": {
+      "post": {
+        "tags": [
+          "daily"
+        ],
+        "summary": "Have the Daily bot send a library item to the owner",
+        "description": "Queued for every owner account; the worker sends it as buyers get it.\n\nRaises:\n    DailyNoOwnerError: no owner account is configured.\n    DailyContentNotFoundError: no such item.",
+        "operationId": "send_library_item_api_v1_daily_library__content_id__send_to_me_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "content_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Content Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DailySendToOwnerRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailySendToOwnerResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/daily/subscribers": {
+      "get": {
+        "tags": [
+          "daily"
+        ],
+        "summary": "List subscribers",
+        "description": "Subscribers, latest first contact first. ``search``: Telegram id or username.",
+        "operationId": "list_subscribers_api_v1_daily_subscribers_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/DailySubscriptionStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "blocked",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Blocked"
+            }
+          },
+          {
+            "name": "banned",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Banned"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 255
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Search"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageResponse_DailySubscriberResponse_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/daily/subscribers/{user_id}": {
+      "get": {
+        "tags": [
+          "daily"
+        ],
+        "summary": "Read a subscriber",
+        "description": "With the latest deliveries and requests. Raises: DailySubscriberNotFoundError.",
+        "operationId": "get_subscriber_api_v1_daily_subscribers__user_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "User Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailySubscriberDetailResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/daily/subscribers/{user_id}/requests-ban": {
+      "put": {
+        "tags": [
+          "daily"
+        ],
+        "summary": "Ban a buyer from content requests, or lift the ban",
+        "description": "Idempotent. A ban stops the buyer's next step and every send.\n\nRaises:\n    DailySubscriberNotFoundError: the buyer never wrote to the Daily bot.",
+        "operationId": "set_requests_ban_api_v1_daily_subscribers__user_id__requests_ban_put",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "User Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DailyRequestsBanRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailySubscriberDetailResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/daily/deliveries": {
+      "get": {
+        "tags": [
+          "daily"
+        ],
+        "summary": "List deliveries",
+        "description": "Deliveries, latest date first; ``date`` is a Moscow date.",
+        "operationId": "list_deliveries_api_v1_daily_deliveries_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/DailyDeliveryStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "User Id"
+            }
+          },
+          {
+            "name": "date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Date"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageResponse_DailyDeliveryResponse_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/daily/deliveries/{delivery_id}": {
+      "get": {
+        "tags": [
+          "daily"
+        ],
+        "summary": "Read a delivery",
+        "description": "With its attempts and its item. Raises: DailyDeliveryNotFoundError.",
+        "operationId": "get_delivery_api_v1_daily_deliveries__delivery_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "delivery_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Delivery Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyDeliveryDetailResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/daily/requests": {
+      "get": {
+        "tags": [
+          "daily"
+        ],
+        "summary": "List content requests",
+        "description": "Requests, newest first.",
+        "operationId": "list_requests_api_v1_daily_requests_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/DailyRequestStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "User Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageResponse_DailyRequestResponse_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/daily/requests/{request_id}": {
+      "get": {
+        "tags": [
+          "daily"
+        ],
+        "summary": "Read a content request",
+        "description": "Its messages, history and answers. Raises: DailyRequestNotFoundError.",
+        "operationId": "get_request_api_v1_daily_requests__request_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Request Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyRequestDetailResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "daily"
+        ],
+        "summary": "Change a content request's status or note",
+        "description": "Applied only to the ``version`` it names.\n\nRaises:\n    DailyRequestNotFoundError: no such request.\n    DailyRequestVersionConflictError: 409 — it changed since; ``details``\n        carry ``current_version``. Reload, then decide again.",
+        "operationId": "update_request_api_v1_daily_requests__request_id__patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Request Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DailyRequestPatchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyRequestDetailResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/daily/requests/{request_id}/replies": {
+      "post": {
+        "tags": [
+          "daily"
+        ],
+        "summary": "Answer the buyer through the Daily bot",
+        "description": "Queued in the outbox, once per ``idempotency_key``: a retry with the same\nkey returns the same answer (``200``, ``created: false``).\n\nRaises:\n    DailyRequestNotFoundError: no such request.\n    DailyIdempotencyKeyReusedError: 409 — the key came with another text.\n    DailyReplyTooLongError: the formatted answer exceeds one message.",
+        "operationId": "reply_api_v1_daily_requests__request_id__replies_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Request Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DailyReplyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyReplyResultResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/daily/requests/{request_id}/items/{item_id}/send-to-me": {
+      "post": {
+        "tags": [
+          "daily"
+        ],
+        "summary": "Have the Daily bot send a request's attachment to the owner",
+        "description": "Queued for every owner account.\n\nRaises:\n    DailyNoOwnerError: no owner account is configured.\n    DailyRequestNotFoundError: no such request, or no such message in it.",
+        "operationId": "send_request_item_api_v1_daily_requests__request_id__items__item_id__send_to_me_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Item Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DailySendToOwnerRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailySendToOwnerResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -894,6 +1944,1693 @@
         ],
         "title": "Currency",
         "description": "Currencies the shop can charge in."
+      },
+      "DailyAlertKey": {
+        "type": "string",
+        "enum": [
+          "low_stock",
+          "content_exhausted",
+          "delivery_failures",
+          "daily_token_unauthorized"
+        ],
+        "title": "DailyAlertKey",
+        "description": "The owner's alerts — one state each, never a stream of messages."
+      },
+      "DailyAlertResponse": {
+        "properties": {
+          "key": {
+            "$ref": "#/components/schemas/DailyAlertKey"
+          },
+          "state": {
+            "$ref": "#/components/schemas/DailyAlertState"
+          },
+          "notifications": {
+            "type": "integer",
+            "title": "Notifications"
+          },
+          "value": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Value"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "fired_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fired At"
+          },
+          "notified_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notified At"
+          },
+          "resolved_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "key",
+          "state",
+          "notifications",
+          "value",
+          "updated_at",
+          "fired_at",
+          "notified_at",
+          "resolved_at"
+        ],
+        "title": "DailyAlertResponse",
+        "description": "One of the owner's alerts."
+      },
+      "DailyAlertState": {
+        "type": "string",
+        "enum": [
+          "ok",
+          "firing"
+        ],
+        "title": "DailyAlertState",
+        "description": "Whether an alert's condition holds right now."
+      },
+      "DailyAttemptOutcome": {
+        "type": "string",
+        "enum": [
+          "sent",
+          "transient",
+          "permanent",
+          "blocked",
+          "content_invalid",
+          "lease_lost",
+          "crashed"
+        ],
+        "title": "DailyAttemptOutcome",
+        "description": "How one send attempt ended.\n\n``SENT`` — Telegram accepted the message.\n``TRANSIENT`` — a temporary failure (network, 5xx, flood control): retried.\n``PERMANENT`` — Telegram refused for a reason a retry cannot fix.\n``BLOCKED`` — the buyer blocked the bot or deleted their account.\n``CONTENT_INVALID`` — Telegram no longer accepts the item's file.\n``LEASE_LOST`` — the attempt finished after its lease had been taken over;\n    its result was not applied to the delivery.\n``CRASHED`` — found unfinished when its lease ran out: the process died\n    mid-send. Telegram may or may not have accepted the message."
+      },
+      "DailyBuyerResponse": {
+        "properties": {
+          "user_id": {
+            "type": "integer",
+            "title": "User Id"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "user_id",
+          "username",
+          "first_name"
+        ],
+        "title": "DailyBuyerResponse",
+        "description": "How the shop knows a buyer."
+      },
+      "DailyContentKind": {
+        "type": "string",
+        "enum": [
+          "text",
+          "photo",
+          "video",
+          "animation",
+          "document",
+          "audio",
+          "voice",
+          "video_note"
+        ],
+        "title": "DailyContentKind",
+        "description": "The kinds of Telegram message the library can hold and send again."
+      },
+      "DailyContentResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DailyContentStatus"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DailyContentKind"
+          },
+          "body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Body"
+          },
+          "file_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File Name"
+          },
+          "mime_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mime Type"
+          },
+          "file_size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File Size"
+          },
+          "duration": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration"
+          },
+          "width": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Width"
+          },
+          "height": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height"
+          },
+          "added_by": {
+            "type": "integer",
+            "title": "Added By"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "status_changed_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Status Changed At"
+          },
+          "status_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Reason"
+          },
+          "sent_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sent Count"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "kind",
+          "body",
+          "file_name",
+          "mime_type",
+          "file_size",
+          "duration",
+          "width",
+          "height",
+          "added_by",
+          "created_at",
+          "status_changed_at",
+          "status_reason",
+          "sent_count"
+        ],
+        "title": "DailyContentResponse",
+        "description": "A library item, as the panel shows it — never its file."
+      },
+      "DailyContentStatus": {
+        "type": "string",
+        "enum": [
+          "active",
+          "disabled",
+          "archived"
+        ],
+        "title": "DailyContentStatus",
+        "description": "Whether an item of the library takes part in deliveries.\n\n``ACTIVE`` — offered to everybody who has not received it yet.\n``DISABLED`` — taken out of deliveries for now, by the owner or because\n    Telegram no longer accepts its file; can be enabled again.\n``ARCHIVED`` — the soft delete: hidden from deliveries and from the\n    default library view. Rows are never physically deleted — they are\n    part of every buyer's delivery history."
+      },
+      "DailyDeliveryAttemptResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "attempt_no": {
+            "type": "integer",
+            "title": "Attempt No"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "content_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DailyAttemptOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "retry_after_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry After Seconds"
+          },
+          "telegram_message_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Telegram Message Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "attempt_no",
+          "started_at",
+          "finished_at",
+          "content_id",
+          "outcome",
+          "error",
+          "retry_after_seconds",
+          "telegram_message_id"
+        ],
+        "title": "DailyDeliveryAttemptResponse"
+      },
+      "DailyDeliveryCountsResponse": {
+        "properties": {
+          "pending": {
+            "type": "integer",
+            "title": "Pending"
+          },
+          "sending": {
+            "type": "integer",
+            "title": "Sending"
+          },
+          "sent": {
+            "type": "integer",
+            "title": "Sent"
+          },
+          "no_content": {
+            "type": "integer",
+            "title": "No Content"
+          },
+          "failed": {
+            "type": "integer",
+            "title": "Failed"
+          },
+          "expired": {
+            "type": "integer",
+            "title": "Expired"
+          },
+          "cancelled": {
+            "type": "integer",
+            "title": "Cancelled"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "pending",
+          "sending",
+          "sent",
+          "no_content",
+          "failed",
+          "expired",
+          "cancelled"
+        ],
+        "title": "DailyDeliveryCountsResponse"
+      },
+      "DailyDeliveryDetailResponse": {
+        "properties": {
+          "delivery": {
+            "$ref": "#/components/schemas/DailyDeliveryResponse"
+          },
+          "attempts": {
+            "items": {
+              "$ref": "#/components/schemas/DailyDeliveryAttemptResponse"
+            },
+            "type": "array",
+            "title": "Attempts"
+          },
+          "item": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DailyContentResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "delivery",
+          "attempts",
+          "item"
+        ],
+        "title": "DailyDeliveryDetailResponse"
+      },
+      "DailyDeliveryResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "user_id": {
+            "type": "integer",
+            "title": "User Id"
+          },
+          "buyer": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DailyBuyerResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "delivery_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Delivery Date"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/DailyDeliveryTrigger"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DailyDeliveryStatus"
+          },
+          "scheduled_for": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Scheduled For"
+          },
+          "window_opens_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Window Opens At"
+          },
+          "window_closes_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Window Closes At"
+          },
+          "deadline_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Deadline At"
+          },
+          "next_attempt_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Next Attempt At"
+          },
+          "attempts": {
+            "type": "integer",
+            "title": "Attempts"
+          },
+          "content_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id"
+          },
+          "sent_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sent At"
+          },
+          "last_outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DailyAttemptOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "user_id",
+          "buyer",
+          "delivery_date",
+          "trigger",
+          "status",
+          "scheduled_for",
+          "window_opens_at",
+          "window_closes_at",
+          "deadline_at",
+          "next_attempt_at",
+          "attempts",
+          "content_id",
+          "sent_at",
+          "last_outcome",
+          "last_error",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "DailyDeliveryResponse",
+        "description": "One buyer's delivery for one day."
+      },
+      "DailyDeliveryStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "sending",
+          "sent",
+          "no_content",
+          "failed",
+          "expired",
+          "cancelled"
+        ],
+        "title": "DailyDeliveryStatus",
+        "description": "Lifecycle of one buyer's delivery for one day.\n\n``PENDING`` — waiting for its first or next attempt.\n``SENDING`` — an attempt holds the row under a lease right now. A lease\n    that runs out means the attempt died: the row is taken over and the\n    *same* item is sent again.\n``SENT`` — Telegram accepted the item. Final.\n``NO_CONTENT`` — nothing left that the buyer has not received; looked at\n    again until the day's deadline, in case new items arrive.\n``FAILED`` — Telegram refused for good (the bot is blocked, the chat is\n    gone, the item is unusable). Final.\n``EXPIRED`` — the day's deadline passed without a successful send. Final.\n``CANCELLED`` — the buyer paused or lost access before it was sent. Final."
+      },
+      "DailyDeliveryTrigger": {
+        "type": "string",
+        "enum": [
+          "activation",
+          "schedule"
+        ],
+        "title": "DailyDeliveryTrigger",
+        "description": "Why a delivery exists.\n\n``ACTIVATION`` — the item sent right away when the buyer first used the bot;\n    it is that day's delivery.\n``SCHEDULE`` — the daily item, due in the buyer's personal window."
+      },
+      "DailyKindCountResponse": {
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/DailyContentKind"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "count"
+        ],
+        "title": "DailyKindCountResponse"
+      },
+      "DailyLibraryActionName": {
+        "type": "string",
+        "enum": [
+          "disable",
+          "enable",
+          "archive",
+          "restore"
+        ],
+        "title": "DailyLibraryActionName",
+        "description": "What the panel can do to a library item. Nothing deletes."
+      },
+      "DailyLibraryCountsResponse": {
+        "properties": {
+          "active": {
+            "type": "integer",
+            "title": "Active"
+          },
+          "disabled": {
+            "type": "integer",
+            "title": "Disabled"
+          },
+          "archived": {
+            "type": "integer",
+            "title": "Archived"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "active_by_kind": {
+            "items": {
+              "$ref": "#/components/schemas/DailyKindCountResponse"
+            },
+            "type": "array",
+            "title": "Active By Kind"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "active",
+          "disabled",
+          "archived",
+          "total",
+          "active_by_kind"
+        ],
+        "title": "DailyLibraryCountsResponse"
+      },
+      "DailyLibraryStatusRequest": {
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/DailyLibraryActionName"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "title": "DailyLibraryStatusRequest"
+      },
+      "DailyOutboxCountsResponse": {
+        "properties": {
+          "open": {
+            "type": "integer",
+            "title": "Open"
+          },
+          "failed_recently": {
+            "type": "integer",
+            "title": "Failed Recently"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "open",
+          "failed_recently"
+        ],
+        "title": "DailyOutboxCountsResponse"
+      },
+      "DailyOutboxKind": {
+        "type": "string",
+        "enum": [
+          "alert",
+          "exhausted_notice",
+          "request_reply",
+          "library_preview",
+          "request_attachment"
+        ],
+        "title": "DailyOutboxKind",
+        "description": "What a message of the Daily outbox is: not a library item.\n\nStored as plain text, not a database enum, so later kinds need no\nmigration."
+      },
+      "DailyOutboxMessageResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DailyOutboxKind"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DailyOutboxStatus"
+          },
+          "chat_id": {
+            "type": "integer",
+            "title": "Chat Id"
+          },
+          "attempts": {
+            "type": "integer",
+            "title": "Attempts"
+          },
+          "next_attempt_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Next Attempt At"
+          },
+          "deadline_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Deadline At"
+          },
+          "sent_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sent At"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "chat_id",
+          "attempts",
+          "next_attempt_at",
+          "deadline_at",
+          "sent_at",
+          "last_error",
+          "created_at"
+        ],
+        "title": "DailyOutboxMessageResponse",
+        "description": "A message of the Daily outbox: where it stands."
+      },
+      "DailyOutboxStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "sending",
+          "sent",
+          "failed",
+          "expired"
+        ],
+        "title": "DailyOutboxStatus",
+        "description": "Lifecycle of one outbox message.\n\n``PENDING`` — waiting for its first or next attempt.\n``SENDING`` — an attempt holds it under a lease; a lease that runs out\n    means the attempt died, and the message is sent again (at least once).\n``SENT`` — Telegram accepted it. Final.\n``FAILED`` — Telegram refused it for good, or the attempts ran out. Final.\n``EXPIRED`` — its deadline passed unsent: news that late is no news. Final."
+      },
+      "DailyOverviewResponse": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "today": {
+            "type": "string",
+            "format": "date",
+            "title": "Today"
+          },
+          "subscriptions": {
+            "$ref": "#/components/schemas/DailySubscriptionCountsResponse"
+          },
+          "deliveries_today": {
+            "$ref": "#/components/schemas/DailyDeliveryCountsResponse"
+          },
+          "requests": {
+            "$ref": "#/components/schemas/DailyRequestCountsResponse"
+          },
+          "outbox": {
+            "$ref": "#/components/schemas/DailyOutboxCountsResponse"
+          },
+          "library": {
+            "$ref": "#/components/schemas/DailyLibraryCountsResponse"
+          },
+          "alerts": {
+            "items": {
+              "$ref": "#/components/schemas/DailyAlertResponse"
+            },
+            "type": "array",
+            "title": "Alerts"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "enabled",
+          "today",
+          "subscriptions",
+          "deliveries_today",
+          "requests",
+          "outbox",
+          "library",
+          "alerts"
+        ],
+        "title": "DailyOverviewResponse",
+        "description": "The Daily Content overview page."
+      },
+      "DailyReplyRequest": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 3500,
+            "minLength": 1,
+            "title": "Text"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Idempotency Key"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "text",
+          "idempotency_key"
+        ],
+        "title": "DailyReplyRequest",
+        "description": "An answer to the buyer; the key makes a retry the same answer."
+      },
+      "DailyReplyResponse": {
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/DailyReplyState"
+          },
+          "event": {
+            "$ref": "#/components/schemas/DailyRequestEventResponse"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DailyOutboxMessageResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DailyRequestEventResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "state",
+          "event",
+          "message",
+          "outcome"
+        ],
+        "title": "DailyReplyResponse",
+        "description": "One answer of the owner's and its fate."
+      },
+      "DailyReplyResultResponse": {
+        "properties": {
+          "reply": {
+            "$ref": "#/components/schemas/DailyReplyResponse"
+          },
+          "created": {
+            "type": "boolean",
+            "title": "Created"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reply",
+          "created"
+        ],
+        "title": "DailyReplyResultResponse"
+      },
+      "DailyReplyState": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "sent",
+          "failed"
+        ],
+        "title": "DailyReplyState"
+      },
+      "DailyRequestCountsResponse": {
+        "properties": {
+          "new": {
+            "type": "integer",
+            "title": "New"
+          },
+          "in_review": {
+            "type": "integer",
+            "title": "In Review"
+          },
+          "completed": {
+            "type": "integer",
+            "title": "Completed"
+          },
+          "rejected": {
+            "type": "integer",
+            "title": "Rejected"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "new",
+          "in_review",
+          "completed",
+          "rejected"
+        ],
+        "title": "DailyRequestCountsResponse"
+      },
+      "DailyRequestDetailResponse": {
+        "properties": {
+          "request": {
+            "$ref": "#/components/schemas/DailyRequestResponse"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DailyRequestItemResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/DailyRequestEventResponse"
+            },
+            "type": "array",
+            "title": "Events"
+          },
+          "replies": {
+            "items": {
+              "$ref": "#/components/schemas/DailyReplyResponse"
+            },
+            "type": "array",
+            "title": "Replies"
+          },
+          "banned": {
+            "type": "boolean",
+            "title": "Banned"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request",
+          "items",
+          "events",
+          "replies",
+          "banned"
+        ],
+        "title": "DailyRequestDetailResponse"
+      },
+      "DailyRequestEventKind": {
+        "type": "string",
+        "enum": [
+          "submitted",
+          "status_changed",
+          "note_changed",
+          "reply_queued",
+          "reply_sent",
+          "reply_failed"
+        ],
+        "title": "DailyRequestEventKind",
+        "description": "What happened to a content request — its audit trail.\n\nStored as plain text, not a database enum, so later kinds need no\nmigration."
+      },
+      "DailyRequestEventResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DailyRequestEventKind"
+          },
+          "actor": {
+            "type": "string",
+            "title": "Actor"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "from_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DailyRequestStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "to_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DailyRequestStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Body"
+          },
+          "outbox_message_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outbox Message Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "actor",
+          "created_at",
+          "from_status",
+          "to_status",
+          "body",
+          "outbox_message_id"
+        ],
+        "title": "DailyRequestEventResponse",
+        "description": "A line of the request's history."
+      },
+      "DailyRequestItemResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "position": {
+            "type": "integer",
+            "title": "Position"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DailyContentKind"
+          },
+          "body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Body"
+          },
+          "file_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File Name"
+          },
+          "mime_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mime Type"
+          },
+          "file_size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File Size"
+          },
+          "duration": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration"
+          },
+          "has_file": {
+            "type": "boolean",
+            "title": "Has File"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "position",
+          "kind",
+          "body",
+          "file_name",
+          "mime_type",
+          "file_size",
+          "duration",
+          "has_file",
+          "created_at"
+        ],
+        "title": "DailyRequestItemResponse",
+        "description": "One message of a request — its text, or what its file is."
+      },
+      "DailyRequestPatchRequest": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Version"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DailyRequestStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "admin_note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Admin Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "title": "DailyRequestPatchRequest",
+        "description": "A change of status or note, as read at ``version``.\n\nOmitting a field leaves it alone; ``admin_note: null`` (or empty) clears the\nnote. ``status`` cannot be null."
+      },
+      "DailyRequestResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "user_id": {
+            "type": "integer",
+            "title": "User Id"
+          },
+          "buyer": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DailyBuyerResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/DailyRequestStatus"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "purchases_at_submit": {
+            "type": "integer",
+            "title": "Purchases At Submit"
+          },
+          "admin_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Admin Note"
+          },
+          "item_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Item Count"
+          },
+          "reply_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply Count"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "closed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "user_id",
+          "buyer",
+          "status",
+          "version",
+          "purchases_at_submit",
+          "admin_note",
+          "item_count",
+          "reply_count",
+          "created_at",
+          "updated_at",
+          "closed_at"
+        ],
+        "title": "DailyRequestResponse",
+        "description": "A content request; ``version`` is what a change must name."
+      },
+      "DailyRequestStatus": {
+        "type": "string",
+        "enum": [
+          "new",
+          "in_review",
+          "completed",
+          "rejected"
+        ],
+        "title": "DailyRequestStatus",
+        "description": "Where a buyer's content request stands with the owner."
+      },
+      "DailyRequestsBanRequest": {
+        "properties": {
+          "banned": {
+            "type": "boolean",
+            "title": "Banned"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "banned"
+        ],
+        "title": "DailyRequestsBanRequest"
+      },
+      "DailySendToOwnerRequest": {
+        "properties": {
+          "idempotency_key": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Idempotency Key"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "idempotency_key"
+        ],
+        "title": "DailySendToOwnerRequest",
+        "description": "\"Send it to me\": the key makes a repeated click — or a retry — one send."
+      },
+      "DailySendToOwnerResponse": {
+        "properties": {
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/DailyOutboxMessageResponse"
+            },
+            "type": "array",
+            "title": "Messages"
+          },
+          "created": {
+            "type": "boolean",
+            "title": "Created"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "messages",
+          "created"
+        ],
+        "title": "DailySendToOwnerResponse",
+        "description": "The messages taking the item to the owner's accounts."
+      },
+      "DailySubscriberDetailResponse": {
+        "properties": {
+          "subscriber": {
+            "$ref": "#/components/schemas/DailySubscriberResponse"
+          },
+          "deliveries": {
+            "items": {
+              "$ref": "#/components/schemas/DailyDeliveryResponse"
+            },
+            "type": "array",
+            "title": "Deliveries"
+          },
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/DailyRequestResponse"
+            },
+            "type": "array",
+            "title": "Requests"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "subscriber",
+          "deliveries",
+          "requests"
+        ],
+        "title": "DailySubscriberDetailResponse"
+      },
+      "DailySubscriberResponse": {
+        "properties": {
+          "user_id": {
+            "type": "integer",
+            "title": "User Id"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DailySubscriptionStatus"
+          },
+          "first_interaction_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "First Interaction At"
+          },
+          "activated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activated At"
+          },
+          "anchor_minute": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor Minute"
+          },
+          "paused_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Paused At"
+          },
+          "blocked_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocked At"
+          },
+          "requests_banned_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requests Banned At"
+          },
+          "requests_banned_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requests Banned By"
+          },
+          "completed_purchases": {
+            "type": "integer",
+            "title": "Completed Purchases"
+          },
+          "received": {
+            "type": "integer",
+            "title": "Received"
+          },
+          "last_received_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Received At"
+          },
+          "open_requests": {
+            "type": "integer",
+            "title": "Open Requests"
+          },
+          "can_suggest": {
+            "type": "boolean",
+            "title": "Can Suggest"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "user_id",
+          "username",
+          "first_name",
+          "status",
+          "first_interaction_at",
+          "activated_at",
+          "anchor_minute",
+          "paused_at",
+          "blocked_at",
+          "requests_banned_at",
+          "requests_banned_by",
+          "completed_purchases",
+          "received",
+          "last_received_at",
+          "open_requests",
+          "can_suggest"
+        ],
+        "title": "DailySubscriberResponse",
+        "description": "A buyer's Daily subscription and its numbers."
+      },
+      "DailySubscriptionCountsResponse": {
+        "properties": {
+          "inactive": {
+            "type": "integer",
+            "title": "Inactive"
+          },
+          "active": {
+            "type": "integer",
+            "title": "Active"
+          },
+          "paused": {
+            "type": "integer",
+            "title": "Paused"
+          },
+          "blocked": {
+            "type": "integer",
+            "title": "Blocked"
+          },
+          "banned": {
+            "type": "integer",
+            "title": "Banned"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "inactive",
+          "active",
+          "paused",
+          "blocked",
+          "banned"
+        ],
+        "title": "DailySubscriptionCountsResponse"
+      },
+      "DailySubscriptionStatus": {
+        "type": "string",
+        "enum": [
+          "inactive",
+          "active",
+          "paused"
+        ],
+        "title": "DailySubscriptionStatus",
+        "description": "Where a buyer stands with the Daily Content bot.\n\n``INACTIVE`` — wrote to the bot, but had no access then: nothing is sent.\n``ACTIVE`` — activated; receives one item a day in their own window.\n``PAUSED`` — activated, but asked not to receive anything for now.\n\nA blocked bot is not a status of its own: it is a fact recorded next to\nwhichever of these applies, and unblocking simply clears it."
       },
       "DeliveryAttemptResponse": {
         "properties": {
@@ -1083,6 +3820,90 @@
         ],
         "title": "PageMeta",
         "description": "Pagination envelope shared by every listing endpoint."
+      },
+      "PageResponse_DailyContentResponse_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DailyContentResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/PageMeta"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items",
+          "meta"
+        ],
+        "title": "PageResponse[DailyContentResponse]"
+      },
+      "PageResponse_DailyDeliveryResponse_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DailyDeliveryResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/PageMeta"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items",
+          "meta"
+        ],
+        "title": "PageResponse[DailyDeliveryResponse]"
+      },
+      "PageResponse_DailyRequestResponse_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DailyRequestResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/PageMeta"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items",
+          "meta"
+        ],
+        "title": "PageResponse[DailyRequestResponse]"
+      },
+      "PageResponse_DailySubscriberResponse_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DailySubscriberResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/PageMeta"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items",
+          "meta"
+        ],
+        "title": "PageResponse[DailySubscriberResponse]"
       },
       "PageResponse_ProductResponse_": {
         "properties": {

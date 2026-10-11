@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 SEED_USER = 990000001
 PENDING_CRYPTO_INDEX = "uq_purchases_user_product_pending_crypto"
-HEAD = "0007"
+HEAD = "0008"
 
 
 def test_migrations_match_the_orm_metadata(migrated_database: str) -> None:
@@ -89,6 +89,12 @@ def _remove_seed(dsn: str) -> None:
     has_rewards = _scalar(dsn, "SELECT to_regclass('loyalty_rewards') IS NOT NULL")
     has_daily = _scalar(dsn, "SELECT to_regclass('daily_subscriptions') IS NOT NULL")
     has_runtime = _scalar(dsn, "SELECT to_regclass('daily_outbox') IS NOT NULL")
+    has_requests = _scalar(dsn, "SELECT to_regclass('daily_requests') IS NOT NULL")
+    requests = [
+        "DELETE FROM daily_request_events",
+        "DELETE FROM daily_request_items",
+        "DELETE FROM daily_requests",
+    ]
     runtime = ["DELETE FROM daily_outbox", "DELETE FROM daily_alerts"]
     daily = [
         "DELETE FROM daily_delivery_attempts",
@@ -97,6 +103,7 @@ def _remove_seed(dsn: str) -> None:
         "DELETE FROM daily_subscriptions",
     ]
     statements = [
+        *(requests if has_requests else []),
         *(runtime if has_runtime else []),
         *(daily if has_daily else []),
         *(["DELETE FROM loyalty_rewards WHERE user_id = :user_id"] if has_rewards else []),
@@ -469,6 +476,121 @@ def test_0006_downgrade_refuses_while_daily_history_exists(
             command.downgrade(config, "0005")
         assert _version(migrated_database) == HEAD
         assert _daily_tables(migrated_database) == len(_DAILY_TABLES)
+    finally:
+        _remove_seed(migrated_database)
+    command.check(config)
+
+
+# --------------------------------------------------------------------------- #
+# 0008: content requests                                                      #
+# --------------------------------------------------------------------------- #
+
+_REQUEST_TABLES = ("daily_requests", "daily_request_items", "daily_request_events")
+_REQUEST_CONSTRAINTS = (
+    ("daily_requests", "uq_daily_requests_client_draft_id"),
+    ("daily_requests", "ck_daily_requests_closed_shape"),
+    ("daily_requests", "ck_daily_requests_note_length"),
+    ("daily_request_items", "uq_daily_request_items_request_position"),
+    ("daily_request_items", "ck_daily_request_items_kind_shape"),
+    ("daily_request_events", "uq_daily_request_events_idempotency_key"),
+    ("daily_subscriptions", "ck_daily_subscriptions_requests_ban_shape"),
+    ("daily_outbox", "ck_daily_outbox_one_attachment"),
+)
+
+
+def _request_tables(dsn: str) -> int:
+    names = ",".join(f"'{name}'" for name in _REQUEST_TABLES)
+    return int(
+        _scalar(
+            dsn,
+            f"SELECT count(*) FROM pg_tables WHERE tablename IN ({names})",  # noqa: S608 — fixed names
+        )
+    )
+
+
+def _constraint_exists(dsn: str, table: str, name: str) -> bool:
+    return bool(
+        _scalar(
+            dsn,
+            "SELECT count(*) FROM pg_constraint WHERE conname = :name "
+            "AND conrelid = to_regclass(:table)",
+            name=name,
+            table=table,
+        )
+    )
+
+
+def test_0008_upgrade_creates_the_content_request_schema(migrated_database: str) -> None:
+    assert _version(migrated_database) == HEAD
+    assert _request_tables(migrated_database) == len(_REQUEST_TABLES)
+    for table, name in _REQUEST_CONSTRAINTS:
+        assert _constraint_exists(migrated_database, table, name), name
+
+
+def test_0008_downgrade_on_an_empty_schema_removes_it_and_comes_back(
+    migrated_database: str,
+) -> None:
+    config = alembic_config(migrated_database)
+    command.downgrade(config, "0007")
+    try:
+        assert _version(migrated_database) == "0007"
+        assert _request_tables(migrated_database) == 0
+        assert not _scalar(
+            migrated_database,
+            "SELECT count(*) FROM pg_type WHERE typname = 'daily_request_status'",
+        )
+        assert not _constraint_exists(
+            migrated_database, "daily_outbox", "ck_daily_outbox_one_attachment"
+        )
+        # The runtime below it is untouched.
+        assert _scalar(migrated_database, "SELECT to_regclass('daily_outbox') IS NOT NULL")
+    finally:
+        command.upgrade(config, "head")
+    assert _request_tables(migrated_database) == len(_REQUEST_TABLES)
+    command.check(config)
+
+
+_ACTIVE_SUBSCRIPTION = (
+    "INSERT INTO daily_subscriptions (user_id, status, first_interaction_at, "
+    "activated_at, anchor_minute) VALUES (:user_id, 'active', now(), now(), 720)"
+)
+_REQUEST = (
+    "INSERT INTO daily_requests (user_id, client_draft_id, purchases_at_submit) "
+    "VALUES (:user_id, gen_random_uuid(), 20)"
+)
+_BAN = (
+    "UPDATE daily_subscriptions SET requests_banned_at = now(), "
+    "requests_banned_by = 'admin:schema' WHERE user_id = :user_id"
+)
+
+
+@pytest.mark.parametrize(
+    ("seed", "reason"),
+    [
+        ((_ACTIVE_SUBSCRIPTION, _REQUEST), "daily_requests"),
+        ((_ACTIVE_SUBSCRIPTION, _BAN), "request bans"),
+    ],
+    ids=["request", "ban"],
+)
+def test_0008_downgrade_refuses_while_requests_or_bans_exist(
+    migrated_database: str,
+    seed: tuple[str, ...],
+    reason: str,
+) -> None:
+    """Refuse, and change nothing: the buyers' requests exist nowhere else."""
+    config = alembic_config(migrated_database)
+    _sql(
+        migrated_database,
+        *_SEED_BUYER_AND_PRODUCT,
+        *seed,
+        user_id=SEED_USER,
+        slug="seedrequest",
+    )
+    try:
+        with pytest.raises(RuntimeError, match=reason):
+            command.downgrade(config, "0007")
+        assert _version(migrated_database) == HEAD
+        assert _request_tables(migrated_database) == len(_REQUEST_TABLES)
     finally:
         _remove_seed(migrated_database)
     command.check(config)

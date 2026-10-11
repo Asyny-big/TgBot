@@ -21,6 +21,8 @@ if TYPE_CHECKING:
         DailyDeliveryTrigger,
         DailyOutboxChannel,
         DailyOutboxKind,
+        DailyRequestEventKind,
+        DailyRequestStatus,
         PaymentProvider,
         PurchaseStatus,
     )
@@ -187,3 +189,35 @@ class DailyOutboxDraft:
     first_attempt_at: datetime
     deadline_at: datetime
     """After this the message is dropped unsent."""
+
+    content_id: int | None = None
+    """Send this library item instead of ``body``, which is then a label."""
+
+    request_item_id: int | None = None
+    """Send this request attachment instead of ``body``, which is then a label."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailyRequestDraft:
+    """A buyer's content request, as it is submitted from the bot."""
+
+    user_id: int
+    client_draft_id: UUID
+    purchases_at_submit: int
+    items: tuple[DailyContentDraft, ...]
+    """The draft's messages, in order — parsed exactly like the owner's."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailyRequestEventDraft:
+    """A line to add to a content request's history."""
+
+    request_id: int
+    kind: DailyRequestEventKind
+    actor: str
+    from_status: DailyRequestStatus | None = None
+    to_status: DailyRequestStatus | None = None
+    body: str | None = None
+    outbox_message_id: int | None = None
+    idempotency_key: str | None = None
+    """Written once: a second event under the same key is not added."""

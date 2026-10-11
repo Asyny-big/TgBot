@@ -30,7 +30,11 @@ from app.core.config import get_settings
 from app.core.container import Container
 from app.core.logging import configure_logging, get_logger
 from app.core.resources import Resources
-from app.daily_bot.factory import create_daily_dispatcher, create_daily_services
+from app.daily_bot.factory import (
+    create_daily_dispatcher,
+    create_daily_services,
+    create_draft_storage,
+)
 from app.daily_bot.texts import COMMANDS, OWNER_COMMANDS
 from app.infrastructure.telegram.factory import create_daily_bot
 
@@ -180,6 +184,7 @@ async def main() -> None:
             services,
             locks=container.locks,
             throttle_seconds=settings.bot.throttle_seconds,
+            storage=create_draft_storage(resources.cache.client),
         ),
     )
 
@@ -196,6 +201,7 @@ async def main() -> None:
             await run_polling(runtime, stop)
     finally:
         await services.albums.drain()
+        await services.draft_albums.drain()
         await bot.session.close()
         await container.crypto_payments.close()
         await resources.close()

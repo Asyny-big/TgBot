@@ -68,7 +68,7 @@ export interface ClientHooks {
 }
 
 export interface RequestOptions {
-  method?: "GET" | "POST" | "PATCH" | "DELETE";
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   /** JSON body; `undefined` sends no body. */
   body?: unknown;
   query?: Record<string, string | number | boolean | undefined | (string | number)[]>;
@@ -133,6 +133,10 @@ export class ApiClient {
 
   post<ResultT>(path: string, body?: unknown, options: Omit<RequestOptions, "method"> = {}) {
     return this.request<ResultT>(path, { ...options, method: "POST", body });
+  }
+
+  put<ResultT>(path: string, body: unknown, options: Omit<RequestOptions, "method"> = {}) {
+    return this.request<ResultT>(path, { ...options, method: "PUT", body });
   }
 
   patch<ResultT>(path: string, body: unknown, options: Omit<RequestOptions, "method"> = {}) {

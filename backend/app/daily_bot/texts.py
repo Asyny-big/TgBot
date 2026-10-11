@@ -17,7 +17,14 @@ from app.domain.daily import (
     WINDOW_HALF_WIDTH,
 )
 from app.domain.daily_alerts import AlertNotice
+from app.domain.daily_requests import (
+    REQUEST_MAX_ITEMS,
+    REQUEST_OPEN_LIMIT,
+    REQUEST_SUBMIT_LIMIT,
+    REQUEST_TEXT_LIMIT,
+)
 from app.domain.enums import DailyAlertKey, DailyContentKind, DailyContentStatus
+from app.domain.loyalty import CONTENT_SUGGESTION_MILESTONE
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -29,6 +36,9 @@ if TYPE_CHECKING:
 STATUS_BUTTON: Final = "📊 Мой статус"
 PAUSE_BUTTON: Final = "⏸ Пауза"
 RESUME_BUTTON: Final = "▶️ Возобновить"
+SUGGEST_BUTTON: Final = "💡 Предложить контент"
+MENU_BUTTONS: Final = frozenset({STATUS_BUTTON, PAUSE_BUTTON, RESUME_BUTTON, SUGGEST_BUTTON})
+"""The buyer's menu: never taken for a message of a draft."""
 
 DISABLED: Final = "Раздел скоро откроется."
 NO_CONTENT: Final = "Материалы скоро появятся — пришлём автоматически."
@@ -335,6 +345,82 @@ def no_access(completed_purchases: int) -> str:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Content requests                                                            #
+# --------------------------------------------------------------------------- #
+
+SEND_DRAFT_BUTTON: Final = "✅ Отправить"
+CANCEL_DRAFT_BUTTON: Final = "✖️ Отмена"
+
+DRAFT_STARTED: Final = (
+    "💡 Пришлите сюда то, что хотели бы видеть в подборках: текст, фото, видео, GIF, "
+    f"документ, аудио, голосовое или кружок — до {REQUEST_MAX_ITEMS} сообщений.\n"
+    "Когда закончите, нажмите «✅ Отправить». Передумали — «✖️ Отмена» или /cancel."
+)
+DRAFT_TEXT_TOO_LONG: Final = (
+    f"⚠️ Текст длиннее {REQUEST_TEXT_LIMIT} символов — сократите его и пришлите ещё раз."
+)
+DRAFT_FULL: Final = (
+    f"⚠️ В черновике уже {REQUEST_MAX_ITEMS} сообщений — больше не поместится. "
+    "Нажмите «✅ Отправить»."
+)
+DRAFT_EMPTY: Final = "Черновик пуст — пришлите хотя бы одно сообщение."
+DRAFT_CANCELLED: Final = "Черновик удалён."
+DRAFT_EXPIRED: Final = "Черновик устарел. Чтобы начать заново, нажмите «💡 Предложить контент»."
+REQUEST_THANKS: Final = (
+    "Спасибо! Ваше пожелание принято. Мы рассмотрим его при формировании следующих подборок."
+)
+REQUEST_BUSY: Final = "⏳ Уже отправляем…"
+REQUEST_ALREADY_SENT: Final = "Это пожелание уже отправлено ✅"
+REQUEST_BANNED: Final = "Отправка пожеланий для вас недоступна."
+REQUEST_TOO_MANY_OPEN: Final = (
+    f"У вас уже {REQUEST_OPEN_LIMIT} пожелания на рассмотрении. Новое можно будет "
+    "отправить, когда мы ответим на одно из них."
+)
+REQUEST_RATE_LIMITED: Final = (
+    f"За сутки можно отправить не больше {REQUEST_SUBMIT_LIMIT} пожеланий. Попробуйте позже."
+)
+REQUEST_FAILED: Final = "Не получилось отправить. Нажмите «✅ Отправить» ещё раз."
+
+
+def request_not_eligible(completed_purchases: int) -> str:
+    """For a buyer under the suggestion milestone."""
+    return (
+        f"Предлагать контент можно с {CONTENT_SUGGESTION_MILESTONE}-й покупки. "
+        f"Сейчас у вас {completed_purchases} из {CONTENT_SUGGESTION_MILESTONE}."
+    )
+
+
+def draft_added(count: int) -> str:
+    """After a message joined the draft."""
+    return f"Добавлено: {count}/{REQUEST_MAX_ITEMS}"
+
+
+def draft_exists(count: int) -> str:
+    """The suggest button pressed while a draft is open."""
+    return (
+        f"Черновик уже открыт: {count}/{REQUEST_MAX_ITEMS}. "
+        "Пришлите ещё сообщения или нажмите «✅ Отправить»."
+    )
+
+
+def draft_album(*, added: int, count: int, full: int, too_long: int, refused: int) -> str:
+    """One answer for an album sent into a draft."""
+    lines = [f"📦 Из альбома добавлено: {added} · в черновике {count}/{REQUEST_MAX_ITEMS}"]
+    if full:
+        lines.append(f"⚠️ Не поместилось: {full}")
+    if too_long:
+        lines.append(f"⚠️ Слишком длинный текст: {too_long}")
+    if refused:
+        lines.append(f"⛔ Не поддерживается: {refused}. Можно: {_SUPPORTED}.")
+    return "\n".join(lines)
+
+
+def request_reply(request_id: int, text: str) -> str:
+    """The owner's answer, as the buyer receives it. The owner's text is escaped."""
+    return f"💬 Ответ на ваше пожелание #{request_id}:\n\n{escape(text, quote=False)}"
+
+
 def status(*, received: int, available: int, anchor_minute: int, paused: bool) -> str:
     """The "📊 My status" line."""
     opens = clock_label(anchor_minute - _HALF_WINDOW_MINUTES)
@@ -349,14 +435,22 @@ def status(*, received: int, available: int, anchor_minute: int, paused: bool) -
 __all__ = [
     "ADD_TEXT_BUTTON",
     "ARCHIVE_BUTTON",
+    "CANCEL_DRAFT_BUTTON",
     "COMMANDS",
     "DISABLED",
     "DISABLE_BUTTON",
+    "DRAFT_CANCELLED",
+    "DRAFT_EMPTY",
+    "DRAFT_EXPIRED",
+    "DRAFT_FULL",
+    "DRAFT_STARTED",
+    "DRAFT_TEXT_TOO_LONG",
     "ENABLE_BUTTON",
     "EXHAUSTED",
     "HELP",
     "ITEM_USAGE",
     "KIND_LABELS",
+    "MENU_BUTTONS",
     "NOT_ALLOWED",
     "NOT_SAVED",
     "NO_CONTENT",
@@ -364,13 +458,22 @@ __all__ = [
     "OWNER_HELP",
     "PAUSED",
     "PAUSE_BUTTON",
+    "REQUEST_ALREADY_SENT",
+    "REQUEST_BANNED",
+    "REQUEST_BUSY",
+    "REQUEST_FAILED",
+    "REQUEST_RATE_LIMITED",
+    "REQUEST_THANKS",
+    "REQUEST_TOO_MANY_OPEN",
     "RESTORE_BUTTON",
     "RESUMED",
     "RESUME_BUTTON",
+    "SEND_DRAFT_BUTTON",
     "SHOW_BUTTON",
     "SKIP_TEXT_BUTTON",
     "STATUS_BUTTON",
     "STATUS_LABELS",
+    "SUGGEST_BUTTON",
     "TEXT_GONE",
     "TEXT_PROMPT",
     "TEXT_SKIPPED",
@@ -385,6 +488,9 @@ __all__ = [
     "archived_twin",
     "card",
     "clock_label",
+    "draft_added",
+    "draft_album",
+    "draft_exists",
     "duplicate",
     "duration_label",
     "item_label",
@@ -392,6 +498,8 @@ __all__ = [
     "no_access",
     "preview_failed",
     "refused",
+    "request_not_eligible",
+    "request_reply",
     "restore_blocked",
     "stats",
     "status",

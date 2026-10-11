@@ -45,7 +45,7 @@ from aiogram.types import (
 )
 
 from app.core.config import DailySettings
-from app.daily_bot.albums import AlbumCollector
+from app.daily_bot.albums import AlbumCollector, DraftAlbumCollector
 from app.daily_bot.factory import create_daily_dispatcher
 from app.daily_bot.middlewares import DailyServices
 from app.domain.commands import ProductDraft, PurchaseDraft, UserDraft
@@ -53,11 +53,13 @@ from app.domain.enums import Currency, PaymentProvider, PurchaseStatus
 from app.infrastructure.telegram.daily import TelegramDailyContentSender
 from app.services.daily_delivery import DailyDeliveryService
 from app.services.daily_library import DailyLibraryService
+from app.services.daily_requests import DailyRequestService
 from app.services.daily_stock import DailyStockService
 from app.services.daily_subscriptions import DailySubscriptionService
 
 if TYPE_CHECKING:
     from aiogram import Dispatcher
+    from aiogram.fsm.storage.base import BaseStorage
     from aiogram.methods import TelegramMethod
 
     from app.domain.locks import LockManager
@@ -330,6 +332,7 @@ class DailyHarness:
     async def settle(self) -> None:
         """Wait until every album summary still due has gone out."""
         await self.services.albums.drain()
+        await self.services.draft_albums.drain()
 
     async def close(self) -> None:
         await self.settle()
@@ -346,12 +349,15 @@ def build_daily_harness(  # noqa: PLR0913 — every knob a Daily bot test turns
     throttle_seconds: float = 0.0,
     subscriptions_uow: Any | None = None,
     library_uow: Any | None = None,
+    requests_uow: Any | None = None,
+    storage: BaseStorage | None = None,
     **settings: Any,
 ) -> DailyHarness:
     """The Daily bot over ``uow_factory``; ``settings`` override ``DAILY_*``.
 
-    ``subscriptions_uow`` and ``library_uow`` replace the store of one service
-    only — how a test holds that service at a gate.
+    ``subscriptions_uow``, ``library_uow`` and ``requests_uow`` replace the
+    store of one service only — how a test holds that service at a gate.
+    ``storage`` keeps the FSM (drafts): in memory unless a test gives Redis.
     """
     values: dict[str, Any] = {
         "enabled": True,
@@ -386,11 +392,21 @@ def build_daily_harness(  # noqa: PLR0913 — every knob a Daily bot test turns
         ),
         albums=AlbumCollector(settle_seconds=0.05),
         stock=DailyStockService(uow_factory=uow_factory, settings=daily_settings, clock=clock),
+        requests=DailyRequestService(
+            uow_factory=requests_uow or uow_factory,
+            settings=daily_settings,
+            locks=locks,
+            clock=clock,
+        ),
+        draft_albums=DraftAlbumCollector(settle_seconds=0.05),
     )
     return DailyHarness(
         bot=bot,
         dispatcher=create_daily_dispatcher(
-            services, locks=locks, throttle_seconds=throttle_seconds
+            services,
+            locks=locks,
+            throttle_seconds=throttle_seconds,
+            storage=storage,
         ),
         services=services,
         uow_factory=uow_factory,

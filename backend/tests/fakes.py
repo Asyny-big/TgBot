@@ -34,13 +34,18 @@ from app.core.exceptions import (
 from app.domain.bonuses import BonusPolicy, reward_bonuses
 from app.domain.commands import BonusTransactionDraft
 from app.domain.daily import DeliveryCounts, LibraryStats
+from app.domain.daily_reports import DailyOverviewCounts
+from app.domain.daily_requests import OPEN_REQUEST_STATUSES, is_closed, user_actor
 from app.domain.entities import (
     BonusTransaction,
     DailyAlert,
     DailyContent,
+    DailyContentRequest,
     DailyDelivery,
     DailyDeliveryAttempt,
     DailyOutboxMessage,
+    DailyRequestEvent,
+    DailyRequestItem,
     DailySubscription,
     LoyaltyReward,
     Product,
@@ -62,6 +67,8 @@ from app.domain.enums import (
     DailyDeliveryStatus,
     DailyDeliveryTrigger,
     DailyOutboxStatus,
+    DailyRequestEventKind,
+    DailyRequestStatus,
     DailySubscriptionStatus,
     LoyaltyRewardStatus,
     PaymentProvider,
@@ -80,11 +87,23 @@ if TYPE_CHECKING:
         DailyContentDraft,
         DailyDeliveryDraft,
         DailyOutboxDraft,
+        DailyRequestDraft,
+        DailyRequestEventDraft,
         ProductDraft,
         ProductUpdate,
         PurchaseDraft,
         ReferralDraft,
         UserDraft,
+    )
+    from app.domain.daily_reports import (
+        DailyDeliveryEntry,
+        DailyDeliveryFilters,
+        DailyLibraryEntry,
+        DailyLibraryFilters,
+        DailyRequestEntry,
+        DailyRequestFilters,
+        DailySubscriberEntry,
+        DailySubscriberFilters,
     )
     from app.domain.delivery import DeliveryMessage
     from app.domain.enums import DailyAlertKey
@@ -94,6 +113,7 @@ if TYPE_CHECKING:
         PurchaseFilters,
         ReferralFilters,
     )
+    from app.domain.patch import Maybe
     from app.domain.stats import TopProduct
 
 NOW = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
@@ -887,6 +907,8 @@ class FakeUnitOfWork:
         self._daily_subscriptions.content = self._daily_content
         self._daily_outbox = FakeDailyOutboxRepository()
         self._daily_alerts = FakeDailyAlertRepository()
+        self._daily_requests = FakeDailyRequestRepository()
+        self._daily_reports = FakeDailyReportRepository()
         self._products.purchases = self._purchases
         self._referrals.purchases = self._purchases
         self._bonuses.purchases = self._purchases
@@ -941,6 +963,14 @@ class FakeUnitOfWork:
     @property
     def daily_alerts(self) -> FakeDailyAlertRepository:
         return self._daily_alerts
+
+    @property
+    def daily_requests(self) -> FakeDailyRequestRepository:
+        return self._daily_requests
+
+    @property
+    def daily_reports(self) -> FakeDailyReportRepository:
+        return self._daily_reports
 
     async def commit(self) -> None:
         self.commits += 1
@@ -1185,6 +1215,22 @@ class FakeDailySubscriptionRepository:
         updated = replace(current, exhausted_notified_at=at)
         self.items[user_id] = updated
         return updated
+
+    async def set_requests_ban(
+        self,
+        user_id: int,
+        *,
+        banned_by: str | None,
+        at: datetime,
+    ) -> DailySubscription | None:
+        current = self.items.get(user_id)
+        if current is None:
+            return None
+        if banned_by is None:
+            return self._store(replace(current, requests_banned_at=None, requests_banned_by=None))
+        if current.requests_banned_at is not None:
+            return current
+        return self._store(replace(current, requests_banned_at=at, requests_banned_by=banned_by))
 
     def _require(self, user_id: int) -> DailySubscription:
         current = self.items.get(user_id)
@@ -1826,6 +1872,8 @@ class FakeDailyOutboxRepository:
             deadline_at=draft.deadline_at,
             created_at=now,
             updated_at=now,
+            content_id=draft.content_id,
+            request_item_id=draft.request_item_id,
         )
         self._next_id += 1
         self.items[item.id] = item
@@ -1940,7 +1988,12 @@ class FakeDailyOutboxRepository:
             )
         )
 
-    async def expire_overdue(self, *, now: datetime, limit: int = 100) -> int:
+    async def expire_overdue(
+        self,
+        *,
+        now: datetime,
+        limit: int = 100,
+    ) -> tuple[DailyOutboxMessage, ...]:
         overdue = sorted(
             (
                 item
@@ -1950,7 +2003,7 @@ class FakeDailyOutboxRepository:
             ),
             key=lambda item: item.deadline_at,
         )[:limit]
-        for item in overdue:
+        return tuple(
             self._store(
                 replace(
                     item,
@@ -1960,7 +2013,8 @@ class FakeDailyOutboxRepository:
                     lease_until=None,
                 )
             )
-        return len(overdue)
+            for item in overdue
+        )
 
     def _holder(self, lease_token: UUID) -> DailyOutboxMessage | None:
         for item in self.items.values():
@@ -2001,3 +2055,261 @@ class FakeDailyAlertRepository:
 
     async def list_all(self) -> tuple[DailyAlert, ...]:
         return tuple(self.items[key] for key in sorted(self.items))
+
+
+class FakeDailyRequestRepository:
+    """Content requests in dicts, enforcing what the SQL enforces.
+
+    ``client_draft_id`` is unique, a change applies only at the version it
+    names, and a history line's idempotency key is used once.
+    """
+
+    def __init__(self) -> None:
+        self.requests: dict[int, DailyContentRequest] = {}
+        self.items: dict[int, DailyRequestItem] = {}
+        self.events: dict[int, DailyRequestEvent] = {}
+        self._next_request = 1
+        self._next_item = 1
+        self._next_event = 1
+
+    async def create(
+        self,
+        draft: DailyRequestDraft,
+        *,
+        at: datetime,
+    ) -> tuple[DailyContentRequest, bool]:
+        existing = await self.find_by_draft(draft.client_draft_id)
+        if existing is not None:
+            if existing.user_id != draft.user_id:
+                message = "This draft belongs to another buyer"
+                raise ConflictError(message, client_draft_id=str(draft.client_draft_id))
+            return existing, False
+        request = DailyContentRequest(
+            id=self._next_request,
+            user_id=draft.user_id,
+            status=DailyRequestStatus.NEW,
+            client_draft_id=draft.client_draft_id,
+            purchases_at_submit=draft.purchases_at_submit,
+            version=1,
+            created_at=at,
+            updated_at=at,
+        )
+        self._next_request += 1
+        self.requests[request.id] = request
+        for position, item in enumerate(draft.items, start=1):
+            stored = DailyRequestItem(
+                id=self._next_item,
+                request_id=request.id,
+                position=position,
+                kind=item.kind,
+                source_chat_id=item.source_chat_id,
+                source_message_id=item.source_message_id,
+                created_at=at,
+                body=item.body,
+                entities=item.entities,
+                file_id=item.file_id,
+                file_unique_id=item.file_unique_id,
+                file_size=item.file_size,
+                file_name=item.file_name,
+                mime_type=item.mime_type,
+                duration=item.duration,
+            )
+            self._next_item += 1
+            self.items[stored.id] = stored
+        self._event(
+            request_id=request.id,
+            kind=DailyRequestEventKind.SUBMITTED,
+            actor=user_actor(draft.user_id),
+            created_at=at,
+            to_status=DailyRequestStatus.NEW,
+        )
+        return request, True
+
+    async def get(self, request_id: int) -> DailyContentRequest | None:
+        return self.requests.get(request_id)
+
+    async def lock(self, request_id: int) -> DailyContentRequest | None:
+        return self.requests.get(request_id)
+
+    async def find_by_draft(self, client_draft_id: UUID) -> DailyContentRequest | None:
+        for request in self.requests.values():
+            if request.client_draft_id == client_draft_id:
+                return request
+        return None
+
+    async def items_of(self, request_id: int) -> tuple[DailyRequestItem, ...]:
+        return tuple(
+            sorted(
+                (item for item in self.items.values() if item.request_id == request_id),
+                key=lambda item: item.position,
+            )
+        )
+
+    async def get_item(self, item_id: int) -> DailyRequestItem | None:
+        return self.items.get(item_id)
+
+    async def events_of(self, request_id: int) -> tuple[DailyRequestEvent, ...]:
+        return tuple(
+            sorted(
+                (event for event in self.events.values() if event.request_id == request_id),
+                key=lambda event: (event.created_at, event.id),
+            )
+        )
+
+    async def count_open(self, user_id: int) -> int:
+        return sum(
+            1
+            for request in self.requests.values()
+            if request.user_id == user_id and request.status in OPEN_REQUEST_STATUSES
+        )
+
+    async def count_since(self, user_id: int, since: datetime) -> int:
+        return sum(
+            1
+            for request in self.requests.values()
+            if request.user_id == user_id and request.created_at >= since
+        )
+
+    async def update(
+        self,
+        request_id: int,
+        *,
+        expected_version: int,
+        at: datetime,
+        status: Maybe[DailyRequestStatus],
+        admin_note: Maybe[str | None],
+    ) -> DailyContentRequest | None:
+        current = self.requests.get(request_id)
+        if current is None or current.version != expected_version:
+            return None
+        updated = replace(current, version=current.version + 1, updated_at=at)
+        if is_set(status) and status is not current.status:
+            updated = replace(
+                updated,
+                status=status,
+                closed_at=at if is_closed(status) else None,
+            )
+        if is_set(admin_note):
+            updated = replace(updated, admin_note=admin_note)
+        self.requests[request_id] = updated
+        return updated
+
+    async def add_event(
+        self,
+        draft: DailyRequestEventDraft,
+        *,
+        at: datetime,
+    ) -> DailyRequestEvent | None:
+        key = draft.idempotency_key
+        if key is not None and any(event.idempotency_key == key for event in self.events.values()):
+            return None
+        return self._event(
+            request_id=draft.request_id,
+            kind=draft.kind,
+            actor=draft.actor,
+            created_at=at,
+            from_status=draft.from_status,
+            to_status=draft.to_status,
+            body=draft.body,
+            outbox_message_id=draft.outbox_message_id,
+            idempotency_key=key,
+        )
+
+    async def find_event(self, idempotency_key: str) -> DailyRequestEvent | None:
+        for event in self.events.values():
+            if event.idempotency_key == idempotency_key:
+                return event
+        return None
+
+    async def reply_of(self, outbox_message_id: int) -> DailyRequestEvent | None:
+        for event in self.events.values():
+            if (
+                event.outbox_message_id == outbox_message_id
+                and event.kind is DailyRequestEventKind.REPLY_QUEUED
+            ):
+                return event
+        return None
+
+    def _event(self, **fields: Any) -> DailyRequestEvent:
+        event = DailyRequestEvent(id=self._next_event, **fields)
+        self._next_event += 1
+        self.events[event.id] = event
+        return event
+
+
+@dataclass
+class FakeDailyReportRepository:
+    """Canned reads, like the stats double: the panel's queries are tested on
+    PostgreSQL, through the API."""
+
+    counts: DailyOverviewCounts = field(
+        default_factory=lambda: DailyOverviewCounts(
+            subscriptions={},
+            blocked=0,
+            banned=0,
+            deliveries_today={},
+            requests={},
+            outbox_open=0,
+            outbox_failed_recently=0,
+        )
+    )
+
+    async def overview_counts(self, *, today: date, since: datetime) -> DailyOverviewCounts:
+        del today, since
+        return self.counts
+
+    async def library(
+        self,
+        filters: DailyLibraryFilters,
+        page: PageRequest,
+    ) -> Page[DailyLibraryEntry]:
+        del filters
+        return Page(items=(), total=0, limit=page.limit, offset=page.offset)
+
+    async def library_entry(self, content_id: int) -> DailyLibraryEntry | None:
+        del content_id
+        return None
+
+    async def subscribers(
+        self,
+        filters: DailySubscriberFilters,
+        page: PageRequest,
+    ) -> Page[DailySubscriberEntry]:
+        del filters
+        return Page(items=(), total=0, limit=page.limit, offset=page.offset)
+
+    async def subscriber(self, user_id: int) -> DailySubscriberEntry | None:
+        del user_id
+        return None
+
+    async def deliveries(
+        self,
+        filters: DailyDeliveryFilters,
+        page: PageRequest,
+    ) -> Page[DailyDeliveryEntry]:
+        del filters
+        return Page(items=(), total=0, limit=page.limit, offset=page.offset)
+
+    async def delivery(self, delivery_id: int) -> DailyDeliveryEntry | None:
+        del delivery_id
+        return None
+
+    async def requests(
+        self,
+        filters: DailyRequestFilters,
+        page: PageRequest,
+    ) -> Page[DailyRequestEntry]:
+        del filters
+        return Page(items=(), total=0, limit=page.limit, offset=page.offset)
+
+    async def request_entry(self, request_id: int) -> DailyRequestEntry | None:
+        del request_id
+        return None
+
+    async def recent_deliveries(self, user_id: int, *, limit: int) -> tuple[DailyDelivery, ...]:
+        del user_id, limit
+        return ()
+
+    async def requests_of(self, user_id: int, *, limit: int) -> tuple[DailyContentRequest, ...]:
+        del user_id, limit
+        return ()

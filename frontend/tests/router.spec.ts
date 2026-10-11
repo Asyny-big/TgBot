@@ -17,6 +17,11 @@ vi.mock("@/views/LoginView.vue", () => ({ default: { template: "<div>login</div>
 vi.mock("@/views/ProductsView.vue", () => ({ default: { template: "<div>products</div>" } }));
 vi.mock("@/views/PurchasesView.vue", () => ({ default: { template: "<div>purchases</div>" } }));
 vi.mock("@/views/ReferralsView.vue", () => ({ default: { template: "<div>referrals</div>" } }));
+vi.mock("@/views/DailyDashboardView.vue", () => ({ default: { template: "<div>daily</div>" } }));
+vi.mock("@/views/DailyLibraryView.vue", () => ({ default: { template: "<div>library</div>" } }));
+vi.mock("@/views/DailySubscribersView.vue", () => ({ default: { template: "<div>subs</div>" } }));
+vi.mock("@/views/DailyDeliveriesView.vue", () => ({ default: { template: "<div>deliv</div>" } }));
+vi.mock("@/views/DailyRequestsView.vue", () => ({ default: { template: "<div>requests</div>" } }));
 
 const { router: appRouter } = await import("@/router");
 
@@ -78,6 +83,22 @@ describe("router guard", () => {
 
     expect(authState.restore).toHaveBeenCalledOnce();
     expect(appRouter.currentRoute.value.path).toBe("/products");
+  });
+
+  it.each([
+    ["/daily", "daily"],
+    ["/daily/library", "daily-library"],
+    ["/daily/subscribers", "daily-subscribers"],
+    ["/daily/deliveries", "daily-deliveries"],
+    ["/daily/requests", "daily-requests"],
+  ])("guards the Daily page %s and lets an administrator in", async (path, name) => {
+    await appRouter.push(path).catch(() => undefined);
+    expect(appRouter.currentRoute.value.path).toBe("/login");
+    expect(appRouter.currentRoute.value.query.redirect).toBe(path);
+
+    authState.isAuthenticated = true;
+    await appRouter.push(path);
+    expect(appRouter.currentRoute.value.name).toBe(name);
   });
 
   it("redirects an unknown path to the dashboard", async () => {

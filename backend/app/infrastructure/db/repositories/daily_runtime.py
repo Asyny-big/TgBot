@@ -52,6 +52,8 @@ class SqlAlchemyDailyOutboxRepository:
                 chat_id=draft.chat_id,
                 body=draft.body,
                 dedupe_key=draft.dedupe_key,
+                content_id=draft.content_id,
+                request_item_id=draft.request_item_id,
                 status=DailyOutboxStatus.PENDING,
                 next_attempt_at=draft.first_attempt_at,
                 deadline_at=draft.deadline_at,
@@ -160,7 +162,12 @@ class SqlAlchemyDailyOutboxRepository:
         _release(model)
         return await self._save(model)
 
-    async def expire_overdue(self, *, now: datetime, limit: int = 100) -> int:
+    async def expire_overdue(
+        self,
+        *,
+        now: datetime,
+        limit: int = 100,
+    ) -> tuple[DailyOutboxMessage, ...]:
         statement = (
             select(DailyOutboxModel)
             .where(
@@ -177,8 +184,7 @@ class SqlAlchemyDailyOutboxRepository:
             model.status = DailyOutboxStatus.EXPIRED
             model.last_error = _EXPIRED_ERROR
             _release(model)
-        await self._session.flush()
-        return len(models)
+        return tuple([await self._save(model) for model in models])
 
     async def _holder(self, lease_token: UUID) -> DailyOutboxModel | None:
         """The message this lease still holds, locked; ``None`` once it was taken over."""

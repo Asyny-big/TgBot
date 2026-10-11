@@ -282,6 +282,76 @@ class DailyContentDuplicateError(ConflictError):
         self.existing_id = existing_id
 
 
+class DailyContentNotFoundError(NotFoundError):
+    """No such item in the Daily Content library."""
+
+    code = "daily_content_not_found"
+    message = "Daily Content item not found"
+
+
+class DailySubscriberNotFoundError(NotFoundError):
+    """The buyer never wrote to the Daily bot."""
+
+    code = "daily_subscriber_not_found"
+    message = "Daily Content subscriber not found"
+
+
+class DailyDeliveryNotFoundError(NotFoundError):
+    """No such Daily Content delivery."""
+
+    code = "daily_delivery_not_found"
+    message = "Daily Content delivery not found"
+
+
+class DailyRequestNotFoundError(NotFoundError):
+    """No such content request, or no such message in it."""
+
+    code = "daily_request_not_found"
+    message = "Content request not found"
+
+
+class DailyRequestVersionConflictError(ConflictError):
+    """The request changed since the panel read it: reload, then decide again.
+
+    ``current_version`` in the details is the version to send next time.
+    """
+
+    code = "daily_request_version_conflict"
+    message = "The request was changed by somebody else"
+
+    def __init__(self, *, request_id: int, current_version: int) -> None:
+        super().__init__(request_id=request_id, current_version=current_version)
+        self.current_version = current_version
+
+
+class DailyIdempotencyKeyReusedError(ConflictError):
+    """The same idempotency key came back with a different request."""
+
+    code = "idempotency_key_reused"
+    message = "This idempotency key was already used for a different request"
+
+
+class DailyLibraryActionError(ConflictError):
+    """The library item's status does not allow this action."""
+
+    code = "daily_library_action_not_allowed"
+    message = "This action is not allowed for the item's status"
+
+
+class DailyNoOwnerError(ConflictError):
+    """Nobody to send to: no owner account is configured for the Daily bot."""
+
+    code = "daily_no_owner"
+    message = "No owner account is configured for the Daily bot"
+
+
+class DailyReplyTooLongError(ValidationError):
+    """The answer does not fit one Telegram message once formatted."""
+
+    code = "daily_reply_too_long"
+    message = "The reply is too long for one Telegram message"
+
+
 class DailySendError(AppError):
     """Telegram did not take a Daily Content item. Subclasses say how sure that is."""
 

@@ -19,6 +19,8 @@ if TYPE_CHECKING:
         DailyContentDraft,
         DailyDeliveryDraft,
         DailyOutboxDraft,
+        DailyRequestDraft,
+        DailyRequestEventDraft,
         ProductDraft,
         ProductUpdate,
         PurchaseDraft,
@@ -26,13 +28,27 @@ if TYPE_CHECKING:
         UserDraft,
     )
     from app.domain.daily import DeliveryCounts, LibraryStats
+    from app.domain.daily_reports import (
+        DailyDeliveryEntry,
+        DailyDeliveryFilters,
+        DailyLibraryEntry,
+        DailyLibraryFilters,
+        DailyOverviewCounts,
+        DailyRequestEntry,
+        DailyRequestFilters,
+        DailySubscriberEntry,
+        DailySubscriberFilters,
+    )
     from app.domain.entities import (
         BonusTransaction,
         DailyAlert,
         DailyContent,
+        DailyContentRequest,
         DailyDelivery,
         DailyDeliveryAttempt,
         DailyOutboxMessage,
+        DailyRequestEvent,
+        DailyRequestItem,
         DailySubscription,
         LoyaltyReward,
         Product,
@@ -47,6 +63,7 @@ if TYPE_CHECKING:
         DailyAlertKey,
         DailyAttemptOutcome,
         DailyContentStatus,
+        DailyRequestStatus,
         PaymentProvider,
         PurchaseStatus,
     )
@@ -57,6 +74,7 @@ if TYPE_CHECKING:
         PurchaseFilters,
         ReferralFilters,
     )
+    from app.domain.patch import Maybe
     from app.domain.stats import RevenueSummary, StatsPeriod, TopProduct
 
 
@@ -630,6 +648,20 @@ class DailySubscriptionRepository(Protocol):
         """Record that the buyer was told they have seen everything, for now."""
         ...
 
+    async def set_requests_ban(
+        self,
+        user_id: int,
+        *,
+        banned_by: str | None,
+        at: datetime,
+    ) -> DailySubscription | None:
+        """Ban the buyer from sending content requests (``banned_by``), or lift it (``None``).
+
+        Idempotent: banning a banned buyer keeps who banned them first and when.
+        ``None`` when the buyer has no subscription.
+        """
+        ...
+
 
 class DailyContentRepository(Protocol):
     """The Daily Content library. Items are archived, never deleted."""
@@ -889,7 +921,8 @@ class DailyDeliveryRepository(Protocol):
 
 
 class DailyOutboxRepository(Protocol):
-    """Messages the Daily runtime owes somebody: alerts, notices.
+    """Messages the Daily runtime owes somebody: alerts, notices, answers to
+    content requests, and items the admin panel sends to the owner.
 
     Sent like deliveries: a lease while an attempt is under way, every outcome
     written against that lease's token, a dead attempt taken over (so a
@@ -897,7 +930,11 @@ class DailyOutboxRepository(Protocol):
     """
 
     async def enqueue(self, draft: DailyOutboxDraft) -> DailyOutboxMessage | None:
-        """Queue a message; ``None`` when its ``dedupe_key`` was queued before."""
+        """Queue a message; ``None`` when its ``dedupe_key`` was queued before.
+
+        A message may carry one item to send instead of its text: a library
+        item (``content_id``) or a request's attachment (``request_item_id``).
+        """
         ...
 
     async def get(self, message_id: int) -> DailyOutboxMessage | None:
@@ -954,8 +991,13 @@ class DailyOutboxRepository(Protocol):
         """Refused for good, or out of attempts. Final."""
         ...
 
-    async def expire_overdue(self, *, now: datetime, limit: int = 100) -> int:
-        """Drop the messages whose deadline passed unsent; return how many."""
+    async def expire_overdue(
+        self,
+        *,
+        now: datetime,
+        limit: int = 100,
+    ) -> tuple[DailyOutboxMessage, ...]:
+        """Drop the messages whose deadline passed unsent; return them, now expired."""
         ...
 
 
@@ -976,4 +1018,161 @@ class DailyAlertRepository(Protocol):
 
     async def list_all(self) -> tuple[DailyAlert, ...]:
         """Every alert evaluated so far."""
+        ...
+
+
+class DailyRequestRepository(Protocol):
+    """Buyers' content requests, their messages and their history.
+
+    A request is created once per draft (``client_draft_id`` is unique), never
+    deleted, and changed from the panel only against the version it was read
+    at. A history line written under an idempotency key is written once.
+    """
+
+    async def create(
+        self,
+        draft: DailyRequestDraft,
+        *,
+        at: datetime,
+    ) -> tuple[DailyContentRequest, bool]:
+        """Create the request, its messages and its ``submitted`` line; return it
+        and whether this call created it.
+
+        Idempotent per ``client_draft_id``: the same draft again returns the
+        request it already became.
+
+        Raises:
+            ConflictError: the draft became another buyer's request.
+        """
+        ...
+
+    async def get(self, request_id: int) -> DailyContentRequest | None:
+        """One request, or ``None``."""
+        ...
+
+    async def lock(self, request_id: int) -> DailyContentRequest | None:
+        """One request, locked until the end of the transaction; ``None`` if missing."""
+        ...
+
+    async def find_by_draft(self, client_draft_id: UUID) -> DailyContentRequest | None:
+        """The request this draft became, if it was sent."""
+        ...
+
+    async def items_of(self, request_id: int) -> tuple[DailyRequestItem, ...]:
+        """The request's messages, in the buyer's order."""
+        ...
+
+    async def get_item(self, item_id: int) -> DailyRequestItem | None:
+        """One message of a request, or ``None``."""
+        ...
+
+    async def events_of(self, request_id: int) -> tuple[DailyRequestEvent, ...]:
+        """The request's history, oldest first."""
+        ...
+
+    async def count_open(self, user_id: int) -> int:
+        """The buyer's requests still waiting for the owner: new or in review."""
+        ...
+
+    async def count_since(self, user_id: int, since: datetime) -> int:
+        """The buyer's requests sent from ``since`` on, whatever became of them."""
+        ...
+
+    async def update(
+        self,
+        request_id: int,
+        *,
+        expected_version: int,
+        at: datetime,
+        status: Maybe[DailyRequestStatus],
+        admin_note: Maybe[str | None],
+    ) -> DailyContentRequest | None:
+        """Apply the owner's change and move to the next version.
+
+        Only when the request is still at ``expected_version``; ``None`` when it
+        is not — somebody changed it since it was read — or does not exist.
+        A move into completed or rejected stamps ``closed_at``; out of them,
+        clears it.
+        """
+        ...
+
+    async def add_event(
+        self, draft: DailyRequestEventDraft, *, at: datetime
+    ) -> DailyRequestEvent | None:
+        """Add a line to the history; ``None`` when its idempotency key was used before."""
+        ...
+
+    async def find_event(self, idempotency_key: str) -> DailyRequestEvent | None:
+        """The line written under this key, if any."""
+        ...
+
+    async def reply_of(self, outbox_message_id: int) -> DailyRequestEvent | None:
+        """The ``reply_queued`` line of the answer this outbox message carries."""
+        ...
+
+
+class DailyReportRepository(Protocol):
+    """What the admin panel reads about Daily Content. Reads only."""
+
+    async def overview_counts(self, *, today: date, since: datetime) -> DailyOverviewCounts:
+        """Subscriptions, today's deliveries, requests and the outbox, counted.
+
+        ``since`` bounds the outbox failures counted as recent.
+        """
+        ...
+
+    async def library(
+        self,
+        filters: DailyLibraryFilters,
+        page: PageRequest,
+    ) -> Page[DailyLibraryEntry]:
+        """Library items, newest first."""
+        ...
+
+    async def library_entry(self, content_id: int) -> DailyLibraryEntry | None:
+        """One library item with its numbers, or ``None``."""
+        ...
+
+    async def subscribers(
+        self,
+        filters: DailySubscriberFilters,
+        page: PageRequest,
+    ) -> Page[DailySubscriberEntry]:
+        """Subscriptions, most recent first contact first."""
+        ...
+
+    async def subscriber(self, user_id: int) -> DailySubscriberEntry | None:
+        """One subscription with its numbers, or ``None``."""
+        ...
+
+    async def deliveries(
+        self,
+        filters: DailyDeliveryFilters,
+        page: PageRequest,
+    ) -> Page[DailyDeliveryEntry]:
+        """Deliveries, latest date first."""
+        ...
+
+    async def delivery(self, delivery_id: int) -> DailyDeliveryEntry | None:
+        """One delivery with the buyer's name, or ``None``."""
+        ...
+
+    async def requests(
+        self,
+        filters: DailyRequestFilters,
+        page: PageRequest,
+    ) -> Page[DailyRequestEntry]:
+        """Content requests, newest first."""
+        ...
+
+    async def request_entry(self, request_id: int) -> DailyRequestEntry | None:
+        """One request as a row of the listing, or ``None``."""
+        ...
+
+    async def recent_deliveries(self, user_id: int, *, limit: int) -> tuple[DailyDelivery, ...]:
+        """The buyer's latest deliveries, latest date first."""
+        ...
+
+    async def requests_of(self, user_id: int, *, limit: int) -> tuple[DailyContentRequest, ...]:
+        """The buyer's latest requests, newest first."""
         ...

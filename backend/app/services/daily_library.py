@@ -16,6 +16,11 @@ only active ones are offered to new deliveries.
 Adding content delivers nothing and plans nothing: that stays the delivery
 engine's job. It works whether Daily Content is switched on or not, so the
 library can be filled before the launch.
+
+The admin panel changes items through ``change_status_as_admin``: the same
+lock, the same transitions and the same duplicate check as the owner's
+buttons, attributed ``admin:<username>:<action>`` — so the owner in Telegram
+and an admin in the panel can never interleave on one item.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from typing import TYPE_CHECKING
 from app.core.exceptions import DailyContentDuplicateError, DailySendError
 from app.core.logging import get_logger
 from app.domain.daily import next_content_status, owner_reason
+from app.domain.daily_requests import admin_actor, admin_reason
 from app.domain.enums import DailyContentKind, DailyContentStatus
 
 if TYPE_CHECKING:
@@ -127,8 +133,9 @@ class DailyLibraryService:
 
     uow_factory: UnitOfWorkFactory
     settings: DailySettings
-    sender: DailyContentSender
-    """Shows an item to the owner exactly as a buyer gets it."""
+    sender: DailyContentSender | None = None
+    """Shows an item to the owner exactly as a buyer gets it; only the Daily
+    bot's process has one — the admin panel sends through the outbox instead."""
 
     clock: Callable[[], datetime] = field(default=_utc_now)
 
@@ -180,6 +187,35 @@ class DailyLibraryService:
         if not self.is_owner(actor_id):
             logger.warning("daily_library_refused", actor_id=actor_id, action=action.value)
             return StatusResult(outcome=StatusOutcome.NOT_OWNER)
+        return await self._change_status(
+            content_id,
+            action,
+            reason=owner_reason(action),
+            actor=str(actor_id),
+        )
+
+    async def change_status_as_admin(
+        self,
+        username: str,
+        content_id: int,
+        action: LibraryAction,
+    ) -> StatusResult:
+        """The owner's action, taken from the admin panel by ``username``."""
+        return await self._change_status(
+            content_id,
+            action,
+            reason=admin_reason(username, action.value),
+            actor=admin_actor(username),
+        )
+
+    async def _change_status(
+        self,
+        content_id: int,
+        action: LibraryAction,
+        *,
+        reason: str,
+        actor: str,
+    ) -> StatusResult:
         async with self.uow_factory() as uow:
             current = await uow.daily_content.lock(content_id)
             if current is None:
@@ -194,7 +230,7 @@ class DailyLibraryService:
                     content_id,
                     target,
                     at=self.clock(),
-                    reason=owner_reason(action),
+                    reason=reason,
                 )
             except DailyContentDuplicateError as duplicate:
                 twin = await uow.daily_content.get(duplicate.existing_id)
@@ -204,7 +240,7 @@ class DailyLibraryService:
             content_id=content_id,
             status=target.value,
             action=action.value,
-            actor_id=actor_id,
+            actor=actor,
         )
         return StatusResult(outcome=StatusOutcome.CHANGED, item=changed)
 
@@ -232,6 +268,8 @@ class DailyLibraryService:
         item = await self.card(actor_id, content_id)
         if item is None:
             return PreviewResult(outcome=PreviewOutcome.NOT_FOUND)
+        if self.sender is None:  # pragma: no cover — the bot's process always has one
+            return PreviewResult(outcome=PreviewOutcome.FAILED, error="No Daily bot here")
         try:
             await self.sender.send(
                 actor_id,

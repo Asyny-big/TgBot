@@ -11,9 +11,12 @@ from app.domain.entities import (
     BonusTransaction,
     DailyAlert,
     DailyContent,
+    DailyContentRequest,
     DailyDelivery,
     DailyDeliveryAttempt,
     DailyOutboxMessage,
+    DailyRequestEvent,
+    DailyRequestItem,
     DailySubscription,
     LoyaltyReward,
     Product,
@@ -23,7 +26,12 @@ from app.domain.entities import (
     ReferralRecord,
     User,
 )
-from app.domain.enums import DailyAlertKey, DailyOutboxChannel, DailyOutboxKind
+from app.domain.enums import (
+    DailyAlertKey,
+    DailyOutboxChannel,
+    DailyOutboxKind,
+    DailyRequestEventKind,
+)
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models import (
@@ -33,6 +41,9 @@ if TYPE_CHECKING:
         DailyDeliveryAttemptModel,
         DailyDeliveryModel,
         DailyOutboxModel,
+        DailyRequestEventModel,
+        DailyRequestItemModel,
+        DailyRequestModel,
         DailySubscriptionModel,
         LoyaltyRewardModel,
         ProductModel,
@@ -180,6 +191,8 @@ def to_daily_subscription(model: DailySubscriptionModel) -> DailySubscription:
         paused_at=model.paused_at,
         blocked_at=model.blocked_at,
         exhausted_notified_at=model.exhausted_notified_at,
+        requests_banned_at=model.requests_banned_at,
+        requests_banned_by=model.requests_banned_by,
         created_at=model.created_at,
         updated_at=model.updated_at,
     )
@@ -269,6 +282,8 @@ def to_daily_outbox_message(model: DailyOutboxModel) -> DailyOutboxMessage:
         deadline_at=model.deadline_at,
         created_at=model.created_at,
         updated_at=model.updated_at,
+        content_id=model.content_id,
+        request_item_id=model.request_item_id,
         lease_token=model.lease_token,
         lease_until=model.lease_until,
         sent_at=model.sent_at,
@@ -288,4 +303,57 @@ def to_daily_alert(model: DailyAlertModel) -> DailyAlert:
         fired_at=model.fired_at,
         notified_at=model.notified_at,
         resolved_at=model.resolved_at,
+    )
+
+
+def to_daily_request(model: DailyRequestModel) -> DailyContentRequest:
+    """Map a content request row onto its domain entity."""
+    return DailyContentRequest(
+        id=model.id,
+        user_id=model.user_id,
+        status=model.status,
+        client_draft_id=model.client_draft_id,
+        purchases_at_submit=model.purchases_at_submit,
+        version=model.version,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+        admin_note=model.admin_note,
+        closed_at=model.closed_at,
+    )
+
+
+def to_daily_request_item(model: DailyRequestItemModel) -> DailyRequestItem:
+    """Map a content request's message row onto its domain entity."""
+    return DailyRequestItem(
+        id=model.id,
+        request_id=model.request_id,
+        position=model.position,
+        kind=model.kind,
+        source_chat_id=model.source_chat_id,
+        source_message_id=model.source_message_id,
+        created_at=model.created_at,
+        body=model.body,
+        entities=tuple(model.entities or ()),
+        file_id=model.file_id,
+        file_unique_id=model.file_unique_id,
+        file_size=model.file_size,
+        file_name=model.file_name,
+        mime_type=model.mime_type,
+        duration=model.duration,
+    )
+
+
+def to_daily_request_event(model: DailyRequestEventModel) -> DailyRequestEvent:
+    """Map a content request's audit row onto its domain entity."""
+    return DailyRequestEvent(
+        id=model.id,
+        request_id=model.request_id,
+        kind=DailyRequestEventKind(model.kind),
+        actor=model.actor,
+        created_at=model.created_at,
+        from_status=model.from_status,
+        to_status=model.to_status,
+        body=model.body,
+        outbox_message_id=model.outbox_message_id,
+        idempotency_key=model.idempotency_key,
     )

@@ -5,6 +5,9 @@ Every private message — a command, a button, anything — is first a *contact*
 buyer. An activating contact gets the welcome and then the first item, and
 nothing else; any later message does what it asks: status, pause, resume, help.
 
+The menu under every answer is built afresh: "💡 Suggest content" is in it
+only for a buyer who may suggest content (see ``handlers.requests``).
+
 The buyer is always ``message.from_user`` — Telegram's own account of who wrote.
 """
 
@@ -26,7 +29,7 @@ from app.domain.enums import DailySubscriptionStatus
 from app.services.daily_subscriptions import ContactOutcome, ContactResult
 
 if TYPE_CHECKING:
-    from aiogram.types import CallbackQuery, Message
+    from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup
 
     from app.domain.entities import DailySubscription
 
@@ -35,45 +38,47 @@ logger = get_logger(__name__)
 
 async def handle_start(message: Message, daily: DailyServices) -> None:
     """``/start``: activates on the first eligible contact, else shows the status."""
-    if await _contact(message, daily) is not None:
+    if await contact(message, daily) is not None:
         await _show_status(message, daily)
 
 
 async def handle_status(message: Message, daily: DailyServices) -> None:
     """``/status`` or "📊 My status"."""
-    if await _contact(message, daily) is not None:
+    if await contact(message, daily) is not None:
         await _show_status(message, daily)
 
 
 async def handle_pause(message: Message, daily: DailyServices) -> None:
     """``/pause`` or "⏸ Pause"."""
-    subscription = await _contact(message, daily)
+    subscription = await contact(message, daily)
     if subscription is None:
         return
     if await daily.subscriptions.pause(subscription.user_id) is not None:
-        await message.answer(texts.PAUSED, reply_markup=menu_keyboard(paused=True))
+        await message.answer(texts.PAUSED, reply_markup=await menu_for(daily, subscription.user_id))
 
 
 async def handle_resume(message: Message, daily: DailyServices) -> None:
     """``/resume`` or "▶️ Resume"."""
-    subscription = await _contact(message, daily)
+    subscription = await contact(message, daily)
     if subscription is None:
         return
     if await daily.subscriptions.resume(subscription.user_id) is not None:
-        await message.answer(texts.RESUMED, reply_markup=menu_keyboard(paused=False))
+        await message.answer(
+            texts.RESUMED,
+            reply_markup=await menu_for(daily, subscription.user_id),
+        )
 
 
 async def handle_help(message: Message, daily: DailyServices) -> None:
     """``/help``."""
-    subscription = await _contact(message, daily)
+    subscription = await contact(message, daily)
     if subscription is not None:
-        paused = subscription.status is DailySubscriptionStatus.PAUSED
-        await message.answer(texts.HELP, reply_markup=menu_keyboard(paused=paused))
+        await message.answer(texts.HELP, reply_markup=await menu_for(daily, subscription.user_id))
 
 
 async def handle_anything_else(message: Message, daily: DailyServices) -> None:
     """Any other message: a contact like the rest, then the status."""
-    if await _contact(message, daily) is not None:
+    if await contact(message, daily) is not None:
         await _show_status(message, daily)
 
 
@@ -82,7 +87,7 @@ async def handle_anything_else(message: Message, daily: DailyServices) -> None:
 # --------------------------------------------------------------------------- #
 
 
-async def _contact(message: Message, daily: DailyServices) -> DailySubscription | None:
+async def contact(message: Message, daily: DailyServices) -> DailySubscription | None:
     """Record the contact; return the subscription when the message may go on.
 
     ``None`` means the contact was fully answered here — refused, or the
@@ -120,7 +125,7 @@ async def _welcome_and_first_item(
     try:
         await message.answer(
             texts.welcome(subscription.anchor_minute),
-            reply_markup=menu_keyboard(paused=False),
+            reply_markup=await menu_for(daily, subscription.user_id),
         )
     except TelegramForbiddenError:
         await daily.subscriptions.blocked(subscription.user_id)
@@ -159,8 +164,16 @@ async def _show_status(message: Message, daily: DailyServices) -> None:
             anchor_minute=current.subscription.anchor_minute,
             paused=paused,
         ),
-        reply_markup=menu_keyboard(paused=paused),
+        reply_markup=await menu_for(daily, user.id),
     )
+
+
+async def menu_for(daily: DailyServices, user_id: int) -> ReplyKeyboardMarkup:
+    """The buyer's menu as things stand: pause or resume, and the suggest button if theirs."""
+    access = await daily.requests.access(user_id)
+    subscription = access.subscription
+    paused = subscription is not None and subscription.status is DailySubscriptionStatus.PAUSED
+    return menu_keyboard(paused=paused, can_suggest=access.can_suggest)
 
 
 async def handle_foreign_button(callback: CallbackQuery) -> None:
@@ -189,4 +202,4 @@ def build_router() -> Router:
     return router
 
 
-__all__ = ["build_router"]
+__all__ = ["build_router", "contact", "menu_for"]

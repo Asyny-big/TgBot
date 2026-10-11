@@ -44,6 +44,7 @@ from app.domain.enums import (
     DailyDeliveryStatus,
     DailyDeliveryTrigger,
     DailyOutboxStatus,
+    DailyRequestStatus,
     DailySubscriptionStatus,
     LoyaltyRewardKind,
     LoyaltyRewardStatus,
@@ -163,6 +164,19 @@ _DAILY_OUTBOX_BODY_LENGTH_SQL: Final = "char_length(body) BETWEEN 1 AND 4096"
 _DAILY_OUTBOX_DUE_SQL: Final = "status = 'pending'"
 _DAILY_OUTBOX_OPEN_SQL: Final = "status IN ('pending', 'sending')"
 _DAILY_ALERT_FIRING_SHAPE_SQL: Final = "state <> 'firing' OR fired_at IS NOT NULL"
+_DAILY_OUTBOX_ONE_ATTACHMENT_SQL: Final = "num_nonnulls(content_id, request_item_id) <= 1"
+_DAILY_SUBSCRIPTION_BAN_SHAPE_SQL: Final = (
+    "(requests_banned_at IS NULL) = (requests_banned_by IS NULL)"
+)
+_DAILY_REQUEST_CLOSED_SHAPE_SQL: Final = (
+    "(status IN ('completed', 'rejected')) = (closed_at IS NOT NULL)"
+)
+_DAILY_REQUEST_NOTE_LENGTH_SQL: Final = "admin_note IS NULL OR char_length(admin_note) <= 2000"
+_DAILY_REQUEST_ITEM_KIND_SHAPE_SQL: Final = (
+    "(kind = 'text' AND file_id IS NULL AND body IS NOT NULL) "
+    "OR (kind <> 'text' AND file_id IS NOT NULL)"
+)
+_DAILY_REQUEST_ITEM_BODY_LENGTH_SQL: Final = "body IS NULL OR char_length(body) BETWEEN 1 AND 4096"
 
 #: Operator class that makes ``ILIKE '%term%'`` index-assisted.
 _TRGM_OPS: Final = "gin_trgm_ops"
@@ -601,9 +615,12 @@ class DailySubscriptionModel(TimestampMixin, Base):
     paused_at: Mapped[datetime | None] = mapped_column(nullable=True)
     blocked_at: Mapped[datetime | None] = mapped_column(nullable=True)
     exhausted_notified_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    requests_banned_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    requests_banned_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     __table_args__ = (
         CheckConstraint(_DAILY_SUBSCRIPTION_SHAPE_SQL, name="state_shape"),
+        CheckConstraint(_DAILY_SUBSCRIPTION_BAN_SHAPE_SQL, name="requests_ban_shape"),
         CheckConstraint(_DAILY_ANCHOR_RANGE_SQL, name="anchor_minute_range"),
         CheckConstraint(_DAILY_ACTIVATION_ORDER_SQL, name="activation_after_first_interaction"),
         # The planner's question — whose window opens around now? — over the
@@ -806,7 +823,8 @@ class DailyDeliveryAttemptModel(Base):
 
 
 class DailyOutboxModel(TimestampMixin, Base):
-    """A message the Daily runtime owes somebody: an alert, a notice.
+    """A message the Daily runtime owes somebody: an alert, a notice, an answer,
+    or an item the admin panel asked for.
 
     Queued once per ``dedupe_key``, sent under a lease like a delivery, and
     dropped unsent once its deadline passes.
@@ -820,6 +838,16 @@ class DailyOutboxModel(TimestampMixin, Base):
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     dedupe_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    content_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("daily_content.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    request_item_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("daily_request_items.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
     status: Mapped[DailyOutboxStatus] = mapped_column(
         _enum_column(DailyOutboxStatus, "daily_outbox_status"),
         nullable=False,
@@ -841,6 +869,7 @@ class DailyOutboxModel(TimestampMixin, Base):
         CheckConstraint(_DAILY_OUTBOX_SENT_SHAPE_SQL, name="sent_shape"),
         CheckConstraint(_DAILY_OUTBOX_CHANNEL_SQL, name="channel_known"),
         CheckConstraint(_DAILY_OUTBOX_BODY_LENGTH_SQL, name="body_length"),
+        CheckConstraint(_DAILY_OUTBOX_ONE_ATTACHMENT_SQL, name="one_attachment"),
         CheckConstraint("attempts >= 0", name="attempts_non_negative"),
         Index(
             "ix_daily_outbox_due",
@@ -884,4 +913,116 @@ class DailyAlertModel(TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint(_DAILY_ALERT_FIRING_SHAPE_SQL, name="firing_shape"),
         CheckConstraint("notifications >= 0", name="notifications_non_negative"),
+    )
+
+
+class DailyRequestModel(TimestampMixin, Base):
+    """A buyer's content request: one per submitted draft, versioned for the panel."""
+
+    __tablename__ = "daily_requests"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("daily_subscriptions.user_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    status: Mapped[DailyRequestStatus] = mapped_column(
+        _enum_column(DailyRequestStatus, "daily_request_status"),
+        nullable=False,
+        server_default=text("'new'"),
+    )
+    client_draft_id: Mapped[UUID] = mapped_column(nullable=False)
+    purchases_at_submit: Mapped[int] = mapped_column(Integer, nullable=False)
+    admin_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    closed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    __table_args__ = (
+        # The same draft submitted twice is one request.
+        UniqueConstraint("client_draft_id", name="uq_daily_requests_client_draft_id"),
+        CheckConstraint(_DAILY_REQUEST_CLOSED_SHAPE_SQL, name="closed_shape"),
+        CheckConstraint(_DAILY_REQUEST_NOTE_LENGTH_SQL, name="note_length"),
+        CheckConstraint("version >= 1", name="version_positive"),
+        CheckConstraint("purchases_at_submit >= 0", name="purchases_non_negative"),
+        Index("ix_daily_requests_status_created_at", "status", "created_at"),
+        Index("ix_daily_requests_user_id_status", "user_id", "status"),
+    )
+
+
+class DailyRequestItemModel(Base):
+    """One message of a content request."""
+
+    __tablename__ = "daily_request_items"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    request_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("daily_requests.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    position: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    kind: Mapped[DailyContentKind] = mapped_column(
+        _enum_column(DailyContentKind, "daily_content_kind"),
+        nullable=False,
+    )
+    body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    entities: Mapped[list[dict[str, object]] | None] = mapped_column(JSONB, nullable=True)
+    file_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_unique_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    file_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    duration: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "request_id",
+            "position",
+            name="uq_daily_request_items_request_position",
+        ),
+        CheckConstraint(_DAILY_REQUEST_ITEM_KIND_SHAPE_SQL, name="kind_shape"),
+        CheckConstraint(_DAILY_REQUEST_ITEM_BODY_LENGTH_SQL, name="body_length"),
+        CheckConstraint("position BETWEEN 1 AND 10", name="position_range"),
+    )
+
+
+class DailyRequestEventModel(Base):
+    """One line of a content request's audit trail."""
+
+    __tablename__ = "daily_request_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    request_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("daily_requests.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    actor: Mapped[str] = mapped_column(String(100), nullable=False)
+    from_status: Mapped[DailyRequestStatus | None] = mapped_column(
+        _enum_column(DailyRequestStatus, "daily_request_status"),
+        nullable=True,
+    )
+    to_status: Mapped[DailyRequestStatus | None] = mapped_column(
+        _enum_column(DailyRequestStatus, "daily_request_status"),
+        nullable=True,
+    )
+    body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    outbox_message_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("daily_outbox.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"), nullable=False)
+
+    __table_args__ = (
+        # The owner's reply submitted twice is queued once.
+        UniqueConstraint("idempotency_key", name="uq_daily_request_events_idempotency_key"),
+        Index("ix_daily_request_events_request_id", "request_id"),
+        Index("ix_daily_request_events_outbox_message_id", "outbox_message_id"),
     )

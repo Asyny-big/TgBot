@@ -216,6 +216,24 @@ class SqlAlchemyDailySubscriptionRepository:
         model.exhausted_notified_at = at
         return await self._save(model)
 
+    async def set_requests_ban(
+        self,
+        user_id: int,
+        *,
+        banned_by: str | None,
+        at: datetime,
+    ) -> DailySubscription | None:
+        model = await self._locked(user_id)
+        if model is None:
+            return None
+        if banned_by is None:
+            model.requests_banned_at = None
+            model.requests_banned_by = None
+        elif model.requests_banned_at is None:
+            model.requests_banned_at = at
+            model.requests_banned_by = banned_by
+        return await self._save(model)
+
     async def _locked(self, user_id: int) -> DailySubscriptionModel | None:
         statement = (
             select(DailySubscriptionModel)

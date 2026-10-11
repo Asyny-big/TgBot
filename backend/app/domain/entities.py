@@ -26,6 +26,8 @@ from app.domain.enums import (
     DailyOutboxChannel,
     DailyOutboxKind,
     DailyOutboxStatus,
+    DailyRequestEventKind,
+    DailyRequestStatus,
     DailySubscriptionStatus,
     LoyaltyRewardKind,
     LoyaltyRewardStatus,
@@ -311,6 +313,12 @@ class DailySubscription:
     """Set while the buyer has the bot blocked; cleared when they unblock it."""
 
     exhausted_notified_at: datetime | None = None
+    requests_banned_at: datetime | None = None
+    """Set while the buyer may not send content requests."""
+
+    requests_banned_by: str | None = None
+    """Who banned them: ``admin:<username>``."""
+
     created_at: datetime
     updated_at: datetime
 
@@ -427,7 +435,7 @@ class DailyDeliveryAttempt:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DailyOutboxMessage:
-    """One message the Daily runtime must get to somebody, other than an item.
+    """One message the Daily runtime must get to somebody, other than a delivery.
 
     Sent with the same discipline as deliveries: a lease while an attempt is
     under way, retries for uncertain failures, and a deadline after which it
@@ -449,6 +457,12 @@ class DailyOutboxMessage:
     deadline_at: datetime
     created_at: datetime
     updated_at: datetime
+    content_id: int | None = None
+    """A library item to send instead of ``body`` — then a label only."""
+
+    request_item_id: int | None = None
+    """A buyer's attachment to send instead of ``body`` — then a label only."""
+
     lease_token: UUID | None = None
     lease_until: datetime | None = None
     sent_at: datetime | None = None
@@ -477,3 +491,67 @@ class DailyAlert:
     fired_at: datetime | None = None
     notified_at: datetime | None = None
     resolved_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailyContentRequest:
+    """A buyer's suggestion of content, as the owner sees and handles it.
+
+    ``version`` grows with every change made from the admin panel: a change
+    based on an older version is refused, so two tabs never overwrite each
+    other silently.
+    """
+
+    id: int
+    user_id: int
+    status: DailyRequestStatus
+    client_draft_id: UUID
+    """The draft it came from: submitting the same draft twice is one request."""
+
+    purchases_at_submit: int
+    """Completed purchases when it was sent — for display only, never for access."""
+
+    version: int
+    created_at: datetime
+    updated_at: datetime
+    admin_note: str | None = None
+    closed_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailyRequestItem:
+    """One message of a content request: a text, or a file with its caption."""
+
+    id: int
+    request_id: int
+    position: int
+    kind: DailyContentKind
+    source_chat_id: int
+    source_message_id: int
+    created_at: datetime
+    body: str | None = None
+    entities: tuple[dict[str, object], ...] = ()
+    file_id: str | None = None
+    file_unique_id: str | None = None
+    file_size: int | None = None
+    file_name: str | None = None
+    mime_type: str | None = None
+    duration: int | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailyRequestEvent:
+    """One line of a content request's audit trail."""
+
+    id: int
+    request_id: int
+    kind: DailyRequestEventKind
+    actor: str
+    """``user:<id>``, ``admin:<username>`` or ``system``."""
+
+    created_at: datetime
+    from_status: DailyRequestStatus | None = None
+    to_status: DailyRequestStatus | None = None
+    body: str | None = None
+    outbox_message_id: int | None = None
+    idempotency_key: str | None = None

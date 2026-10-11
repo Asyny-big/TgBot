@@ -292,6 +292,15 @@ class DailyOutboxKind(StrEnum):
     EXHAUSTED_NOTICE = "exhausted_notice"
     """A buyer has received everything there is, for now."""
 
+    REQUEST_REPLY = "request_reply"
+    """The owner's answer to a buyer's content request."""
+
+    LIBRARY_PREVIEW = "library_preview"
+    """A library item sent to the owner from the admin panel ("send it to me")."""
+
+    REQUEST_ATTACHMENT = "request_attachment"
+    """A file a buyer attached to a request, sent to the owner from the panel."""
+
 
 class DailyOutboxChannel(StrEnum):
     """Which bot sends an outbox message.
@@ -337,3 +346,27 @@ class DailyAlertState(StrEnum):
 
     OK = "ok"
     FIRING = "firing"
+
+
+class DailyRequestStatus(StrEnum):
+    """Where a buyer's content request stands with the owner."""
+
+    NEW = "new"
+    IN_REVIEW = "in_review"
+    COMPLETED = "completed"
+    REJECTED = "rejected"
+
+
+class DailyRequestEventKind(StrEnum):
+    """What happened to a content request — its audit trail.
+
+    Stored as plain text, not a database enum, so later kinds need no
+    migration.
+    """
+
+    SUBMITTED = "submitted"
+    STATUS_CHANGED = "status_changed"
+    NOTE_CHANGED = "note_changed"
+    REPLY_QUEUED = "reply_queued"
+    REPLY_SENT = "reply_sent"
+    REPLY_FAILED = "reply_failed"

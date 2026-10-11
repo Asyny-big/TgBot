@@ -119,15 +119,16 @@ def create_daily_worker(
     settings = container.settings.daily
     pacer = SendPacer(rate_per_second=settings.send_rate_per_second)
     heartbeats = Heartbeats()
-    delivery = container.build_daily_delivery(
-        PacedDailySender(create_daily_sender(daily_bot), pacer),
-    )
+    items = PacedDailySender(create_daily_sender(daily_bot), pacer)
+    delivery = container.build_daily_delivery(items)
     outbox = container.build_daily_outbox(
         {
             DailyOutboxChannel.DAILY: PacedTextSender(TelegramTextSender(daily_bot), pacer),
             # Only for "Telegram refuses the Daily bot's token": a few messages a day.
             DailyOutboxChannel.SHOP: TelegramTextSender(shop_bot),
-        }
+        },
+        # What the admin panel sends to the owner: the same bot, the same budget.
+        item_sender=items,
     )
     return DailyWorker(
         loops=(

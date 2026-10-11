@@ -21,14 +21,55 @@ if TYPE_CHECKING:
     from app.domain.entities import DailyContent
 
 
-def menu_keyboard(*, paused: bool) -> ReplyKeyboardMarkup:
-    """ "📊 My status", and "⏸ Pause" or "▶️ Resume" — whichever applies."""
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=texts.STATUS_BUTTON)],
-            [KeyboardButton(text=texts.RESUME_BUTTON if paused else texts.PAUSE_BUTTON)],
-        ],
-        resize_keyboard=True,
+def menu_keyboard(*, paused: bool, can_suggest: bool = False) -> ReplyKeyboardMarkup:
+    """ "📊 My status", and "⏸ Pause" or "▶️ Resume" — whichever applies.
+
+    "💡 Suggest content" only for a buyer who may suggest: 20 completed
+    purchases and no ban.
+    """
+    rows = [
+        [KeyboardButton(text=texts.STATUS_BUTTON)],
+        [KeyboardButton(text=texts.RESUME_BUTTON if paused else texts.PAUSE_BUTTON)],
+    ]
+    if can_suggest:
+        rows.append([KeyboardButton(text=texts.SUGGEST_BUTTON)])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+# --------------------------------------------------------------------------- #
+# A buyer's content request                                                   #
+# --------------------------------------------------------------------------- #
+
+
+class DraftButton(StrEnum):
+    """What a draft's button asks for."""
+
+    SEND = "send"
+    CANCEL = "cancel"
+
+
+class DraftCallback(CallbackData, prefix="dr"):
+    """A draft's button, naming the draft it was shown under."""
+
+    button: DraftButton
+    draft: str
+
+
+def draft_keyboard(draft_id: str) -> InlineKeyboardMarkup:
+    """Under the draft's answers: send it, or throw it away."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=texts.SEND_DRAFT_BUTTON,
+                    callback_data=DraftCallback(button=DraftButton.SEND, draft=draft_id).pack(),
+                ),
+                InlineKeyboardButton(
+                    text=texts.CANCEL_DRAFT_BUTTON,
+                    callback_data=DraftCallback(button=DraftButton.CANCEL, draft=draft_id).pack(),
+                ),
+            ]
+        ]
     )
 
 
@@ -119,10 +160,13 @@ def text_keyboard() -> InlineKeyboardMarkup:
 
 __all__ = [
     "LIBRARY_ACTIONS",
+    "DraftButton",
+    "DraftCallback",
     "LibraryButton",
     "LibraryCallback",
     "added_keyboard",
     "card_keyboard",
+    "draft_keyboard",
     "menu_keyboard",
     "text_keyboard",
 ]

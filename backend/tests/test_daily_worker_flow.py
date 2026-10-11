@@ -17,7 +17,12 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import pytest
-from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+)
 from aiogram.methods import SendMessage, SendVideo
 from sqlalchemy import text
 
@@ -25,7 +30,7 @@ from app.core.config import DailySettings
 from app.daily_bot import texts
 from app.daily_worker.health import Heartbeats
 from app.daily_worker.loops import EvaluatorLoop, ExpiryLoop, OutboxLoop, PlannerLoop, SenderLoop
-from app.domain.commands import DailyContentDraft, DailyDeliveryDraft
+from app.domain.commands import DailyContentDraft, DailyDeliveryDraft, DailyRequestDraft
 from app.domain.daily import DAILY_TIMEZONE, activation_window
 from app.domain.daily_alerts import AlertNotice, AlertObservation, TokenState
 from app.domain.enums import (
@@ -37,10 +42,12 @@ from app.domain.enums import (
     DailyDeliveryTrigger,
     DailyOutboxChannel,
     DailyOutboxStatus,
+    DailyRequestEventKind,
 )
 from app.infrastructure.telegram.daily import TelegramDailyContentSender
 from app.infrastructure.telegram.daily_pacing import PacedDailySender, PacedTextSender, SendPacer
 from app.infrastructure.telegram.daily_runtime import TelegramTextSender
+from app.services.daily_admin import DailyAdminService
 from app.services.daily_alerts import DailyAlertService
 from app.services.daily_delivery import DailyDeliveryService
 from app.services.daily_library import DailyLibraryService
@@ -203,9 +210,10 @@ async def make_worker(live_uow_factory: SqlAlchemyUnitOfWorkFactory) -> AsyncIte
             sleep=fake_time.sleep,
         )
         heartbeats = Heartbeats(clock=fake_time)
+        items = PacedDailySender(TelegramDailyContentSender(bot), pacer)
         delivery = DailyDeliveryService(
             uow_factory=live_uow_factory,
-            sender=PacedDailySender(TelegramDailyContentSender(bot), pacer),
+            sender=items,
             settings=settings,
             clock=clock,
             jitter=lambda: 0.0,
@@ -217,6 +225,7 @@ async def make_worker(live_uow_factory: SqlAlchemyUnitOfWorkFactory) -> AsyncIte
                 DailyOutboxChannel.DAILY: PacedTextSender(TelegramTextSender(bot), pacer),
                 DailyOutboxChannel.SHOP: TelegramTextSender(shop),
             },
+            item_sender=items,
             clock=clock,
             jitter=lambda: 0.0,
         )
@@ -826,3 +835,99 @@ async def test_two_workers_tell_an_exhausted_buyer_once(worker: Worker) -> None:
 
     assert sorted(told) == [False, True]
     assert await _count(worker, "daily_outbox") == 1
+
+
+# --------------------------------------------------------------------------- #
+# The admin panel's messages: answers and "send it to me"                     #
+# --------------------------------------------------------------------------- #
+
+
+def _admin(worker: Worker) -> DailyAdminService:
+    return DailyAdminService(
+        uow_factory=worker.uow_factory,
+        settings=worker.settings,
+        library=worker.library(),
+        clock=worker.clock,
+    )
+
+
+async def _request(worker: Worker, user_id: int) -> int:
+    await seed_buyer(worker.uow_factory, user_id, completed=20)
+    async with worker.uow_factory() as uow:
+        await uow.daily_subscriptions.record_first_interaction(user_id, at=worker.clock.now)
+        await uow.daily_subscriptions.activate(user_id, at=worker.clock.now, anchor_minute=720)
+        request, _ = await uow.daily_requests.create(
+            DailyRequestDraft(
+                user_id=user_id,
+                client_draft_id=uuid4(),
+                purchases_at_submit=20,
+                items=(
+                    DailyContentDraft(
+                        kind=DailyContentKind.TEXT,
+                        source_chat_id=user_id,
+                        source_message_id=1,
+                        added_by=user_id,
+                        body="more of this",
+                    ),
+                ),
+            ),
+            at=worker.clock.now,
+        )
+    return request.id
+
+
+async def _reply_events(worker: Worker, request_id: int) -> list[DailyRequestEventKind]:
+    async with worker.uow_factory() as uow:
+        events = await uow.daily_requests.events_of(request_id)
+    return [
+        event.kind
+        for event in events
+        if event.kind in (DailyRequestEventKind.REPLY_SENT, DailyRequestEventKind.REPLY_FAILED)
+    ]
+
+
+async def test_an_answer_to_a_request_goes_out_through_the_daily_bot(worker: Worker) -> None:
+    request_id = await _request(worker, 9511)
+    await _admin(worker).reply("alice", request_id, text="Added it!", client_key=uuid4())
+
+    await worker.tick()
+    await worker.tick()
+
+    assert worker.bot.texts_to(9511) == [
+        f"💬 Ответ на ваше пожелание #{request_id}:\n\nAdded it!",
+    ]
+    assert await _reply_events(worker, request_id) == [DailyRequestEventKind.REPLY_SENT]
+    assert worker.shop.calls == []
+
+
+async def test_an_answer_to_a_buyer_who_blocked_the_bot_is_recorded_as_failed(
+    worker: Worker,
+) -> None:
+    request_id = await _request(worker, 9512)
+    await _admin(worker).reply("alice", request_id, text="Added it!", client_key=uuid4())
+    worker.bot.failures[SendMessage] = [
+        TelegramForbiddenError(
+            method=SendMessage(chat_id=9512, text="x"),
+            message="Forbidden: bot was blocked by the user",
+        )
+    ]
+
+    await worker.tick()
+    await worker.tick()
+
+    assert worker.bot.texts_to(9512) == []
+    assert await _reply_events(worker, request_id) == [DailyRequestEventKind.REPLY_FAILED]
+
+
+async def test_send_to_me_reaches_the_owner_through_the_shared_budget(worker: Worker) -> None:
+    (item_id,) = await _library(worker, 1)
+
+    await _admin(worker).send_library_item("alice", item_id, uuid4())
+    await worker.tick()
+
+    (sent,) = worker.bot.items_to(OWNER)
+    assert isinstance(sent, SendVideo)
+    assert sent.protect_content is worker.settings.protect_content
+    async with worker.uow_factory() as uow:
+        statuses = list(await uow.session.scalars(text("SELECT status FROM daily_outbox")))
+    assert statuses == [DailyOutboxStatus.SENT.value]

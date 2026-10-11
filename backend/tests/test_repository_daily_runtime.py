@@ -462,7 +462,8 @@ async def test_messages_past_their_deadline_expire(store: UnitOfWorkFactory) -> 
         early = await uow.daily_outbox.expire_overdue(now=NOW + timedelta(minutes=59))
         expired = await uow.daily_outbox.expire_overdue(now=NOW + timedelta(hours=1))
         statuses = {key: await _status(uow, key) for key in ("pending", "sending", "sent")}
-    assert (early, expired) == (0, 2)
+    assert (len(early), len(expired)) == (0, 2)
+    assert {message.status for message in expired} == {DailyOutboxStatus.EXPIRED}
     assert statuses == {
         "pending": DailyOutboxStatus.EXPIRED,
         "sending": DailyOutboxStatus.EXPIRED,
