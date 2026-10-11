@@ -5,7 +5,9 @@ failed. A loop that fails because PostgreSQL or Telegram is down is alive:
 it will succeed again once they are back, and restarting the container would
 only add a restart loop to an outage. What the check catches is a loop that
 stopped turning — stuck, or dead — for longer than it ever should: then the
-health route answers 503 and the container is restarted.
+health route answers 503 and Docker marks the container unhealthy. Compose
+does not restart it for that; the pulse loop stops writing the heartbeat while
+any loop is stale, and the Daily bot's watchdog alerts the owner.
 """
 
 from __future__ import annotations

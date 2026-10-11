@@ -4,9 +4,11 @@
 script, ``.env.example``, the backend image and the runbook must agree with
 one another and with the code: one webhook path, the same ports, a connection
 budget PostgreSQL can hold, and a profile that leaves the shop's own
-deployment exactly as it was.
+deployment exactly as it was. The restore script must stop Daily Content
+along with everything else that writes to the database.
 
-Nothing here talks to a server or starts a container. The repository root is
+Nothing here talks to a server or starts a container: the restore script
+runs against a stand-in for the docker CLI. The repository root is
 needed (these files live outside ``backend/``); without it the module skips.
 """
 
@@ -32,6 +34,7 @@ REPO = BACKEND_DIR.parent
 COMPOSE_FILE = REPO / "docker-compose.prod.yml"
 SERVER_TEMPLATE = REPO / "nginx" / "templates" / "tgshop.conf.template"
 PREFLIGHT = REPO / "scripts" / "preflight.sh"
+RESTORE = REPO / "scripts" / "restore.sh"
 ENV_EXAMPLE = REPO / ".env.example"
 RUNBOOK = REPO / "docs" / "daily-content.md"
 
@@ -440,3 +443,128 @@ def test_preflight_warns_about_a_launch_without_the_shops_button(tmp_path: Path)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "a beta: only those buyers are served" in result.stdout
     assert "LOYALTY_ENABLED is not true" in result.stdout
+
+
+# --------------------------------------------------------------------------- #
+# scripts/restore.sh                                                          #
+# --------------------------------------------------------------------------- #
+
+# A stand-in for the docker CLI: it records every call, answers the two
+# questions the script asks (`compose version`, `ps`), swallows the dump it is
+# handed, and fails where a test says so. Nothing reaches a Docker daemon.
+FAKE_DOCKER = r"""#!/usr/bin/env bash
+call="${*//$'\n'/ }"
+case "${call}" in
+    *"exec -T postgres sh -c"*) cat > /dev/null; exit 0 ;;
+esac
+printf '%s\n' "${call}" >> "${FAKE_DOCKER_LOG}"
+case "${call}" in
+    *" ps "*) printf '%s\n' ${FAKE_RUNNING} ;;
+    *"exec -T postgres pg_restore"*) cat > /dev/null; exit "${FAKE_RESTORE_EXIT:-0}" ;;
+    *"run --rm migrations"*) exit "${FAKE_MIGRATE_EXIT:-0}" ;;
+esac
+exit 0
+"""
+
+WITH_DAILY = "postgres redis migrations api bot daily-bot daily-worker nginx"
+WITHOUT_DAILY = "postgres redis migrations api bot nginx"
+
+STOP_EVERY_WRITER = "--profile daily stop api bot daily-bot daily-worker"
+RESTORE_THE_DUMP = (
+    "exec -T postgres pg_restore --username shop --dbname shop --clean --if-exists "
+    "--no-owner --no-privileges --single-transaction --exit-on-error"
+)
+MIGRATE = "run --rm migrations alembic upgrade head"
+START_EVERY_WRITER = "--profile daily up -d api bot daily-bot daily-worker"
+RELOAD_THE_EDGE = "exec -T nginx nginx -s reload"
+
+
+def _restore(
+    tmp_path: Path,
+    *,
+    running: str,
+    **failures: str,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """``restore.sh --yes`` with ``running`` services; its result and what it changed.
+
+    The changes are the docker calls that are not questions (``version``,
+    ``ps``), in order, without the ``compose --env-file … -f …`` prefix.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(FAKE_DOCKER)
+    docker.chmod(stat.S_IRWXU)
+    env_file = tmp_path / "production.env"
+    env_file.write_text("POSTGRES_USER=shop\nPOSTGRES_DB=shop\nTGSHOP_DOMAIN=shop.example.test\n")
+    dump = tmp_path / "tgshop.dump"
+    dump.write_bytes(b"PGDMP stand-in archive")
+    calls_log = tmp_path / "docker-calls.log"
+    result = subprocess.run(  # noqa: S603 — a fixed script, a stand-in docker
+        ["bash", str(RESTORE), str(dump), "--yes"],  # noqa: S607
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "ENV_FILE": str(env_file),
+            "FAKE_DOCKER_LOG": str(calls_log),
+            "FAKE_RUNNING": running,
+            **failures,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    calls = calls_log.read_text().splitlines() if calls_log.exists() else []
+    changes = [re.sub(r"^compose --env-file \S+ -f \S+ ", "", call) for call in calls]
+    return result, [
+        change for change in changes if change != "compose version" and " ps " not in f" {change}"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("running", "started"),
+    [
+        (WITH_DAILY, START_EVERY_WRITER),
+        (WITHOUT_DAILY, "--profile daily up -d api bot"),
+        (
+            WITHOUT_DAILY.replace("bot", "bot daily-worker"),
+            "--profile daily up -d api bot daily-worker",
+        ),
+    ],
+    ids=["with-daily", "without-daily", "worker-only"],
+)
+def test_restore_stops_every_writer_first_and_starts_again_what_ran(
+    tmp_path: Path,
+    running: str,
+    started: str,
+) -> None:
+    result, changes = _restore(tmp_path, running=running)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert changes == [STOP_EVERY_WRITER, RESTORE_THE_DUMP, MIGRATE, started, RELOAD_THE_EDGE]
+
+
+def test_a_failed_restore_starts_the_writers_again_on_the_old_data(tmp_path: Path) -> None:
+    result, changes = _restore(tmp_path, running=WITH_DAILY, FAKE_RESTORE_EXIT="1")
+
+    assert result.returncode == 1
+    assert "restore failed." in result.stderr
+    assert changes == [STOP_EVERY_WRITER, RESTORE_THE_DUMP, START_EVERY_WRITER, RELOAD_THE_EDGE]
+
+
+def test_the_writers_stay_stopped_while_the_restored_schema_cannot_migrate(
+    tmp_path: Path,
+) -> None:
+    result, changes = _restore(tmp_path, running=WITH_DAILY, FAKE_MIGRATE_EXIT="1")
+
+    assert result.returncode == 1
+    assert "api bot daily-bot daily-worker stay stopped" in result.stderr
+    assert changes == [STOP_EVERY_WRITER, RESTORE_THE_DUMP, MIGRATE]
+
+
+def test_restore_leaves_an_edge_that_is_not_running_alone(tmp_path: Path) -> None:
+    result, changes = _restore(tmp_path, running=WITH_DAILY.replace(" nginx", ""))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert changes == [STOP_EVERY_WRITER, RESTORE_THE_DUMP, MIGRATE, START_EVERY_WRITER]

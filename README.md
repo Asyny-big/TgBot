@@ -468,9 +468,10 @@ Also required:
   challenge for certificate issuance and renewal;
 * outbound HTTPS to `api.telegram.org` and `pay.crypt.bot`.
 
-The resource limits in `docker-compose.prod.yml` add up to about 3.5 GB and 5
-CPUs; on a 2 GB box lower `postgres`'s `shared_buffers` to `128MB` and its memory
-limit to `512m`, and set `API_WORKERS=1`.
+The resource limits in `docker-compose.prod.yml` add up to about 3.7 GB and 6
+CPUs with Daily Content's `daily-bot` and `daily-worker` (about 2.9 GB and 5
+CPUs without them); on a 2 GB box lower `postgres`'s `shared_buffers` to `128MB`
+and its memory limit to `512m`, and set `API_WORKERS=1`.
 
 ## Installation
 
@@ -641,7 +642,12 @@ A password is therefore never stored anywhere, not even hashed at rest.
 # change the credentials
 nano .env                     # SECURITY_ADMIN_USERNAME / SECURITY_ADMIN_PASSWORD
 docker compose -f docker-compose.prod.yml up -d --force-recreate api
+make prod-reload              # nginx must re-resolve the recreated api
 ```
+
+A recreated `api` container may come back on another address, while nginx
+keeps the one it resolved when it started: without the reload the panel can
+answer `502` (see "`502` from a stack that reports itself healthy").
 
 The password must be at least 12 characters; the process refuses to start
 otherwise. Changing it does not end sessions that are already open — to force
@@ -711,9 +717,24 @@ gate that the API and the bot wait on.
 ```bash
 cd /opt/tgshop
 ./scripts/backup.sh                 # always take a dump before an update
+
+# Keep the images that are running now: a rollback starts them again instead of
+# rebuilding the old code. <release> names the version being deployed.
+docker image tag tgshop-backend:latest tgshop-backend:pre-<release>
+docker image tag tgshop-edge:latest tgshop-edge:pre-<release>
+
 git pull
-make prod-build                     # rebuild the images
-make prod-up                        # recreate what changed
+make prod-build                     # build the new images; nothing restarts yet
+make preflight                      # the new release's checks against .env
+
+# The new code accepts this .env, and the new edge its configuration. Both run
+# in throwaway containers; the running stack is not touched.
+docker compose -f docker-compose.prod.yml run --rm --no-deps migrations \
+  python -c "from app.core.config import get_settings; get_settings()"
+docker compose -f docker-compose.prod.yml run --rm --no-deps nginx nginx -t
+
+make prod-migrate                   # the new schema, while the old containers serve
+make prod-up                        # only once prod-migrate has succeeded
 make prod-reload                    # the edge must re-resolve api and bot
 make prod-ps                        # confirm everything is healthy again
 ```
@@ -724,14 +745,35 @@ new container a different address on the Docker network, and nginx keeps sending
 requests to the old one — so the panel and the API answer `502` while
 `make prod-ps` reports every container healthy, which is the most misleading
 shape a deployment failure can take. A reload re-reads the configuration and
-re-resolves both upstreams; it is instant and drops no connection. (`make
-prod-restart` recreates nginx along with `api` and `bot`, so it does not need
-this step.)
+re-resolves both upstreams; it is instant and drops no connection. `make
+prod-restart` needs it too: it names nginx, but Compose recreates only what
+changed, and after an `.env` edit that is `api` and `bot`, not the edge.
 
-Migrations are applied automatically: `api` and `bot` depend on the `migrations`
-job completing successfully, so a new schema is in place before the new code
-serves a request. If a migration fails, `api` and `bot` are simply not started
-and the previous containers keep running.
+**Migrate before `make prod-up`, never through it.** `api` and `bot` depend on
+the `migrations` job, but `docker compose up -d` stops and removes the old `api`
+and `bot` containers *before* it waits for that job. If a migration fails there,
+the new containers stay `Created` and are never started: the shop is down until
+someone notices. `make prod-migrate` runs the same job on its own while the old
+containers keep serving. If it fails, it changes nothing — every pending
+migration runs in one transaction, so a failure rolls them all back — and the
+update stops there. If it succeeds, `make prod-up` finds the schema already at
+head, its `migrations` job has nothing to do, and the only interruption left is
+the containers' own restart.
+
+Migrating first means the running release meets the new schema for the minute
+between those two commands. Every migration so far is written for that — the
+release before it runs on the new schema unchanged — and a future one that is
+not (it drops or renames something the running code reads) needs a maintenance
+window instead: stop the application containers, migrate, then `make prod-up`.
+
+Stop at the first command that fails. Up to and including `make prod-migrate`,
+nothing that serves has been touched: fix the cause — a missing `.env` value,
+say — and carry on from that command, or abandon the update by putting the
+previous release back the way a rollback does (below): `git checkout` it and
+tag the `pre-<release>` images as `:latest` again. `:latest` already names the
+new images, and otherwise the next `up` would start the new code, migrations
+included, without any of these checks. From `make prod-up` on, a failure is a
+rollback.
 
 One note about migration `0002`, which builds the search indexes: `CREATE INDEX`
 takes a lock that blocks writes to the table while it runs. On a table that
@@ -739,29 +781,49 @@ already holds millions of purchases, apply it during a quiet minute. It took 1.6
 seconds on 200 000 rows. Migration `0003` adds one more index to `purchases` and
 carries the same caveat.
 
-To roll back to the previous release:
+### Rolling back
+
+Start the images tagged before the update again. Do not rebuild the old code,
+and never let it migrate. With Daily Content deployed, read
+[docs/daily-content.md](docs/daily-content.md), «Откат», first: when the release
+you return to predates it, `daily-bot` and `daily-worker` must be stopped
+*before* the `git checkout`, while the compose file still describes them.
 
 ```bash
-git checkout <previous-tag>
-make prod-build && make prod-up && make prod-reload
+cd /opt/tgshop
+git checkout <previous-tag>         # the compose file that goes with those images
+docker image tag tgshop-backend:pre-<release> tgshop-backend:latest
+docker image tag tgshop-edge:pre-<release> tgshop-edge:latest
+docker compose -f docker-compose.prod.yml up -d --no-deps --no-build api bot nginx
+make prod-reload
+make prod-ps
 ```
 
-A rollback across a migration that dropped a column needs the dump:
-`alembic downgrade` handles the schema, but only a restore brings the data back.
+The schema stays where the new release left it. The old code runs on it
+unchanged but cannot migrate it: its `migrations` job finds the database at a
+revision it has never heard of and fails with `Can't locate revision identified
+by '<rev>'`. `--no-deps` is what keeps that job out of the `up` above, and until
+the next release is deployed it must stay out of everything else too:
+`make prod-migrate` fails, and `make prod-up`, `make prod-restart` or any other
+`up` without `--no-deps` fails on that job — leaving `api` and `bot` stopped
+whenever it recreated them on the way. To recreate them in the meantime (after
+an `.env` edit, say), use `docker compose -f docker-compose.prod.yml up -d
+--no-deps --no-build --force-recreate api bot`, then `make prod-reload`.
 
 Migration `0003` (referrals and bonuses) is **additive only** — two new tables
-and five nullable-or-defaulted columns. The previous release runs unchanged
-against it, so rolling back the application is enough and the schema can stay:
+and five nullable-or-defaulted columns — and every migration since keeps the
+previous release working too, so rolling back the application is enough and
+the schema can stay. Never `alembic downgrade` in production: the old code does
+not need it, and a downgrade either destroys what only the newer schema holds —
+`0003`'s drops `bonus_transactions`, where a credited reward exists nowhere
+else — or refuses to run, as Daily Content's do while their tables hold data. A
+release the previous one could not run on — none so far — cannot be rolled back
+this way at all: the way back is the dump taken before the update
+(`./scripts/restore.sh`), and everything written since is lost.
 
-```bash
-git checkout <previous-tag>
-make prod-build && make prod-up      # the schema is left alone
-make prod-reload
-```
-
-Do **not** `alembic downgrade` once bonuses have been accrued. The downgrade
-drops `bonus_transactions`, and a credited reward exists nowhere else — only a
-restore from a dump would bring it back.
+No `pre-<release>` tags, because the update was made without them? `make
+prod-build` on the old checkout builds the same code again; then continue with
+the `up` command above.
 
 ## Backups
 
@@ -849,12 +911,17 @@ ls -l backups/
 ./scripts/restore.sh backups/tgshop-20260130-021500Z.dump
 ```
 
-The script verifies the checksum, verifies the archive is readable, stops the API
-and the bot so nothing writes into a database that is about to be replaced,
-restores **inside a single transaction** (a failure rolls back and leaves the
-current data intact), brings the schema to the current head in case the dump
-predates a migration, and starts the API and the bot again. Add `--yes` for
-unattended recovery.
+The script verifies the checksum, verifies the archive is readable, stops
+everything that writes to the database — the API, the bot, and `daily-bot` and
+`daily-worker` wherever Daily Content runs — so nothing writes into a database
+that is about to be replaced, restores **inside a single transaction** (a
+failure rolls back and leaves the current data intact), brings the schema to
+the current head in case the dump predates a migration, then starts the API and
+the bot again — and `daily-bot` and `daily-worker` only if they were running —
+and reloads nginx, which must find them at their new addresses. If the schema
+cannot be brought to head, nothing is started, and the script prints the
+command that starts the services once it is fixed. Add `--yes` for unattended
+recovery.
 
 ### Rebuilding the whole server
 
@@ -902,8 +969,12 @@ The system is designed so this resolves itself, in this order:
 | `GET /internal/health` on `127.0.0.1:8081` in nginx | the edge is accepting connections (container-internal only) |
 
 Liveness probes deliberately do not touch PostgreSQL or Redis: restarting a
-process cannot fix a database outage, and a probe that failed during one would
-turn a dependency blip into a restart loop.
+process cannot fix a database outage, so a probe that failed during one would
+only spread it. Compose does not restart an unhealthy container — `restart:
+always` reacts to a process that exits, not to a failed probe — but it marks
+the container `unhealthy`, and nginx is started only once `api` and `bot`
+report healthy: a deploy made during a database blip would leave the edge
+waiting for it.
 
 ---
 

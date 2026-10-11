@@ -90,13 +90,45 @@ Daily-контейнеров зафиксированы в `docker-compose.prod.
 
 ## 4. Первый запуск по шагам (флаг выключен)
 
-1. **Резервная копия:** `make backup`. Миграции `0006`–`0008` применяются на
-   production только вместе с развёртыванием и только после бэкапа.
-2. Заполнить в `.env` раздел Daily (раздел 2): `DAILY_ENABLED=false`,
+Это обычное обновление магазина (README, «Updating the project») плюс раздел
+Daily в `.env`.
+
+1. **Резервная копия и метки образов:** `make backup`, затем пометить образы,
+   которые работают сейчас, — откат (раздел 8) запускает их снова, а не
+   пересобирает старый код:
+
+   ```
+   docker image tag tgshop-backend:latest tgshop-backend:pre-<release>
+   docker image tag tgshop-edge:latest tgshop-edge:pre-<release>
+   ```
+
+   Миграции `0006`–`0008` применяются на production только вместе с
+   развёртыванием и только после бэкапа.
+2. `git pull`. Заполнить в `.env` раздел Daily (раздел 2): `DAILY_ENABLED=false`,
    `COMPOSE_PROFILES=daily`. Затем `make preflight` — без ошибок.
-3. `make prod-build`, затем `make prod-up`. Сервис `migrations` доведёт схему до
-   `0008`, после этого стартуют все контейнеры, включая `daily-bot` и
-   `daily-worker`.
+3. Собрать образы, проверить их, применить миграции и только потом
+   пересоздавать контейнеры:
+
+   ```
+   make prod-build
+   docker compose -f docker-compose.prod.yml run --rm --no-deps migrations \
+     python -c "from app.core.config import get_settings; get_settings()"
+   docker compose -f docker-compose.prod.yml run --rm --no-deps nginx nginx -t
+   make prod-migrate
+   make prod-up
+   make prod-reload
+   ```
+
+   Первая проверка — новый код принимает этот `.env`, вторая — новый nginx
+   принимает свою конфигурацию; обе идут во временных контейнерах и работающий
+   магазин не трогают. `make prod-migrate` доводит схему до `0008`, пока старые
+   контейнеры магазина продолжают работать. Если миграция упала, она
+   откатывается целиком и ничего не меняет — дальше не идти (как вернуть
+   прежние образы — README, «Updating the project»). Только после успешной
+   миграции — `make prod-up`: стартуют новые контейнеры, включая `daily-bot` и
+   `daily-worker`. Почему не сразу `make prod-up`: он сначала останавливает
+   старые `api` и `bot` и лишь потом ждёт миграцию — упавшая миграция оставила
+   бы магазин лежать.
 4. `make prod-ps`: `daily-bot` и `daily-worker` в статусе `healthy`.
 5. Владелец пишет Daily-боту `/start` и получает справку режима владельца.
 6. **Наполнить библиотеку.** Отправить или переслать боту фото, видео, GIF,
@@ -111,8 +143,10 @@ Daily-контейнеров зафиксированы в `docker-compose.prod.
 
 1. В `.env`: `DAILY_ENABLED=true` и `DAILY_BETA_USER_IDS=<id тестовых покупателей>`.
    Убедиться, что `LOYALTY_ENABLED=true`.
-2. Пересоздать процессы, читающие флаг: `make prod-restart` (api, bot, nginx) и
-   `make prod-daily-restart`.
+2. Пересоздать процессы, читающие флаг: `make prod-restart` и
+   `make prod-daily-restart`, затем `make prod-reload`. После правки `.env`
+   Compose пересоздаёт `api` и `bot`, но не nginx, и тот должен заново найти
+   их адреса (README, «Do not skip `make prod-reload`»).
 3. Проверить на бета-покупателе с 15+ покупками:
    - «🏆 Мой прогресс» в магазине показывает «👑 Открыть VIP Daily»;
    - кнопка открывает Daily-бота; `/start` активирует подписку: приветствие и
@@ -125,13 +159,15 @@ Daily-контейнеров зафиксированы в `docker-compose.prod.
 
 ## 6. Полный запуск
 
-`DAILY_BETA_USER_IDS=` (пусто), затем `make prod-restart` и `make prod-daily-restart`.
+`DAILY_BETA_USER_IDS=` (пусто), затем `make prod-restart`, `make prod-daily-restart`
+и `make prod-reload`.
 Активируется каждый покупатель с 15+ завершёнными покупками, при первом
 обращении к боту.
 
 ## 7. Выключение флага
 
-`DAILY_ENABLED=false`, затем `make prod-restart` и `make prod-daily-restart`.
+`DAILY_ENABLED=false`, затем `make prod-restart`, `make prod-daily-restart` и
+`make prod-reload`.
 
 - Ничего не планируется и не отправляется. Бот отвечает «Раздел скоро
   откроется.», кнопка в магазине пропадает, watchdog молчит.
@@ -149,27 +185,75 @@ Daily-контейнеров зафиксированы в `docker-compose.prod.
    `docker compose -f docker-compose.prod.yml --profile daily stop daily-bot daily-worker`.
    После этого вызвать у Daily-бота `deleteWebhook`, чтобы Telegram перестал
    повторять обновления на 502. Магазин этого не замечает.
-3. **Код.** Вернуть предыдущий образ/коммит. Миграции `0006`–`0008` только
-   добавляют схему, предыдущий релиз с ними совместим. Даунгрейд схемы на
-   production **не нужен** и отказывает, если в таблицах Daily есть данные: они
-   существуют только там.
+3. **Код.** Если релиз, к которому возвращаетесь, Daily ещё не содержит (он
+   старше `0006`), сначала выполнить пункт 2: `daily-bot` и `daily-worker`
+   нужно остановить, пока текущий `docker-compose.prod.yml` их ещё описывает, —
+   после `git checkout` Compose о них не знает и остановить их не сможет. Затем
+   вернуть образы, помеченные перед обновлением (раздел 4, шаг 1), а не
+   пересобирать старый код:
+
+   ```
+   git checkout <previous-tag>
+   docker image tag tgshop-backend:pre-<release> tgshop-backend:latest
+   docker image tag tgshop-edge:pre-<release> tgshop-edge:latest
+   docker compose -f docker-compose.prod.yml up -d --no-deps --no-build api bot nginx
+   make prod-reload
+   ```
+
+   Если Daily есть и в предыдущем релизе, его контейнеры не останавливают, а
+   откатывают вместе с остальными — команда `up` тогда такая:
+
+   ```
+   docker compose -f docker-compose.prod.yml --profile daily up -d --no-deps --no-build api bot nginx daily-bot daily-worker
+   ```
+
+   Схема остаётся как есть: миграции `0006`–`0008` только добавляют таблицы и
+   колонки, предыдущий релиз с ними совместим. Но его сервис `migrations` не
+   знает новой ревизии и падает с `Can't locate revision identified by '<rev>'`.
+   Поэтому `--no-deps` обязателен, а до следующего релиза нельзя
+   `make prod-up`, `make prod-restart`, `make prod-daily-restart`,
+   `make prod-migrate` и любой другой `up` без `--no-deps`: все они упираются в
+   эту миграцию, а контейнеры, пересозданные по пути, остаются остановленными
+   (README, «Rolling back»).
+   `alembic downgrade` на production не выполнять: он не нужен и отказывает,
+   если в таблицах Daily есть данные, — а они существуют только там.
 
 ## 9. Эксплуатация
 
 **Здоровье:**
 
 - `make prod-ps` — оба Daily-контейнера `healthy`.
-- Сводка воркера изнутри контейнера:
+- Сводка воркера изнутри контейнера — код ответа и тело. `http.client`
+  печатает тело и при 503; `urllib.request.urlopen` на 503 бросает исключение,
+  и список зависших циклов не виден:
 
   ```
   docker compose -f docker-compose.prod.yml exec daily-worker python -c \
-    "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8083/internal/health').read().decode())"
+    "import http.client; c = http.client.HTTPConnection('127.0.0.1', 8083, timeout=5); c.request('GET', '/internal/health'); r = c.getresponse(); print(r.status, r.read().decode())"
   ```
 
   Ответ содержит возраст каждого цикла (`planner`, `sender`, `outbox`, `expiry`,
   `evaluator`, `pulse`) и список зависших. Если какой-то цикл завис, ответ —
   503, и контейнер помечается `unhealthy`. Compose **не перезапускает**
   unhealthy-контейнеры сам — для этого есть watchdog и `make prod-daily-restart`.
+
+**Восстановление базы из дампа** (`make restore f=backups/<файл>.dump`, README,
+«The database is corrupt or the data is wrong»):
+
+- `scripts/restore.sh` останавливает `daily-bot` и `daily-worker` вместе с
+  `api` и `bot`: во время восстановления никто не пишет в базу — ни доставки,
+  ни подписки, ни заявки.
+- После восстановления запускает `api` и `bot`, а `daily-bot` и `daily-worker` —
+  только если они работали до него (стек без Daily остаётся без Daily), и
+  перезагружает nginx.
+- Если схему не удалось довести до head, ничего не запускается; скрипт
+  печатает команду запуска на после исправления.
+- Всё, что Daily записал после момента дампа, теряется вместе с остальными
+  данными: подписки, доставки, заявки и ответы на них. Покупатель может
+  получить повторно материал, отправленный ему после дампа.
+- Если восстановление длилось дольше `DAILY_WATCHDOG_STALE_SECONDS`, watchdog
+  после запуска может один раз сообщить «🚨 Daily-воркер молчит», а следующей
+  проверкой — «✅ снова работает»: воркер действительно был остановлен.
 
 **Логи:** `make prod-daily-logs`. Полезные события:
 
@@ -224,8 +308,15 @@ cooldown.
    - `daily_worker_pulse_withheld` — зависли циклы;
    - ошибки подключения к PostgreSQL или Redis.
 3. Health воркера (раздел 9): какой цикл завис.
-4. `docker compose -f docker-compose.prod.yml exec redis redis-cli -a "$REDIS_PASSWORD" --no-auth-warning GET daily:heartbeat:daily-worker`
-   — время последнего heartbeat.
+4. Время последнего heartbeat:
+
+   ```
+   docker compose -f docker-compose.prod.yml exec redis sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" GET daily:heartbeat:daily-worker'
+   ```
+
+   Одинарные кавычки обязательны: `$REDIS_PASSWORD` должен подставить shell
+   внутри контейнера `redis`, где пароль задан. Shell сервера его не знает и
+   подставил бы пустую строку.
 5. `make prod-daily-restart`. Когда heartbeat станет свежим, придёт «✅ снова работает».
 
 **Доставки не приходят покупателю:**
@@ -264,8 +355,14 @@ cooldown.
 **Watchdog шлёт лишнее или молчит:**
 
 - Порог и cooldown — `DAILY_WATCHDOG_STALE_SECONDS`, `DAILY_WATCHDOG_COOLDOWN_MINUTES`.
-- Сбросить память watchdog: `redis-cli … DEL daily:watchdog:state`. Следующая
-  проверка начнёт с «всё в порядке».
+- Сбросить память watchdog — с теми же одинарными кавычками, что и при чтении
+  heartbeat выше:
+
+  ```
+  docker compose -f docker-compose.prod.yml exec redis sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" DEL daily:watchdog:state'
+  ```
+
+  Следующая проверка начнёт с «всё в порядке».
 
 ## 12. Бюджет соединений с PostgreSQL
 
