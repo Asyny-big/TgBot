@@ -22,10 +22,12 @@ from app.daily_worker.loops import (
     ExpiryLoop,
     OutboxLoop,
     PlannerLoop,
+    PulseLoop,
     SenderLoop,
 )
 from app.daily_worker.runner import create_daily_worker, worker_configuration_problems
 from app.domain.enums import DailyOutboxChannel
+from app.infrastructure.cache.daily_watchdog import RedisHeartbeatStore
 from app.infrastructure.telegram.daily_pacing import PacedDailySender, PacedTextSender
 from app.infrastructure.telegram.daily_runtime import TelegramTextSender
 from tests.daily_bot_harness import DAILY_BOT_TOKEN, DailyRecordingBot
@@ -104,13 +106,19 @@ def test_the_worker_needs_a_daily_token_of_its_own() -> None:
     assert worker_configuration_problems(build_settings(daily=daily)) == ()
 
 
-async def test_the_worker_assembles_five_loops_on_one_budget() -> None:
+async def test_the_worker_assembles_six_loops_on_one_budget() -> None:
     settings = build_settings(daily=DailySettings(bot_token=SecretStr(DAILY_BOT_TOKEN)))
     resources = Resources.create(settings)
     container = Container.create(resources)
     daily_bot, shop_bot = DailyRecordingBot(), DailyRecordingBot()
+    pulse_store = RedisHeartbeatStore(resources.cache.client)
     try:
-        worker = create_daily_worker(container, daily_bot=daily_bot, shop_bot=shop_bot)
+        worker = create_daily_worker(
+            container,
+            daily_bot=daily_bot,
+            shop_bot=shop_bot,
+            heartbeat_store=pulse_store,
+        )
     finally:
         await daily_bot.session.close()
         await shop_bot.session.close()
@@ -118,7 +126,9 @@ async def test_the_worker_assembles_five_loops_on_one_budget() -> None:
         await resources.close()
 
     kinds = [type(loop) for loop in worker.loops]
-    assert kinds == [PlannerLoop, SenderLoop, OutboxLoop, ExpiryLoop, EvaluatorLoop]
+    assert kinds == [PlannerLoop, SenderLoop, OutboxLoop, ExpiryLoop, EvaluatorLoop, PulseLoop]
+    # The pulse writes where the Daily bot's watchdog reads.
+    assert _attribute(worker.loops[5], "_store") is pulse_store
     assert sorted(worker.heartbeats.ages()) == sorted(loop.name for loop in worker.loops)
 
     sender = _attribute(worker.loops[1], "_delivery")

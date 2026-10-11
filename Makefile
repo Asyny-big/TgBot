@@ -12,7 +12,7 @@ COMPOSE_PROD := docker compose -f docker-compose.prod.yml
 	migrate migrate-down revision bot-logs openapi \
 	ui-install ui-types ui-lint ui-typecheck ui-test ui-build ui-dev ui-check clean \
 	preflight tls-init renew prod-build prod-up prod-down prod-restart prod-reload prod-ps prod-logs \
-	prod-migrate backup restore
+	prod-migrate prod-daily-restart prod-daily-logs backup restore
 
 help: ## Show the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -138,6 +138,12 @@ prod-logs: ## Follow every production log
 
 prod-migrate: ## Apply pending migrations in production
 	$(COMPOSE_PROD) run --rm migrations alembic upgrade head
+
+prod-daily-restart: ## Rebuild and recreate the Daily Content containers (COMPOSE_PROFILES=daily)
+	$(COMPOSE_PROD) --profile daily up -d --build daily-bot daily-worker
+
+prod-daily-logs: ## Follow the Daily Content logs: bot, worker, watchdog
+	$(COMPOSE_PROD) --profile daily logs -f --tail 100 daily-bot daily-worker
 
 backup: ## Dump the production database into ./backups
 	bash scripts/backup.sh

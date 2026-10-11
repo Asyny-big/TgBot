@@ -11,6 +11,9 @@ The process refuses to start without its own configuration (token, username,
 and in webhook mode the URL and secret) — loudly, at once, and without
 affecting any other process. It shuts down cleanly on ``SIGTERM`` exactly like
 the shop bot.
+
+It also runs the watchdog of the worker (``app.daily_bot.watchdog``): another
+container than the worker, so a dead worker cannot hide its own death.
 """
 
 from __future__ import annotations
@@ -36,7 +39,11 @@ from app.daily_bot.factory import (
     create_draft_storage,
 )
 from app.daily_bot.texts import COMMANDS, OWNER_COMMANDS
+from app.daily_bot.watchdog import run_watchdog
+from app.infrastructure.cache.daily_watchdog import RedisHeartbeatStore, RedisWatchdogStateStore
+from app.infrastructure.telegram.daily_runtime import TelegramTextSender
 from app.infrastructure.telegram.factory import create_daily_bot
+from app.services.daily_watchdog import DailyWatchdog
 
 if TYPE_CHECKING:
     from aiogram import Bot, Dispatcher
@@ -192,14 +199,28 @@ async def main() -> None:
     logger.info("daily_bot_dependencies_checked", enabled=settings.daily.enabled, **checks)
     await _publish_commands(bot, settings.daily.admin_telegram_ids)
 
+    watchdog = DailyWatchdog(
+        heartbeats=RedisHeartbeatStore(resources.cache.client),
+        states=RedisWatchdogStateStore(resources.cache.client),
+        locks=container.locks,
+        sender=TelegramTextSender(bot),
+        settings=settings.daily,
+    )
+
     stop = asyncio.Event()
     _install_signal_handlers(stop)
+    watching = asyncio.create_task(
+        run_watchdog(watchdog, stop, interval=settings.daily.watchdog_interval_seconds),
+        name="daily-watchdog",
+    )
     try:
         if settings.daily.use_webhook:
             await run_webhook(runtime, stop)
         else:
             await run_polling(runtime, stop)
     finally:
+        stop.set()
+        await watching
         await services.albums.drain()
         await services.draft_albums.drain()
         await bot.session.close()

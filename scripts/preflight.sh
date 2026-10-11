@@ -166,6 +166,64 @@ else
     fi
 fi
 
+printf '\nDaily Content\n'
+# Optional: the daily-bot and daily-worker containers run only when the `daily`
+# Compose profile is on. Their webhook path and ports are pinned in
+# docker-compose.prod.yml, so only what .env decides is checked here.
+daily_enabled="$(env_value DAILY_ENABLED)"
+profiles="$(env_value COMPOSE_PROFILES)"
+if [[ ",${profiles// /}," != *",daily,"* ]]; then
+    if [[ "${daily_enabled}" == "true" ]]; then
+        fail "DAILY_ENABLED=true but COMPOSE_PROFILES does not include 'daily' — the Daily containers would not run"
+    else
+        pass "Daily Content is not deployed (COMPOSE_PROFILES has no 'daily')"
+    fi
+else
+    pass "COMPOSE_PROFILES includes 'daily' — daily-bot and daily-worker will run"
+    expect_present DAILY_BOT_TOKEN
+    expect_present DAILY_BOT_USERNAME
+    daily_token="$(env_value DAILY_BOT_TOKEN)"
+    if [[ -n "${daily_token}" && "${daily_token}" == "$(env_value TELEGRAM_BOT_TOKEN)" ]]; then
+        fail "DAILY_BOT_TOKEN must not be the shop bot's TELEGRAM_BOT_TOKEN — the Daily bot's webhook would steal the shop's updates"
+    fi
+    daily_username="$(env_value DAILY_BOT_USERNAME)"
+    shop_username="$(env_value TELEGRAM_BOT_USERNAME)"
+    if [[ -n "${daily_username}" && "${daily_username,,}" == "${shop_username,,}" ]]; then
+        fail "DAILY_BOT_USERNAME must not be the shop bot's TELEGRAM_BOT_USERNAME"
+    fi
+
+    daily_base="$(env_value DAILY_WEBHOOK_BASE_URL)"
+    if [[ -n "${domain}" && "${daily_base}" == "https://${domain}" ]]; then
+        pass "DAILY_WEBHOOK_BASE_URL matches TGSHOP_DOMAIN"
+    else
+        fail "DAILY_WEBHOOK_BASE_URL must be exactly 'https://${domain}' (found '${daily_base}') — Telegram would post to a host nginx does not serve"
+    fi
+    expect_min_length DAILY_WEBHOOK_SECRET 16
+    daily_secret="$(env_value DAILY_WEBHOOK_SECRET)"
+    if [[ -n "${daily_secret}" && "${daily_secret}" == "$(env_value TELEGRAM_WEBHOOK_SECRET)" ]]; then
+        fail "DAILY_WEBHOOK_SECRET must differ from TELEGRAM_WEBHOOK_SECRET"
+    fi
+
+    if [[ -z "$(env_value DAILY_ADMIN_TELEGRAM_IDS)" ]]; then
+        flag "DAILY_ADMIN_TELEGRAM_IDS is empty — nobody can add content, and the alerts and the watchdog reach no one"
+    else
+        pass "DAILY_ADMIN_TELEGRAM_IDS is set"
+    fi
+
+    if [[ "${daily_enabled}" == "true" ]]; then
+        if [[ -n "$(env_value DAILY_BETA_USER_IDS)" ]]; then
+            pass "DAILY_ENABLED=true with DAILY_BETA_USER_IDS — a beta: only those buyers are served"
+        else
+            flag "DAILY_ENABLED=true and DAILY_BETA_USER_IDS is empty — every VIP buyer is served (the full launch)"
+        fi
+        if [[ "$(env_value LOYALTY_ENABLED)" != "true" ]]; then
+            flag "LOYALTY_ENABLED is not true — the shop shows the '👑 Открыть VIP Daily' button only on the loyalty screens"
+        fi
+    else
+        pass "DAILY_ENABLED=${daily_enabled:-false} — deployed and idle; set it to true to launch"
+    fi
+fi
+
 printf '\nSecurity\n'
 expect_min_length SECURITY_JWT_SECRET 32
 expect_not_placeholder SECURITY_JWT_SECRET

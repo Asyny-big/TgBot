@@ -20,6 +20,7 @@ from app.bot.texts import (
     BONUS_USE_BUTTON,
     CRYPTO_BUTTON,
     CRYPTO_PAY_BUTTON,
+    DAILY_ENTRY_BUTTON,
     FREE_PACK_BUTTON,
     PREVIEW_BUTTON,
     PROGRESS_SECTION_BUTTON,
@@ -186,18 +187,35 @@ def start_menu_keyboard(*, bonuses: bool, progress: bool) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
-def progress_keyboard() -> InlineKeyboardMarkup:
-    """The "🏆 My progress" button alone, under a loyalty milestone notice."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=PROGRESS_SECTION_BUTTON,
-                    callback_data=ProgressCallback().pack(),
-                )
-            ]
+def progress_keyboard(*, daily_link: str | None = None) -> InlineKeyboardMarkup:
+    """The "🏆 My progress" button under a loyalty milestone notice.
+
+    Under the VIP notice, for a buyer the Daily bot would serve, the way into
+    it follows: "👑 Открыть VIP Daily".
+    """
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=PROGRESS_SECTION_BUTTON,
+                callback_data=ProgressCallback().pack(),
+            )
         ]
-    )
+    ]
+    if daily_link is not None:
+        rows.append([daily_entry_button(daily_link)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def daily_entry_button(link: str) -> InlineKeyboardButton:
+    """ "👑 Открыть VIP Daily": a deep link that opens the Daily bot."""
+    return InlineKeyboardButton(text=DAILY_ENTRY_BUTTON, url=link)
+
+
+def daily_entry_keyboard(link: str | None) -> InlineKeyboardMarkup | None:
+    """Under the "🏆 My progress" screen: the way into VIP Daily, when there is one."""
+    if link is None:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[daily_entry_button(link)]])
 
 
 def bonus_hint_keyboard() -> InlineKeyboardMarkup:

@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     checkout = container.build_checkout(
         delivery_gateway=create_delivery_gateway(bot),
         stars=create_stars_sender(bot),
-        milestone_notifier=create_loyalty_notifier(bot),
+        milestone_notifier=create_loyalty_notifier(bot, daily=container.build_daily_entry()),
     )
     setattr(app.state, RESOURCES_STATE_KEY, resources)
     setattr(app.state, CONTAINER_STATE_KEY, container)

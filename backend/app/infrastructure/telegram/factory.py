@@ -25,6 +25,7 @@ from app.infrastructure.telegram.notifications import (
 
 if TYPE_CHECKING:
     from app.core.config import DailySettings, Settings
+    from app.services.daily_entry import DailyEntry
 
 
 def create_bot(settings: Settings) -> Bot:
@@ -70,6 +71,13 @@ def create_bonus_notifier(bot: Bot) -> TelegramBonusNotifier:
     return TelegramBonusNotifier(bot)
 
 
-def create_loyalty_notifier(bot: Bot) -> TelegramLoyaltyNotifier:
-    """The milestone-notice transport for the loyalty programme."""
-    return TelegramLoyaltyNotifier(bot)
+def create_loyalty_notifier(
+    bot: Bot,
+    *,
+    daily: DailyEntry | None = None,
+) -> TelegramLoyaltyNotifier:
+    """The milestone-notice transport for the loyalty programme.
+
+    With ``daily``, the VIP notice offers the way into the Daily bot.
+    """
+    return TelegramLoyaltyNotifier(bot, daily=daily)

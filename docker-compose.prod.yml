@@ -19,6 +19,19 @@
 #   * containers drop all capabilities, cannot gain new privileges, and the
 #     stateless ones run with a read-only root filesystem;
 #   * logs are size-capped, so a chatty day cannot fill the disk.
+#
+# Daily Content (daily-bot, daily-worker) sits behind the `daily` profile: a
+# plain `up` leaves it alone, so the shop deploys exactly as before until
+# COMPOSE_PROFILES=daily is set in .env. See docs/daily-content.md.
+#
+# PostgreSQL connection budget (max_connections=100, 3 reserved for superusers):
+#   api           2 workers x (10 pool + 10 overflow)   40
+#   bot           10 + 10                                20
+#   daily-bot     5 + 5                                  10
+#   daily-worker  5 + 5                                  10
+#   peak                                                 80
+# which leaves room for a migration run and an operator's psql session. A
+# bigger pool anywhere, or more API workers, must be checked against it.
 # =============================================================================
 name: tgshop
 
@@ -296,8 +309,141 @@ services:
       - edge
 
   # --------------------------------------------------------------------------- #
+  # Daily Content bot: its own Telegram bot, on its own webhook (nginx forwards
+  # /webhook/daily to port 8082). Talks to buyers and to the owner, and runs the
+  # watchdog of the worker — from this container, so a dead worker cannot hide
+  # its own death.
+  #
+  # MUST stay at exactly one replica: Telegram delivers each update once.
+  # --------------------------------------------------------------------------- #
+  daily-bot:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    image: tgshop-backend:latest
+    profiles:
+      - daily
+    restart: always
+    <<: *hardening
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      # Pinned here, not in .env: nginx forwards exactly this path to exactly
+      # this port, and the health check below probes it.
+      DAILY_USE_WEBHOOK: "true"
+      DAILY_WEBHOOK_PATH: /webhook/daily
+      DAILY_BOT_HOST: 0.0.0.0
+      DAILY_BOT_PORT: "8082"
+      # Its share of the connection budget at the top of this file.
+      POSTGRES_POOL_SIZE: "5"
+      POSTGRES_MAX_OVERFLOW: "5"
+    command: ["python", "-m", "app.daily_bot"]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8082/internal/health', timeout=4).status == 200 else 1)
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    # The webhook server stops accepting, the album answers in flight go out.
+    stop_grace_period: 30s
+    logging: *logging
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 384m
+    networks:
+      - data
+      - edge
+
+  # --------------------------------------------------------------------------- #
+  # Daily Content worker: plans and sends the daily deliveries, the outbox
+  # (alerts, answers, "send it to me"), closes what expired, raises the owner's
+  # alerts, and writes the heartbeat the daily-bot's watchdog reads. Serves only
+  # its health check, on 8083, to nobody but Docker.
+  #
+  # MUST stay at exactly one replica: the sending budget (Telegram's rate limit)
+  # is per process. Its leases make a second one safe, never faster.
+  # --------------------------------------------------------------------------- #
+  daily-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    image: tgshop-backend:latest
+    profiles:
+      - daily
+    restart: always
+    <<: *hardening
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      DAILY_WORKER_HOST: 0.0.0.0
+      DAILY_WORKER_PORT: "8083"
+      POSTGRES_POOL_SIZE: "5"
+      POSTGRES_MAX_OVERFLOW: "5"
+    command: ["python", "-m", "app.daily_worker"]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8083/internal/health', timeout=4).status == 200 else 1)
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    # SIGTERM lets every loop finish the pass it is in (25 s), then it exits:
+    # no lease is left behind by a deploy.
+    stop_grace_period: 30s
+    logging: *logging
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 384m
+    networks:
+      - data
+      # Outbound HTTPS to Telegram; nothing reaches it from here.
+      - edge
+
+  # --------------------------------------------------------------------------- #
   # Edge: TLS termination, security headers, gzip, static panel, routing.
   # The only service with published ports.
+  #
+  # It deliberately does not depend on daily-bot: the shop's edge must start,
+  # and keep working, whether Daily Content is deployed or not.
   # --------------------------------------------------------------------------- #
   nginx:
     build:

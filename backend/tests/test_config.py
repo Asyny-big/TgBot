@@ -6,7 +6,9 @@ from typing import Any
 
 import pytest
 from pydantic import SecretStr, ValidationError
+from pydantic_settings import BaseSettings
 
+from app.core import config
 from app.core.config import (
     CRYPTOBOT_MAINNET_API,
     CRYPTOBOT_TESTNET_API,
@@ -229,3 +231,22 @@ def test_blank_redis_password_is_treated_as_absent() -> None:
     settings = RedisSettings(host="cache", password="")  # type: ignore[arg-type]
     assert settings.password is None
     assert settings.dsn == "redis://cache:6379/0"
+
+
+def test_no_settings_group_reads_a_local_env_file_under_test() -> None:
+    """``conftest`` keeps every group off a developer's .env — a new group too.
+
+    A group it missed would read that file for every field a test leaves out:
+    a real DAILY_BETA_USER_IDS there would quietly change the Daily tests.
+    """
+    groups = [
+        member
+        for member in vars(config).values()
+        if isinstance(member, type)
+        and issubclass(member, BaseSettings)
+        and member is not BaseSettings
+    ]
+
+    assert groups
+    for group in groups:
+        assert group.model_config.get("env_file") is None, group.__name__

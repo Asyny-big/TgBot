@@ -250,6 +250,8 @@ def reward_notice(
 # --------------------------------- Loyalty ---------------------------------- #
 
 PROGRESS_SECTION_BUTTON: Final = "🏆 Мой прогресс"
+DAILY_ENTRY_BUTTON: Final = "👑 Открыть VIP Daily"
+"""A deep link into the Daily Content bot — offered to VIP buyers only."""
 PROGRESS_UNAVAILABLE: Final = "Не удалось открыть прогресс. Попробуйте ещё раз через минуту."
 SECTION_UNAVAILABLE: Final = "Этот раздел сейчас недоступен."
 

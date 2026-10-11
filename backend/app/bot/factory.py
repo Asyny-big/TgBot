@@ -41,7 +41,7 @@ def create_checkout(container: Container, bot: Bot) -> CheckoutService:
         delivery_gateway=create_delivery_gateway(bot),
         stars=create_stars_sender(bot),
         notifier=create_bonus_notifier(bot),
-        milestone_notifier=create_loyalty_notifier(bot),
+        milestone_notifier=create_loyalty_notifier(bot, daily=container.build_daily_entry()),
     )
 
 
@@ -55,6 +55,7 @@ def create_dispatcher(container: Container, checkout: CheckoutService) -> Dispat
         bonuses=container.bonuses,
         loyalty=container.loyalty,
         pricing=container.pricing,
+        daily=container.build_daily_entry(),
     )
 
     dispatcher.update.outer_middleware(LogContextMiddleware())

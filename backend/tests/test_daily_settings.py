@@ -49,3 +49,50 @@ def test_invalid_ids_are_refused(monkeypatch: pytest.MonkeyPatch, raw: str) -> N
 def test_out_of_range_values_are_refused(overrides: dict[str, int]) -> None:
     with pytest.raises(ValidationError):
         DailySettings(**overrides)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_token_secret_or_url_is_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+    blank: str,
+) -> None:
+    """``DAILY_BOT_TOKEN=`` copied empty from .env.example: every process still starts.
+
+    The shop bot, the API and the migrations load these settings too; only the
+    Daily processes refuse to start, and they say why.
+    """
+    for name in (
+        "DAILY_BOT_TOKEN",
+        "DAILY_BOT_USERNAME",
+        "DAILY_WEBHOOK_BASE_URL",
+        "DAILY_WEBHOOK_SECRET",
+    ):
+        monkeypatch.setenv(name, blank)
+    monkeypatch.delenv("DAILY_USE_WEBHOOK", raising=False)
+
+    settings = DailySettings()
+
+    assert settings.bot_token is None
+    assert settings.bot_username is None
+    assert settings.webhook_base_url is None
+    assert settings.webhook_secret is None
+    assert settings.bot_problems() == (
+        "DAILY_BOT_TOKEN is not set",
+        "DAILY_BOT_USERNAME is not set",
+        "DAILY_WEBHOOK_BASE_URL is required in webhook mode",
+        "DAILY_WEBHOOK_SECRET is required in webhook mode",
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("DAILY_BOT_TOKEN", "not-a-token"), ("DAILY_WEBHOOK_SECRET", "too-short")],
+)
+def test_a_filled_in_but_wrong_value_is_still_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+) -> None:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValidationError):
+        DailySettings()

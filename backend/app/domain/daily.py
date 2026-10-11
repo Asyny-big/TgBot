@@ -74,6 +74,15 @@ def can_suggest_content(completed_purchases: int) -> bool:
     return completed_purchases >= CONTENT_SUGGESTION_MILESTONE
 
 
+DAILY_START_PAYLOAD: Final = "vip"
+"""What the shop bot's "👑 Открыть VIP Daily" button starts the Daily bot with."""
+
+
+def daily_bot_link(bot_username: str) -> str:
+    """The Telegram deep link that opens the Daily bot: ``/start vip``."""
+    return f"https://t.me/{bot_username}?start={DAILY_START_PAYLOAD}"
+
+
 # --------------------------------------------------------------------------- #
 # Personal windows                                                            #
 # --------------------------------------------------------------------------- #
@@ -480,6 +489,7 @@ class DeliveryStep(StrEnum):
 
 __all__ = [
     "DAILY_ACCESS_MILESTONE",
+    "DAILY_START_PAYLOAD",
     "DAILY_TIMEZONE",
     "MAX_RECOVERY",
     "MINUTES_PER_DAY",
@@ -495,6 +505,7 @@ __all__ = [
     "activation_window",
     "anchor_minute_of",
     "can_suggest_content",
+    "daily_bot_link",
     "days_of_stock",
     "due_window",
     "has_daily_access",

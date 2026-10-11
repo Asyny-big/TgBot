@@ -36,6 +36,7 @@ from app.domain.commands import BonusTransactionDraft
 from app.domain.daily import DeliveryCounts, LibraryStats
 from app.domain.daily_reports import DailyOverviewCounts
 from app.domain.daily_requests import OPEN_REQUEST_STATUSES, is_closed, user_actor
+from app.domain.daily_watchdog import WatchdogState
 from app.domain.entities import (
     BonusTransaction,
     DailyAlert,
@@ -2313,3 +2314,31 @@ class FakeDailyReportRepository:
     async def requests_of(self, user_id: int, *, limit: int) -> tuple[DailyContentRequest, ...]:
         del user_id, limit
         return ()
+
+
+class FakeHeartbeatStore:
+    """Heartbeats in a dict — Redis's, minus the expiry."""
+
+    def __init__(self) -> None:
+        self.beats: dict[str, datetime] = {}
+
+    async def beat(self, name: str, *, at: datetime) -> None:
+        self.beats[name] = at
+
+    async def last_beat(self, name: str) -> datetime | None:
+        return self.beats.get(name)
+
+
+class FakeWatchdogStateStore:
+    """The watchdog's memory in an attribute; counts the saves."""
+
+    def __init__(self) -> None:
+        self.state = WatchdogState()
+        self.saves = 0
+
+    async def load(self) -> WatchdogState:
+        return self.state
+
+    async def save(self, state: WatchdogState) -> None:
+        self.state = state
+        self.saves += 1

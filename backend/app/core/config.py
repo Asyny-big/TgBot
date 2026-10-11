@@ -469,6 +469,21 @@ class DailySettings(BaseSettings):
     worker_host: str = "0.0.0.0"  # noqa: S104 — the container's health check only
     worker_port: int = Field(default=8083, ge=1, le=65535)
 
+    # The watchdog: the worker writes a heartbeat to Redis while its loops
+    # turn; the Daily bot's process — another container — reads it and tells
+    # the owner when the worker goes silent, and when it is back.
+    heartbeat_interval_seconds: int = Field(default=15, ge=5, le=300)
+    """How often the worker writes its heartbeat."""
+
+    watchdog_interval_seconds: int = Field(default=60, ge=10, le=600)
+    """How often the Daily bot's process looks at the worker's heartbeat."""
+
+    watchdog_stale_seconds: int = Field(default=300, ge=60, le=3600)
+    """Silence after which the worker counts as down."""
+
+    watchdog_cooldown_minutes: int = Field(default=60, ge=5, le=1440)
+    """While the worker stays down, the owner is reminded at most this often."""
+
     # The Daily Content bot is its own Telegram bot, run by its own process.
     # Every field below is optional here, so the API and the shop bot start
     # without them; the Daily bot process checks them before it starts.
@@ -486,6 +501,18 @@ class DailySettings(BaseSettings):
     @classmethod
     def _split_ids(cls, value: object) -> object:
         return _split_telegram_ids(value)
+
+    @field_validator("bot_token", "webhook_secret", "webhook_base_url", mode="before")
+    @classmethod
+    def _empty_is_unset(cls, value: object) -> object:
+        """``DAILY_BOT_TOKEN=`` left empty means "not configured", never a bad value.
+
+        Every process loads these settings — the shop bot and the API too — so
+        an empty line copied from .env.example must not stop them from starting.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @field_validator("bot_token")
     @classmethod
@@ -564,6 +591,27 @@ class DailySettings(BaseSettings):
     def alert_cooldown(self) -> timedelta:
         """``alert_cooldown_hours`` as a duration."""
         return timedelta(hours=self.alert_cooldown_hours)
+
+    @property
+    def watchdog_stale(self) -> timedelta:
+        """``watchdog_stale_seconds`` as a duration."""
+        return timedelta(seconds=self.watchdog_stale_seconds)
+
+    @property
+    def watchdog_cooldown(self) -> timedelta:
+        """``watchdog_cooldown_minutes`` as a duration."""
+        return timedelta(minutes=self.watchdog_cooldown_minutes)
+
+    @model_validator(mode="after")
+    def _heartbeat_beats_well_within_the_watchdog(self) -> Self:
+        """Three missed heartbeats at least before the worker counts as down."""
+        if self.watchdog_stale_seconds < 3 * self.heartbeat_interval_seconds:
+            msg = (
+                "watchdog_stale_seconds must be at least three heartbeat intervals "
+                "(3 * heartbeat_interval_seconds)"
+            )
+            raise ValueError(msg)
+        return self
 
     def bot_problems(self) -> tuple[str, ...]:
         """What keeps the Daily bot process from starting; empty when nothing does."""

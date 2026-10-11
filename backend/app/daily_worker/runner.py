@@ -6,7 +6,8 @@ The Daily Content runtime, apart from the bot that talks to buyers:
 * **sender** — sends the deliveries due, retries, takes over dead attempts;
 * **outbox** — sends the owner's alerts and the buyers' notices;
 * **expiry** — closes what passed its deadline, giving items back;
-* **evaluator** — the stock, the failures, the token: the owner's alerts.
+* **evaluator** — the stock, the failures, the token: the owner's alerts;
+* **pulse** — the heartbeat in Redis that the Daily bot's watchdog reads.
 
 Everything it sends goes through one budget — at most
 ``DAILY_SEND_RATE_PER_SECOND``, the whole worker paused after Telegram's 429.
@@ -39,9 +40,11 @@ from app.daily_worker.loops import (
     ExpiryLoop,
     OutboxLoop,
     PlannerLoop,
+    PulseLoop,
     SenderLoop,
 )
 from app.domain.enums import DailyOutboxChannel
+from app.infrastructure.cache.daily_watchdog import RedisHeartbeatStore
 from app.infrastructure.telegram.daily_pacing import PacedDailySender, PacedTextSender, SendPacer
 from app.infrastructure.telegram.daily_runtime import TelegramTextSender, TelegramTokenProbe
 from app.infrastructure.telegram.factory import create_bot, create_daily_bot, create_daily_sender
@@ -51,6 +54,7 @@ if TYPE_CHECKING:
 
     from app.core.config import Settings
     from app.daily_worker.loops import WorkerLoop
+    from app.domain.daily_watchdog import HeartbeatStore
 
 logger = get_logger(__name__)
 
@@ -114,8 +118,9 @@ def create_daily_worker(
     *,
     daily_bot: Bot,
     shop_bot: Bot,
+    heartbeat_store: HeartbeatStore,
 ) -> DailyWorker:
-    """Every loop of the worker, sending through one budget."""
+    """Every loop of the worker, sending through one budget, and its pulse."""
     settings = container.settings.daily
     pacer = SendPacer(rate_per_second=settings.send_rate_per_second)
     heartbeats = Heartbeats()
@@ -158,6 +163,7 @@ def create_daily_worker(
                 settings=settings,
                 heartbeats=heartbeats,
             ),
+            PulseLoop(store=heartbeat_store, settings=settings, heartbeats=heartbeats),
         ),
         heartbeats=heartbeats,
     )
@@ -177,7 +183,12 @@ async def main() -> None:
     container = Container.create(resources)
     daily_bot = create_daily_bot(settings.daily)
     shop_bot = create_bot(settings)
-    worker = create_daily_worker(container, daily_bot=daily_bot, shop_bot=shop_bot)
+    worker = create_daily_worker(
+        container,
+        daily_bot=daily_bot,
+        shop_bot=shop_bot,
+        heartbeat_store=RedisHeartbeatStore(resources.cache.client),
+    )
 
     checks = await resources.check()
     logger.info("daily_worker_dependencies_checked", enabled=settings.daily.enabled, **checks)

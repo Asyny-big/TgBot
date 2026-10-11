@@ -16,6 +16,7 @@ from app.core.config import (
     AppSettings,
     BotSettings,
     CryptoBotSettings,
+    DailySettings,
     DeliverySettings,
     LoyaltySettings,
     PostgresSettings,
@@ -93,6 +94,7 @@ _SETTINGS_CLASSES = (
     CryptoBotSettings,
     ReferralSettings,
     LoyaltySettings,
+    DailySettings,
     SecuritySettings,
 )
 

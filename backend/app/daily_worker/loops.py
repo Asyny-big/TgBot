@@ -19,6 +19,7 @@ import asyncio
 from collections import Counter
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, ClassVar, Final
 
 from app.core.logging import get_logger
@@ -29,12 +30,16 @@ from app.domain.daily_alerts import (
     low_stock_observation,
     token_observation,
 )
+from app.domain.daily_watchdog import WORKER_HEARTBEAT
 from app.domain.enums import DailyAlertKey
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from app.core.config import DailySettings
     from app.daily_worker.health import Heartbeats
     from app.domain.daily_alerts import TokenProbe
+    from app.domain.daily_watchdog import HeartbeatStore
     from app.infrastructure.telegram.daily_pacing import SendPacer
     from app.services.daily_alerts import DailyAlertService
     from app.services.daily_delivery import DailyDeliveryService
@@ -354,11 +359,55 @@ class EvaluatorLoop(WorkerLoop):
         )
 
 
+# --------------------------------------------------------------------------- #
+# The heartbeat the watchdog reads                                            #
+# --------------------------------------------------------------------------- #
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+class PulseLoop(WorkerLoop):
+    """Writes the worker's heartbeat for the watchdog, in Redis.
+
+    Only while every other loop turns: a worker whose sender is stuck is as
+    good as down, and the watchdog should hear nothing from it. Nothing is
+    written while Daily Content is off — the watchdog is off then too.
+    """
+
+    name = "pulse"
+
+    def __init__(
+        self,
+        *,
+        store: HeartbeatStore,
+        settings: DailySettings,
+        heartbeats: Heartbeats,
+        clock: Callable[[], datetime] = _utc_now,
+    ) -> None:
+        self._store = store
+        self._settings = settings
+        self._clock = clock
+        super().__init__(heartbeats=heartbeats, interval=settings.heartbeat_interval_seconds)
+
+    async def run_once(self) -> object:
+        if not self._settings.enabled:
+            return False
+        stuck = self._heartbeats.stale()
+        if stuck:
+            logger.warning("daily_worker_pulse_withheld", stale=list(stuck))
+            return False
+        await self._store.beat(WORKER_HEARTBEAT, at=self._clock())
+        return True
+
+
 __all__ = [
     "EvaluatorLoop",
     "ExpiryLoop",
     "OutboxLoop",
     "PlannerLoop",
+    "PulseLoop",
     "SendPass",
     "SenderLoop",
     "WorkerLoop",

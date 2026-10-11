@@ -23,11 +23,13 @@ from app.domain.daily_requests import (
     REQUEST_SUBMIT_LIMIT,
     REQUEST_TEXT_LIMIT,
 )
+from app.domain.daily_watchdog import WatchdogNotice
 from app.domain.enums import DailyAlertKey, DailyContentKind, DailyContentStatus
 from app.domain.loyalty import CONTENT_SUGGESTION_MILESTONE
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from datetime import timedelta
 
     from app.daily_bot.intake import Refusal
     from app.domain.daily import LibraryStats, StockSummary
@@ -319,6 +321,32 @@ def album_summary(
     return "\n".join(lines)
 
 
+def _span(duration: timedelta | None) -> str:
+    """``0:04:30`` → ``"4 мин"``, ``2:05:00`` → ``"2 ч 5 мин"``; at least a minute."""
+    minutes = max(1, int(duration.total_seconds() // 60)) if duration is not None else 1
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} ч {minutes} мин" if hours else f"{minutes} мин"
+
+
+def watchdog_notice(
+    notice: WatchdogNotice,
+    *,
+    silence: timedelta,
+    downtime: timedelta | None = None,
+) -> str:
+    """The watchdog's word to the owner: the worker went silent, still is, or is back."""
+    match notice:
+        case WatchdogNotice.DOWN:
+            return (
+                f"🚨 Daily-воркер молчит {_span(silence)}: выдача, ответы покупателям и "
+                "алерты стоят. Проверьте контейнер daily-worker."
+            )
+        case WatchdogNotice.STILL_DOWN:
+            return f"🚨 Daily-воркер всё ещё молчит: {_span(silence)}."
+        case WatchdogNotice.RECOVERED:
+            return f"✅ Daily-воркер снова работает. Перерыв: {_span(downtime)}."
+
+
 def _ids(content_ids: Sequence[int]) -> str:
     return ", ".join(f"#{content_id}" for content_id in sorted(content_ids))
 
@@ -503,5 +531,6 @@ __all__ = [
     "restore_blocked",
     "stats",
     "status",
+    "watchdog_notice",
     "welcome",
 ]

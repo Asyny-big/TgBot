@@ -574,6 +574,15 @@ rejected before the body is parsed. If a notification is lost anyway, the
 reconciliation worker polls Crypto Pay every `BOT_RECONCILIATION_INTERVAL_SECONDS`
 and settles the payment without anyone noticing.
 
+## Daily Content (optional)
+
+A second Telegram bot that sends VIP buyers one new item a day, with its own
+worker and a watchdog. Its containers (`daily-bot`, `daily-worker`) sit behind
+the `daily` Compose profile, so the shop deploys exactly as before until
+`COMPOSE_PROFILES=daily` is set. BotFather setup, the variables, the webhook, a
+beta rollout, switching it off, rollback and the troubleshooting runbook:
+[docs/daily-content.md](docs/daily-content.md) (in Russian).
+
 ## First launch
 
 The order matters: nginx cannot start without the certificate it is configured

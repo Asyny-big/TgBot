@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from aiogram import Bot
 
     from app.domain.notifications import RewardNotice
+    from app.services.daily_entry import DailyEntry
 
 logger = get_logger(__name__)
 
@@ -62,10 +63,15 @@ class TelegramBonusNotifier:
 
 
 class TelegramLoyaltyNotifier:
-    """Sends the loyalty milestone notices (5, 10, 15 completed purchases)."""
+    """Sends the loyalty milestone notices (5, 10, 15 completed purchases).
 
-    def __init__(self, bot: Bot) -> None:
+    Under the VIP notice the buyer is also offered "👑 Открыть VIP Daily",
+    when ``daily`` says the Daily bot would serve them.
+    """
+
+    def __init__(self, bot: Bot, *, daily: DailyEntry | None = None) -> None:
         self._bot = bot
+        self._daily = daily
 
     async def notify_milestone(self, user_id: int, milestone: int) -> None:
         """Tell the buyer what their latest delivery reached.
@@ -73,10 +79,16 @@ class TelegramLoyaltyNotifier:
         Sent once per milestone, because the caller only reaches this for the
         one delivery whose rank is that milestone, after it committed.
         """
+        # The delivery that reached ``milestone`` is the buyer's ``milestone``-th.
+        daily_link = (
+            self._daily.link_for(user_id, completed_purchases=milestone)
+            if self._daily is not None
+            else None
+        )
         await self._bot.send_message(
             chat_id=user_id,
             text=loyalty_milestone_notice(milestone),
-            reply_markup=progress_keyboard(),
+            reply_markup=progress_keyboard(daily_link=daily_link),
             disable_web_page_preview=True,
         )
         logger.info("loyalty_milestone_announced", user_id=user_id, milestone=milestone)

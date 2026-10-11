@@ -22,6 +22,7 @@ from app.services.checkout import CheckoutService
 from app.services.daily_admin import DailyAdminService
 from app.services.daily_alerts import DailyAlertService
 from app.services.daily_delivery import DailyDeliveryService
+from app.services.daily_entry import DailyEntry
 from app.services.daily_library import DailyLibraryService
 from app.services.daily_notices import DailyNoticeService
 from app.services.daily_outbox import DailyOutboxService
@@ -185,6 +186,10 @@ class Container:
             settings=self.settings.daily,
             sender=sender,
         )
+
+    def build_daily_entry(self) -> DailyEntry:
+        """Whether the shop bot offers "👑 Открыть VIP Daily", and where it leads."""
+        return DailyEntry(settings=self.settings.daily)
 
     def build_daily_planning(self) -> DailyPlanningService:
         """The planner: opens each buyer's delivery for their day."""
