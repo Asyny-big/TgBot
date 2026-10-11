@@ -53,6 +53,7 @@ from app.domain.enums import Currency, PaymentProvider, PurchaseStatus
 from app.infrastructure.telegram.daily import TelegramDailyContentSender
 from app.services.daily_delivery import DailyDeliveryService
 from app.services.daily_library import DailyLibraryService
+from app.services.daily_stock import DailyStockService
 from app.services.daily_subscriptions import DailySubscriptionService
 
 if TYPE_CHECKING:
@@ -94,6 +95,9 @@ class DailyRecordingBot(Bot):
     def __init__(self) -> None:
         super().__init__(token=DAILY_BOT_TOKEN)
         self.calls: list[TelegramMethod[Any]] = []
+        self.attempted: list[TelegramMethod[Any]] = []
+        """Every call that reached Telegram, failed ones included."""
+
         self.failures: dict[type[TelegramMethod[Any]], list[Exception]] = {}
 
     async def __call__(
@@ -102,6 +106,7 @@ class DailyRecordingBot(Bot):
         request_timeout: int | None = None,
     ) -> Any:
         del request_timeout
+        self.attempted.append(method)
         queued = self.failures.get(type(method))
         if queued:
             raise queued.pop(0)
@@ -135,6 +140,10 @@ class DailyRecordingBot(Bot):
             for call in self.calls
             if isinstance(call, ITEM_METHODS) and getattr(call, "chat_id", None) == chat_id
         ]
+
+    def items(self) -> list[TelegramMethod[Any]]:
+        """Every library item sent, to anybody, in order."""
+        return [call for call in self.calls if isinstance(call, ITEM_METHODS)]
 
     def sent_to(self, chat_id: int) -> list[TelegramMethod[Any]]:
         """Every text or item sent to one chat, in order."""
@@ -376,6 +385,7 @@ def build_daily_harness(  # noqa: PLR0913 — every knob a Daily bot test turns
             clock=clock,
         ),
         albums=AlbumCollector(settle_seconds=0.05),
+        stock=DailyStockService(uow_factory=uow_factory, settings=daily_settings, clock=clock),
     )
     return DailyHarness(
         bot=bot,

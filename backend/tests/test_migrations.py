@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 SEED_USER = 990000001
 PENDING_CRYPTO_INDEX = "uq_purchases_user_product_pending_crypto"
-HEAD = "0006"
+HEAD = "0007"
 
 
 def test_migrations_match_the_orm_metadata(migrated_database: str) -> None:
@@ -88,6 +88,8 @@ def _remove_seed(dsn: str) -> None:
     """Delete everything seeded for ``SEED_USER``, whatever the schema revision."""
     has_rewards = _scalar(dsn, "SELECT to_regclass('loyalty_rewards') IS NOT NULL")
     has_daily = _scalar(dsn, "SELECT to_regclass('daily_subscriptions') IS NOT NULL")
+    has_runtime = _scalar(dsn, "SELECT to_regclass('daily_outbox') IS NOT NULL")
+    runtime = ["DELETE FROM daily_outbox", "DELETE FROM daily_alerts"]
     daily = [
         "DELETE FROM daily_delivery_attempts",
         "DELETE FROM daily_deliveries",
@@ -95,6 +97,7 @@ def _remove_seed(dsn: str) -> None:
         "DELETE FROM daily_subscriptions",
     ]
     statements = [
+        *(runtime if has_runtime else []),
         *(daily if has_daily else []),
         *(["DELETE FROM loyalty_rewards WHERE user_id = :user_id"] if has_rewards else []),
         "DELETE FROM purchases WHERE user_id = :user_id",

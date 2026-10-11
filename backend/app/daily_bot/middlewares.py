@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from app.domain.locks import LockManager
     from app.services.daily_delivery import DailyDeliveryService
     from app.services.daily_library import DailyLibraryService
+    from app.services.daily_stock import DailyStockService
     from app.services.daily_subscriptions import DailySubscriptionService
 
 logger = get_logger(__name__)
@@ -44,11 +45,13 @@ class DailyServices:
         delivery: DailyDeliveryService,
         library: DailyLibraryService,
         albums: AlbumCollector,
+        stock: DailyStockService,
     ) -> None:
         self.subscriptions = subscriptions
         self.delivery = delivery
         self.library = library
         self.albums = albums
+        self.stock = stock
 
 
 class DailyServicesMiddleware(BaseMiddleware):

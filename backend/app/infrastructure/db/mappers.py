@@ -9,9 +9,11 @@ from typing import TYPE_CHECKING
 
 from app.domain.entities import (
     BonusTransaction,
+    DailyAlert,
     DailyContent,
     DailyDelivery,
     DailyDeliveryAttempt,
+    DailyOutboxMessage,
     DailySubscription,
     LoyaltyReward,
     Product,
@@ -21,13 +23,16 @@ from app.domain.entities import (
     ReferralRecord,
     User,
 )
+from app.domain.enums import DailyAlertKey, DailyOutboxChannel, DailyOutboxKind
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models import (
         BonusTransactionModel,
+        DailyAlertModel,
         DailyContentModel,
         DailyDeliveryAttemptModel,
         DailyDeliveryModel,
+        DailyOutboxModel,
         DailySubscriptionModel,
         LoyaltyRewardModel,
         ProductModel,
@@ -246,4 +251,41 @@ def to_daily_attempt(model: DailyDeliveryAttemptModel) -> DailyDeliveryAttempt:
         error=model.error,
         retry_after_seconds=model.retry_after_seconds,
         telegram_message_id=model.telegram_message_id,
+    )
+
+
+def to_daily_outbox_message(model: DailyOutboxModel) -> DailyOutboxMessage:
+    """Map a Daily outbox row onto its domain entity."""
+    return DailyOutboxMessage(
+        id=model.id,
+        kind=DailyOutboxKind(model.kind),
+        channel=DailyOutboxChannel(model.channel),
+        chat_id=model.chat_id,
+        body=model.body,
+        dedupe_key=model.dedupe_key,
+        status=model.status,
+        attempts=model.attempts,
+        next_attempt_at=model.next_attempt_at,
+        deadline_at=model.deadline_at,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+        lease_token=model.lease_token,
+        lease_until=model.lease_until,
+        sent_at=model.sent_at,
+        telegram_message_id=model.telegram_message_id,
+        last_error=model.last_error,
+    )
+
+
+def to_daily_alert(model: DailyAlertModel) -> DailyAlert:
+    """Map a Daily alert row onto its domain entity."""
+    return DailyAlert(
+        key=DailyAlertKey(model.key),
+        state=model.state,
+        notifications=model.notifications,
+        value=dict(model.value),
+        updated_at=model.updated_at,
+        fired_at=model.fired_at,
+        notified_at=model.notified_at,
+        resolved_at=model.resolved_at,
     )

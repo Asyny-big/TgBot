@@ -277,3 +277,63 @@ class DailyAttemptOutcome(StrEnum):
     CONTENT_INVALID = "content_invalid"
     LEASE_LOST = "lease_lost"
     CRASHED = "crashed"
+
+
+class DailyOutboxKind(StrEnum):
+    """What a message of the Daily outbox is: not a library item.
+
+    Stored as plain text, not a database enum, so later kinds need no
+    migration.
+    """
+
+    ALERT = "alert"
+    """A warning to the owner: low stock, failing deliveries, a revoked token."""
+
+    EXHAUSTED_NOTICE = "exhausted_notice"
+    """A buyer has received everything there is, for now."""
+
+
+class DailyOutboxChannel(StrEnum):
+    """Which bot sends an outbox message.
+
+    ``DAILY`` — the Daily Content bot, for nearly everything. ``SHOP`` — the
+    shop bot, only for what the Daily bot cannot say itself: that Telegram no
+    longer accepts its token.
+    """
+
+    DAILY = "daily"
+    SHOP = "shop"
+
+
+class DailyOutboxStatus(StrEnum):
+    """Lifecycle of one outbox message.
+
+    ``PENDING`` — waiting for its first or next attempt.
+    ``SENDING`` — an attempt holds it under a lease; a lease that runs out
+        means the attempt died, and the message is sent again (at least once).
+    ``SENT`` — Telegram accepted it. Final.
+    ``FAILED`` — Telegram refused it for good, or the attempts ran out. Final.
+    ``EXPIRED`` — its deadline passed unsent: news that late is no news. Final.
+    """
+
+    PENDING = "pending"
+    SENDING = "sending"
+    SENT = "sent"
+    FAILED = "failed"
+    EXPIRED = "expired"
+
+
+class DailyAlertKey(StrEnum):
+    """The owner's alerts — one state each, never a stream of messages."""
+
+    LOW_STOCK = "low_stock"
+    CONTENT_EXHAUSTED = "content_exhausted"
+    DELIVERY_FAILURES = "delivery_failures"
+    DAILY_TOKEN_UNAUTHORIZED = "daily_token_unauthorized"  # noqa: S105 — an alert name
+
+
+class DailyAlertState(StrEnum):
+    """Whether an alert's condition holds right now."""
+
+    OK = "ok"
+    FIRING = "firing"

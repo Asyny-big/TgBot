@@ -11,6 +11,10 @@ from app.infrastructure.db.repositories.daily import (
     SqlAlchemyDailyDeliveryRepository,
     SqlAlchemyDailySubscriptionRepository,
 )
+from app.infrastructure.db.repositories.daily_runtime import (
+    SqlAlchemyDailyAlertRepository,
+    SqlAlchemyDailyOutboxRepository,
+)
 from app.infrastructure.db.repositories.loyalty import SqlAlchemyLoyaltyRepository
 from app.infrastructure.db.repositories.products import SqlAlchemyProductRepository
 from app.infrastructure.db.repositories.purchases import SqlAlchemyPurchaseRepository
@@ -41,6 +45,8 @@ class SqlAlchemyUnitOfWork:
         self._daily_subscriptions = SqlAlchemyDailySubscriptionRepository(session)
         self._daily_content = SqlAlchemyDailyContentRepository(session)
         self._daily_deliveries = SqlAlchemyDailyDeliveryRepository(session)
+        self._daily_outbox = SqlAlchemyDailyOutboxRepository(session)
+        self._daily_alerts = SqlAlchemyDailyAlertRepository(session)
 
     @property
     def session(self) -> AsyncSession:
@@ -85,6 +91,14 @@ class SqlAlchemyUnitOfWork:
     @property
     def daily_deliveries(self) -> SqlAlchemyDailyDeliveryRepository:
         return self._daily_deliveries
+
+    @property
+    def daily_outbox(self) -> SqlAlchemyDailyOutboxRepository:
+        return self._daily_outbox
+
+    @property
+    def daily_alerts(self) -> SqlAlchemyDailyAlertRepository:
+        return self._daily_alerts
 
     async def commit(self) -> None:
         await self._session.commit()

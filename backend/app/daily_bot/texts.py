@@ -6,6 +6,7 @@ owner's cards also show a caption and a status reason, and those are escaped.
 
 from __future__ import annotations
 
+import math
 from html import escape
 from typing import TYPE_CHECKING, Final
 
@@ -15,13 +16,14 @@ from app.domain.daily import (
     MINUTES_PER_DAY,
     WINDOW_HALF_WIDTH,
 )
-from app.domain.enums import DailyContentKind, DailyContentStatus
+from app.domain.daily_alerts import AlertNotice
+from app.domain.enums import DailyAlertKey, DailyContentKind, DailyContentStatus
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from app.daily_bot.intake import Refusal
-    from app.domain.daily import LibraryStats
+    from app.domain.daily import LibraryStats, StockSummary
     from app.domain.entities import DailyContent
 
 STATUS_BUTTON: Final = "📊 Мой статус"
@@ -191,8 +193,8 @@ def card(item: DailyContent) -> str:
     return "\n".join(lines)
 
 
-def stats(numbers: LibraryStats) -> str:
-    """``/stats``."""
+def stats(numbers: LibraryStats, stock: StockSummary | None = None) -> str:
+    """``/stats``: the library, and how long it lasts the buyers."""
     lines = [
         "📚 Библиотека",
         (
@@ -206,7 +208,79 @@ def stats(numbers: LibraryStats) -> str:
         if (count := numbers.active_by_kind.get(kind, 0))
     ]
     lines.append("Активные по типам: " + (" · ".join(kinds) if kinds else "пока пусто"))
+    if stock is None:
+        lines.append("Подписчиков с выдачей пока нет.")
+    else:
+        lines.append(
+            f"Подписчиков: {stock.active_users} · запас в среднем "
+            f"{_number(stock.average_remaining)} · минимум {stock.minimum_remaining} · "
+            f"посмотрели всё: {stock.exhausted_users}"
+        )
+        lines.append(f"Прогноз запаса: {_days(stock.forecast_days)}")
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# The runtime: the buyer's notice and the owner's alerts                      #
+# --------------------------------------------------------------------------- #
+
+EXHAUSTED: Final = "Вы посмотрели все материалы 🎉 Новые придут автоматически, как только появятся."
+"""Sent once per episode to a buyer who has received everything there is."""
+
+_ALERT_RESOLVED: Final = {
+    DailyAlertKey.LOW_STOCK: "✅ Daily: запас материалов снова в норме.",
+    DailyAlertKey.CONTENT_EXHAUSTED: "✅ Daily: новые материалы снова есть у всех подписчиков.",
+    DailyAlertKey.DELIVERY_FAILURES: "✅ Daily: доставка снова идёт нормально.",
+    DailyAlertKey.DAILY_TOKEN_UNAUTHORIZED: "✅ Daily-бот: Telegram снова принимает токен.",
+}
+
+
+def alert(key: DailyAlertKey, notice: AlertNotice, value: Mapping[str, object]) -> str:
+    """The owner's message about one alert: it fired, still fires, or resolved."""
+    if notice is AlertNotice.RESOLVE:
+        return _ALERT_RESOLVED[key]
+    text = _alert_firing(key, value)
+    return f"🔁 Напоминание. {text}" if notice is AlertNotice.REMIND else text
+
+
+def _alert_firing(key: DailyAlertKey, value: Mapping[str, object]) -> str:
+    if key is DailyAlertKey.LOW_STOCK:
+        forecast = _days(value.get("forecast_days"))
+        threshold = _number(value.get("threshold_days"))
+        return (
+            f"⚠️ Daily: материалов мало — у части подписчиков запас примерно на "
+            f"{forecast} (порог — {threshold} дн.). "
+            f"Активных материалов: {value.get('active_items', 0)}. "
+            "Добавьте новые — бот разошлёт их сам."
+        )
+    if key is DailyAlertKey.CONTENT_EXHAUSTED:
+        return (
+            f"⚠️ Daily: подписчиков, посмотревших всё: {value.get('exhausted_users', 0)}. "
+            "Новые материалы придут им автоматически, как только вы их добавите."
+        )
+    if key is DailyAlertKey.DELIVERY_FAILURES:
+        return (
+            f"⚠️ Daily: за сутки не доставлено {value.get('failed', 0)} из "
+            f"{value.get('total', 0)} ({value.get('percent', 0)}%). "
+            "Проверьте бота и материалы."
+        )
+    return (
+        "🚨 Daily-бот: Telegram отклоняет токен (401). Выдача не идёт — проверьте DAILY_BOT_TOKEN."
+    )
+
+
+def _number(value: object) -> str:
+    """``3.0`` → ``"3"``, ``4.25`` → ``"4.2"``."""
+    if isinstance(value, int | float):
+        return f"{value:.1f}".removesuffix(".0")
+    return "—"
+
+
+def _days(value: object) -> str:
+    """Days of stock; ``None`` or infinity — new items arrive faster than they go."""
+    if value is None or (isinstance(value, float) and math.isinf(value)):
+        return "без ограничения"
+    return f"{_number(value)} дн."
 
 
 def album_summary(
@@ -279,6 +353,7 @@ __all__ = [
     "DISABLED",
     "DISABLE_BUTTON",
     "ENABLE_BUTTON",
+    "EXHAUSTED",
     "HELP",
     "ITEM_USAGE",
     "KIND_LABELS",
@@ -305,6 +380,7 @@ __all__ = [
     "UNDO_BUTTON",
     "added",
     "album_summary",
+    "alert",
     "already_added",
     "archived_twin",
     "card",

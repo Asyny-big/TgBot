@@ -14,7 +14,7 @@ programme's own definition of a completed purchase: there is no second counter.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from sqlalchemy import and_, func, or_, select
@@ -22,12 +22,13 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import ConflictError, DailyContentDuplicateError
-from app.domain.daily import LibraryStats
+from app.domain.daily import DeliveryCounts, LibraryStats
 from app.domain.enums import (
     DailyAttemptOutcome,
     DailyContentKind,
     DailyContentStatus,
     DailyDeliveryStatus,
+    DailyDeliveryTrigger,
     DailySubscriptionStatus,
 )
 from app.infrastructure.db.errors import violated_constraint
@@ -47,7 +48,8 @@ from app.infrastructure.db.models import (
 from app.infrastructure.db.repositories.loyalty import completed_purchase_condition
 
 if TYPE_CHECKING:
-    from datetime import date, datetime
+    from collections.abc import Sequence
+    from datetime import date, datetime, timedelta
     from uuid import UUID
 
     from sqlalchemy import ColumnElement
@@ -166,25 +168,9 @@ class SqlAlchemyDailySubscriptionRepository:
         limit: int = 100,
         only: tuple[int, ...] = (),
     ) -> tuple[DailySubscription, ...]:
-        completed = (
-            select(func.count())
-            .select_from(PurchaseModel)
-            .where(
-                PurchaseModel.user_id == DailySubscriptionModel.user_id,
-                completed_purchase_condition(),
-            )
-            .correlate(DailySubscriptionModel)
-            .scalar_subquery()
-        )
-        conditions: list[ColumnElement[bool]] = [
-            DailySubscriptionModel.status == DailySubscriptionStatus.ACTIVE,
-            DailySubscriptionModel.blocked_at.is_(None),
-            completed >= min_completed,
-        ]
+        conditions = _deliverable_conditions(min_completed=min_completed, only=only)
         if after_user_id is not None:
             conditions.append(DailySubscriptionModel.user_id > after_user_id)
-        if only:
-            conditions.append(DailySubscriptionModel.user_id.in_(only))
         statement = (
             select(DailySubscriptionModel)
             .where(*conditions)
@@ -193,6 +179,42 @@ class SqlAlchemyDailySubscriptionRepository:
         )
         models = (await self._session.execute(statement)).scalars().all()
         return tuple(to_daily_subscription(model) for model in models)
+
+    async def received_active_counts(
+        self,
+        *,
+        min_completed: int,
+        only: tuple[int, ...] = (),
+    ) -> dict[int, int]:
+        received = (
+            select(func.count(DailyDeliveryModel.id))
+            .select_from(DailyDeliveryModel)
+            .join(DailyContentModel, DailyContentModel.id == DailyDeliveryModel.content_id)
+            .where(
+                DailyDeliveryModel.user_id == DailySubscriptionModel.user_id,
+                DailyDeliveryModel.status.in_(_HOLDING_STATUSES),
+                DailyContentModel.status == DailyContentStatus.ACTIVE,
+            )
+            .correlate(DailySubscriptionModel)
+            .scalar_subquery()
+        )
+        statement = select(DailySubscriptionModel.user_id, received).where(
+            *_deliverable_conditions(min_completed=min_completed, only=only)
+        )
+        rows = (await self._session.execute(statement)).tuples()
+        return {user_id: int(count) for user_id, count in rows}
+
+    async def mark_exhausted_notified(
+        self,
+        user_id: int,
+        *,
+        at: datetime,
+    ) -> DailySubscription | None:
+        model = await self._locked(user_id)
+        if model is None:
+            return None
+        model.exhausted_notified_at = at
+        return await self._save(model)
 
     async def _locked(self, user_id: int) -> DailySubscriptionModel | None:
         statement = (
@@ -411,6 +433,14 @@ class SqlAlchemyDailyContentRepository:
         )
         return int(await self._session.scalar(statement) or 0)
 
+    async def added_since(self, since: datetime) -> int:
+        statement = (
+            select(func.count())
+            .select_from(DailyContentModel)
+            .where(DailyContentModel.created_at >= since)
+        )
+        return int(await self._session.scalar(statement) or 0)
+
     async def _locked_item(self, content_id: int) -> DailyContentModel | None:
         statement = (
             select(DailyContentModel)
@@ -477,20 +507,9 @@ class SqlAlchemyDailyDeliveryRepository:
         self._session = session
 
     async def open(self, draft: DailyDeliveryDraft) -> DailyDelivery | None:
-        window = draft.window
         statement = (
             insert(DailyDeliveryModel)
-            .values(
-                user_id=draft.user_id,
-                delivery_date=window.delivery_date,
-                trigger=draft.trigger,
-                status=DailyDeliveryStatus.PENDING,
-                scheduled_for=window.center,
-                window_opens_at=window.opens_at,
-                window_closes_at=window.closes_at,
-                deadline_at=window.deadline_at,
-                next_attempt_at=draft.first_attempt_at,
-            )
+            .values(**_opening(draft))
             .on_conflict_do_nothing(constraint=_DELIVERY_DATE_CONSTRAINT)
             .returning(DailyDeliveryModel.id)
         )
@@ -498,6 +517,17 @@ class SqlAlchemyDailyDeliveryRepository:
         if created_id is None:
             return None
         return await self.get(created_id)
+
+    async def open_many(self, drafts: Sequence[DailyDeliveryDraft]) -> int:
+        if not drafts:
+            return 0
+        statement = (
+            insert(DailyDeliveryModel)
+            .values([_opening(draft) for draft in drafts])
+            .on_conflict_do_nothing(constraint=_DELIVERY_DATE_CONSTRAINT)
+            .returning(DailyDeliveryModel.id)
+        )
+        return len((await self._session.execute(statement)).scalars().all())
 
     async def get(self, delivery_id: int) -> DailyDelivery | None:
         model = await self._session.get(DailyDeliveryModel, delivery_id)
@@ -515,22 +545,39 @@ class SqlAlchemyDailyDeliveryRepository:
         model = await self._locked(DailyDeliveryModel.id == delivery_id)
         return to_daily_delivery(model) if model is not None else None
 
-    async def lock_due(self, *, now: datetime, limit: int) -> tuple[DailyDelivery, ...]:
+    async def lock_due(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        activation_grace: timedelta | None = None,
+    ) -> tuple[DailyDelivery, ...]:
+        conditions: list[ColumnElement[bool]] = [
+            DailyDeliveryModel.deadline_at > now,
+            or_(
+                and_(
+                    DailyDeliveryModel.status.in_(_WAITING_STATUSES),
+                    DailyDeliveryModel.next_attempt_at <= now,
+                ),
+                and_(
+                    DailyDeliveryModel.status == DailyDeliveryStatus.SENDING,
+                    DailyDeliveryModel.lease_until <= now,
+                ),
+            ),
+        ]
+        if activation_grace:
+            # The bot is still sending the welcome and then this very item.
+            conditions.append(
+                ~and_(
+                    DailyDeliveryModel.trigger == DailyDeliveryTrigger.ACTIVATION,
+                    DailyDeliveryModel.status == DailyDeliveryStatus.PENDING,
+                    DailyDeliveryModel.attempts == 0,
+                    DailyDeliveryModel.scheduled_for > now - activation_grace,
+                )
+            )
         statement = (
             select(DailyDeliveryModel)
-            .where(
-                DailyDeliveryModel.deadline_at > now,
-                or_(
-                    and_(
-                        DailyDeliveryModel.status.in_(_WAITING_STATUSES),
-                        DailyDeliveryModel.next_attempt_at <= now,
-                    ),
-                    and_(
-                        DailyDeliveryModel.status == DailyDeliveryStatus.SENDING,
-                        DailyDeliveryModel.lease_until <= now,
-                    ),
-                ),
-            )
+            .where(*conditions)
             .order_by(DailyDeliveryModel.next_attempt_at.asc(), DailyDeliveryModel.id.asc())
             .limit(limit)
             # Another worker is on those rows: take the next ones instead.
@@ -767,6 +814,29 @@ class SqlAlchemyDailyDeliveryRepository:
         models = (await self._session.execute(statement)).scalars().all()
         return tuple(to_daily_attempt(model) for model in models)
 
+    async def last_sent_at(self, user_id: int) -> datetime | None:
+        statement = select(func.max(DailyDeliveryModel.sent_at)).where(
+            DailyDeliveryModel.user_id == user_id,
+            DailyDeliveryModel.status == DailyDeliveryStatus.SENT,
+        )
+        last: datetime | None = await self._session.scalar(statement)
+        return last
+
+    async def outcome_counts(self, *, since: datetime) -> DeliveryCounts:
+        failed = and_(
+            DailyDeliveryModel.status.in_(
+                (DailyDeliveryStatus.FAILED, DailyDeliveryStatus.EXPIRED),
+            ),
+            DailyDeliveryModel.last_outcome.is_not(None),
+            DailyDeliveryModel.last_outcome != DailyAttemptOutcome.BLOCKED,
+        )
+        statement = select(
+            func.count().filter(DailyDeliveryModel.status == DailyDeliveryStatus.SENT),
+            func.count().filter(failed),
+        ).where(DailyDeliveryModel.scheduled_for >= since)
+        sent, failures = (await self._session.execute(statement)).one()
+        return DeliveryCounts(sent=int(sent), failed=int(failures))
+
     async def count_sent(self, user_id: int) -> int:
         statement = (
             select(func.count())
@@ -863,6 +933,48 @@ class SqlAlchemyDailyDeliveryRepository:
         await self._session.flush()
         await self._session.refresh(model)
         return to_daily_delivery(model)
+
+
+def _deliverable_conditions(
+    *,
+    min_completed: int,
+    only: tuple[int, ...],
+) -> list[ColumnElement[bool]]:
+    """Active, unblocked, entitled by the loyalty programme's own count."""
+    completed = (
+        select(func.count())
+        .select_from(PurchaseModel)
+        .where(
+            PurchaseModel.user_id == DailySubscriptionModel.user_id,
+            completed_purchase_condition(),
+        )
+        .correlate(DailySubscriptionModel)
+        .scalar_subquery()
+    )
+    conditions: list[ColumnElement[bool]] = [
+        DailySubscriptionModel.status == DailySubscriptionStatus.ACTIVE,
+        DailySubscriptionModel.blocked_at.is_(None),
+        completed >= min_completed,
+    ]
+    if only:
+        conditions.append(DailySubscriptionModel.user_id.in_(only))
+    return conditions
+
+
+def _opening(draft: DailyDeliveryDraft) -> dict[str, Any]:
+    """The row a delivery is opened with: pending, due at its first attempt."""
+    window = draft.window
+    return {
+        "user_id": draft.user_id,
+        "delivery_date": window.delivery_date,
+        "trigger": draft.trigger,
+        "status": DailyDeliveryStatus.PENDING,
+        "scheduled_for": window.center,
+        "window_opens_at": window.opens_at,
+        "window_closes_at": window.closes_at,
+        "deadline_at": window.deadline_at,
+        "next_attempt_at": draft.first_attempt_at,
+    }
 
 
 __all__ = [

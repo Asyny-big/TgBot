@@ -15,8 +15,10 @@ if TYPE_CHECKING:
 
     from app.domain.repositories import (
         BonusRepository,
+        DailyAlertRepository,
         DailyContentRepository,
         DailyDeliveryRepository,
+        DailyOutboxRepository,
         DailySubscriptionRepository,
         LoyaltyRepository,
         ProductRepository,
@@ -78,6 +80,16 @@ class UnitOfWork(Protocol):
     @property
     def daily_deliveries(self) -> DailyDeliveryRepository:
         """Daily Content deliveries bound to this transaction."""
+        ...
+
+    @property
+    def daily_outbox(self) -> DailyOutboxRepository:
+        """The Daily outbox — alerts and notices — bound to this transaction."""
+        ...
+
+    @property
+    def daily_alerts(self) -> DailyAlertRepository:
+        """The owner's Daily alerts bound to this transaction."""
         ...
 
     async def commit(self) -> None:

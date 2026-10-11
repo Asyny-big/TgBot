@@ -431,6 +431,44 @@ class DailySettings(BaseSettings):
     protect_content: bool = True
     """Send items with Telegram's ``protect_content``: no forwarding or saving."""
 
+    activation_grace_seconds: int = Field(default=120, ge=0, le=3600)
+    """How long the worker leaves a fresh activation delivery to the bot.
+
+    The bot sends the welcome first and the first item right after it; a
+    worker taking the delivery in between would put the item before the
+    welcome. Once this passes, the worker takes it over — a bot that died
+    halfway never costs the buyer their first item.
+    """
+
+    # The Daily worker (``python -m app.daily_worker``): its loops, its pace,
+    # and the owner's alerts it raises.
+    planner_interval_seconds: int = Field(default=60, ge=10, le=600)
+    """How often the planner opens the deliveries whose window has opened."""
+
+    sender_idle_seconds: int = Field(default=5, ge=1, le=60)
+    """How long the sender waits when nothing is due."""
+
+    send_batch_size: int = Field(default=10, ge=1, le=100)
+    """Deliveries claimed and sent per pass."""
+
+    send_rate_per_second: float = Field(default=20.0, gt=0, le=30)
+    """Messages per second, all kinds together, for one worker process."""
+
+    expire_interval_seconds: int = Field(default=300, ge=30, le=3600)
+    """How often deliveries past their deadline are closed."""
+
+    evaluate_interval_seconds: int = Field(default=600, ge=60, le=3600)
+    """How often the stock, the failures and the token are evaluated."""
+
+    low_stock_days: float = Field(default=3.0, gt=0, le=60)
+    """The owner is warned when the worst-off tenth of buyers has this many days left."""
+
+    alert_cooldown_hours: int = Field(default=24, ge=1, le=168)
+    """A firing alert reminds the owner at most this often."""
+
+    worker_host: str = "0.0.0.0"  # noqa: S104 — the container's health check only
+    worker_port: int = Field(default=8083, ge=1, le=65535)
+
     # The Daily Content bot is its own Telegram bot, run by its own process.
     # Every field below is optional here, so the API and the shop bot start
     # without them; the Daily bot process checks them before it starts.
@@ -516,6 +554,16 @@ class DailySettings(BaseSettings):
     def no_content_recheck(self) -> timedelta:
         """``no_content_recheck_seconds`` as a duration."""
         return timedelta(seconds=self.no_content_recheck_seconds)
+
+    @property
+    def activation_grace(self) -> timedelta:
+        """``activation_grace_seconds`` as a duration."""
+        return timedelta(seconds=self.activation_grace_seconds)
+
+    @property
+    def alert_cooldown(self) -> timedelta:
+        """``alert_cooldown_hours`` as a duration."""
+        return timedelta(hours=self.alert_cooldown_hours)
 
     def bot_problems(self) -> tuple[str, ...]:
         """What keeps the Daily bot process from starting; empty when nothing does."""

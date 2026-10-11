@@ -19,6 +19,8 @@ if TYPE_CHECKING:
         Currency,
         DailyContentKind,
         DailyDeliveryTrigger,
+        DailyOutboxChannel,
+        DailyOutboxKind,
         PaymentProvider,
         PurchaseStatus,
     )
@@ -167,3 +169,21 @@ class DailyDeliveryDraft:
     window: DeliveryWindow
     first_attempt_at: datetime
     """When the first attempt is due — inside ``window``."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailyOutboxDraft:
+    """A message to queue in the Daily outbox."""
+
+    kind: DailyOutboxKind
+    channel: DailyOutboxChannel
+    chat_id: int
+    body: str
+    """The message, HTML: escape anything interpolated before queueing it."""
+
+    dedupe_key: str
+    """The same key is queued once: the message's identity, not its text."""
+
+    first_attempt_at: datetime
+    deadline_at: datetime
+    """After this the message is dropped unsent."""

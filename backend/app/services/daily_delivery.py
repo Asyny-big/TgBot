@@ -201,7 +201,12 @@ class DailyDeliveryService:
         claims: list[_Claim] = []
         reports: list[DeliveryReport] = []
         async with self.uow_factory() as uow:
-            for delivery in await uow.daily_deliveries.lock_due(now=now, limit=limit):
+            due = await uow.daily_deliveries.lock_due(
+                now=now,
+                limit=limit,
+                activation_grace=self.settings.activation_grace,
+            )
+            for delivery in due:
                 claimed = await self._claim(uow, delivery, now)
                 if isinstance(claimed, DeliveryReport):
                     reports.append(claimed)

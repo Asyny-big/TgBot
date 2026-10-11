@@ -116,6 +116,7 @@ ignore = [
 "app/daily_bot/texts.py" = ["RUF001"]
 "tests/test_daily_bot_flow.py" = ["RUF001"]  # asserts the approved texts verbatim
 "tests/test_daily_owner_flow.py" = ["RUF001"]  # asserts the owner's texts verbatim
+"tests/test_daily_worker_flow.py" = ["RUF001"]  # asserts the approved notice verbatim
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"

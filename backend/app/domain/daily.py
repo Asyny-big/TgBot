@@ -379,6 +379,16 @@ def owner_reason(action: LibraryAction) -> str:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class DeliveryCounts:
+    """How deliveries closed over a period — what the failure alert watches."""
+
+    sent: int
+    failed: int
+    """Failed or expired after at least one attempt that went wrong; a buyer
+    who blocked the bot or a library that ran dry is not a failure."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class LibraryStats:
     """How many items the library holds, by status, and the active ones by kind."""
 
@@ -416,6 +426,18 @@ class DailyContentSender(Protocol):
             DailyContentRejectedError: Telegram refused this item.
             DailySendRejectedError: Telegram refused the message otherwise.
         """
+        ...
+
+
+class DailyTextSender(Protocol):
+    """Port: send one plain message through one bot — alerts and notices.
+
+    Failures come out as the same ``DailySend*Error`` family as items, so a
+    message is retried, or given up, by the same rules.
+    """
+
+    async def send_text(self, chat_id: int, text: str) -> int:
+        """Send ``text`` (HTML); return the Telegram message id."""
         ...
 
 
@@ -463,6 +485,8 @@ __all__ = [
     "MINUTES_PER_DAY",
     "WINDOW_HALF_WIDTH",
     "DailyContentSender",
+    "DailyTextSender",
+    "DeliveryCounts",
     "DeliveryStep",
     "DeliveryWindow",
     "LibraryAction",

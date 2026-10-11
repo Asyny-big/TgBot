@@ -11,25 +11,28 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from datetime import date, datetime
+    from datetime import date, datetime, timedelta
     from uuid import UUID
 
     from app.domain.commands import (
         BonusTransactionDraft,
         DailyContentDraft,
         DailyDeliveryDraft,
+        DailyOutboxDraft,
         ProductDraft,
         ProductUpdate,
         PurchaseDraft,
         ReferralDraft,
         UserDraft,
     )
-    from app.domain.daily import LibraryStats
+    from app.domain.daily import DeliveryCounts, LibraryStats
     from app.domain.entities import (
         BonusTransaction,
+        DailyAlert,
         DailyContent,
         DailyDelivery,
         DailyDeliveryAttempt,
+        DailyOutboxMessage,
         DailySubscription,
         LoyaltyReward,
         Product,
@@ -41,6 +44,7 @@ if TYPE_CHECKING:
     )
     from app.domain.enums import (
         BonusTransactionType,
+        DailyAlertKey,
         DailyAttemptOutcome,
         DailyContentStatus,
         PaymentProvider,
@@ -607,6 +611,25 @@ class DailySubscriptionRepository(Protocol):
         """
         ...
 
+    async def received_active_counts(
+        self,
+        *,
+        min_completed: int,
+        only: tuple[int, ...] = (),
+    ) -> dict[int, int]:
+        """For every buyer ``deliverable`` would return: how many *active* items
+        they hold or received — what their stock is counted down from."""
+        ...
+
+    async def mark_exhausted_notified(
+        self,
+        user_id: int,
+        *,
+        at: datetime,
+    ) -> DailySubscription | None:
+        """Record that the buyer was told they have seen everything, for now."""
+        ...
+
 
 class DailyContentRepository(Protocol):
     """The Daily Content library. Items are archived, never deleted."""
@@ -671,6 +694,10 @@ class DailyContentRepository(Protocol):
         """How many items take part in deliveries."""
         ...
 
+    async def added_since(self, since: datetime) -> int:
+        """How many items were added from ``since`` on, whatever became of them."""
+        ...
+
     async def count_available_for(self, user_id: int) -> int:
         """How many active items this buyer has neither received nor holds."""
         ...
@@ -705,11 +732,29 @@ class DailyDeliveryRepository(Protocol):
         """One delivery, locked until the transaction ends."""
         ...
 
-    async def lock_due(self, *, now: datetime, limit: int) -> tuple[DailyDelivery, ...]:
+    async def open_many(self, drafts: Sequence[DailyDeliveryDraft]) -> int:
+        """Open many deliveries in one statement; return how many were new.
+
+        Each is opened exactly as ``open`` would; a buyer who already has a
+        delivery for that date is skipped, however many planners run at once.
+        """
+        ...
+
+    async def lock_due(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        activation_grace: timedelta | None = None,
+    ) -> tuple[DailyDelivery, ...]:
         """Lock the deliveries that may be attempted now, skipping locked ones.
 
         Pending and no-content deliveries whose next attempt is due, and sending
         ones whose lease ran out — the attempt died — all before their deadline.
+
+        ``activation_grace`` leaves alone an activation delivery nobody has
+        attempted yet for that long after its moment: the bot is sending the
+        welcome and then the item itself.
         """
         ...
 
@@ -831,4 +876,104 @@ class DailyDeliveryRepository(Protocol):
 
     async def count_sent(self, user_id: int) -> int:
         """How many items this buyer has received."""
+        ...
+
+    async def last_sent_at(self, user_id: int) -> datetime | None:
+        """When this buyer last received an item, if ever."""
+        ...
+
+    async def outcome_counts(self, *, since: datetime) -> DeliveryCounts:
+        """Deliveries closed from ``since`` on: sent, and failed for a reason
+        other than the buyer blocking the bot or the library running dry."""
+        ...
+
+
+class DailyOutboxRepository(Protocol):
+    """Messages the Daily runtime owes somebody: alerts, notices.
+
+    Sent like deliveries: a lease while an attempt is under way, every outcome
+    written against that lease's token, a dead attempt taken over (so a
+    message may arrive twice, never zero times before its deadline).
+    """
+
+    async def enqueue(self, draft: DailyOutboxDraft) -> DailyOutboxMessage | None:
+        """Queue a message; ``None`` when its ``dedupe_key`` was queued before."""
+        ...
+
+    async def get(self, message_id: int) -> DailyOutboxMessage | None:
+        """One message, or ``None``."""
+        ...
+
+    async def find_by_key(self, dedupe_key: str) -> DailyOutboxMessage | None:
+        """The message queued under this key, if any."""
+        ...
+
+    async def claim_due(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        lease_until: datetime,
+    ) -> tuple[DailyOutboxMessage, ...]:
+        """Lease the messages due now, skipping rows another worker holds.
+
+        Pending ones whose next attempt is due and sending ones whose lease ran
+        out, before their deadline. Each comes back ``SENDING`` with a new lease
+        token and one more attempt counted.
+        """
+        ...
+
+    async def finish_sent(
+        self,
+        lease_token: UUID,
+        *,
+        at: datetime,
+        telegram_message_id: int,
+    ) -> DailyOutboxMessage | None:
+        """Telegram took it. ``None`` when the lease is no longer this one's."""
+        ...
+
+    async def finish_retry(
+        self,
+        lease_token: UUID,
+        *,
+        at: datetime,
+        next_attempt_at: datetime,
+        error: str,
+    ) -> DailyOutboxMessage | None:
+        """An uncertain failure: back to pending, due again at ``next_attempt_at``."""
+        ...
+
+    async def finish_failed(
+        self,
+        lease_token: UUID,
+        *,
+        at: datetime,
+        error: str,
+    ) -> DailyOutboxMessage | None:
+        """Refused for good, or out of attempts. Final."""
+        ...
+
+    async def expire_overdue(self, *, now: datetime, limit: int = 100) -> int:
+        """Drop the messages whose deadline passed unsent; return how many."""
+        ...
+
+
+class DailyAlertRepository(Protocol):
+    """The owner's alerts: one row of state each."""
+
+    async def lock(self, key: DailyAlertKey) -> DailyAlert:
+        """The alert, created ``OK`` if new, locked until the end of the transaction."""
+        ...
+
+    async def save(self, alert: DailyAlert) -> DailyAlert:
+        """Write the locked alert's new state."""
+        ...
+
+    async def get(self, key: DailyAlertKey) -> DailyAlert | None:
+        """The alert, or ``None`` before its first evaluation."""
+        ...
+
+    async def list_all(self) -> tuple[DailyAlert, ...]:
+        """Every alert evaluated so far."""
         ...

@@ -19,8 +19,13 @@ from app.infrastructure.payments.cryptobot import CryptoBotClient
 from app.services.auth import AuthService
 from app.services.bonuses import BonusService
 from app.services.checkout import CheckoutService
+from app.services.daily_alerts import DailyAlertService
 from app.services.daily_delivery import DailyDeliveryService
 from app.services.daily_library import DailyLibraryService
+from app.services.daily_notices import DailyNoticeService
+from app.services.daily_outbox import DailyOutboxService
+from app.services.daily_planning import DailyPlanningService
+from app.services.daily_stock import DailyStockService
 from app.services.daily_subscriptions import DailySubscriptionService
 from app.services.delivery import DeliveryService
 from app.services.loyalty import LoyaltyService
@@ -31,10 +36,13 @@ from app.services.referrals import ReferralService
 from app.services.stats import StatsService
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from app.core.config import Settings
     from app.core.resources import Resources
-    from app.domain.daily import DailyContentSender
+    from app.domain.daily import DailyContentSender, DailyTextSender
     from app.domain.delivery import DeliveryGateway
+    from app.domain.enums import DailyOutboxChannel
     from app.domain.loyalty import MilestoneNotifier
     from app.domain.notifications import RewardNotifier
     from app.domain.payments import StarsInvoiceSender
@@ -172,6 +180,33 @@ class Container:
             settings=self.settings.daily,
             sender=sender,
         )
+
+    def build_daily_planning(self) -> DailyPlanningService:
+        """The planner: opens each buyer's delivery for their day."""
+        return DailyPlanningService(uow_factory=self.uow_factory, settings=self.settings.daily)
+
+    def build_daily_outbox(
+        self,
+        senders: Mapping[DailyOutboxChannel, DailyTextSender],
+    ) -> DailyOutboxService:
+        """The outbox sender; ``senders`` are the bots of the two channels."""
+        return DailyOutboxService(
+            uow_factory=self.uow_factory,
+            settings=self.settings.daily,
+            senders=senders,
+        )
+
+    def build_daily_alerts(self) -> DailyAlertService:
+        """The owner's alerts."""
+        return DailyAlertService(uow_factory=self.uow_factory, settings=self.settings.daily)
+
+    def build_daily_stock(self) -> DailyStockService:
+        """How long the library lasts each buyer."""
+        return DailyStockService(uow_factory=self.uow_factory, settings=self.settings.daily)
+
+    def build_daily_notices(self) -> DailyNoticeService:
+        """The buyers' "you have seen everything" notice."""
+        return DailyNoticeService(uow_factory=self.uow_factory, settings=self.settings.daily)
 
     def build_bonuses(self, *, notifier: RewardNotifier | None = None) -> BonusService:
         """The bonus service, optionally able to tell an inviter they earned.

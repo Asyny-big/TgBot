@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from time import monotonic
 from typing import TYPE_CHECKING, Any
@@ -33,12 +33,14 @@ from app.core.exceptions import (
 )
 from app.domain.bonuses import BonusPolicy, reward_bonuses
 from app.domain.commands import BonusTransactionDraft
-from app.domain.daily import LibraryStats
+from app.domain.daily import DeliveryCounts, LibraryStats
 from app.domain.entities import (
     BonusTransaction,
+    DailyAlert,
     DailyContent,
     DailyDelivery,
     DailyDeliveryAttempt,
+    DailyOutboxMessage,
     DailySubscription,
     LoyaltyReward,
     Product,
@@ -53,10 +55,13 @@ from app.domain.enums import (
     BONUS_HOLD_TYPES,
     BonusTransactionType,
     Currency,
+    DailyAlertState,
     DailyAttemptOutcome,
     DailyContentKind,
     DailyContentStatus,
     DailyDeliveryStatus,
+    DailyDeliveryTrigger,
+    DailyOutboxStatus,
     DailySubscriptionStatus,
     LoyaltyRewardStatus,
     PaymentProvider,
@@ -74,6 +79,7 @@ if TYPE_CHECKING:
     from app.domain.commands import (
         DailyContentDraft,
         DailyDeliveryDraft,
+        DailyOutboxDraft,
         ProductDraft,
         ProductUpdate,
         PurchaseDraft,
@@ -81,6 +87,7 @@ if TYPE_CHECKING:
         UserDraft,
     )
     from app.domain.delivery import DeliveryMessage
+    from app.domain.enums import DailyAlertKey
     from app.domain.pagination import (
         PageRequest,
         ProductFilters,
@@ -876,6 +883,10 @@ class FakeUnitOfWork:
         self._daily_subscriptions = FakeDailySubscriptionRepository(self._loyalty)
         self._daily_deliveries = FakeDailyDeliveryRepository()
         self._daily_content = FakeDailyContentRepository(self._daily_deliveries)
+        self._daily_subscriptions.deliveries = self._daily_deliveries
+        self._daily_subscriptions.content = self._daily_content
+        self._daily_outbox = FakeDailyOutboxRepository()
+        self._daily_alerts = FakeDailyAlertRepository()
         self._products.purchases = self._purchases
         self._referrals.purchases = self._purchases
         self._bonuses.purchases = self._purchases
@@ -922,6 +933,14 @@ class FakeUnitOfWork:
     @property
     def daily_deliveries(self) -> FakeDailyDeliveryRepository:
         return self._daily_deliveries
+
+    @property
+    def daily_outbox(self) -> FakeDailyOutboxRepository:
+        return self._daily_outbox
+
+    @property
+    def daily_alerts(self) -> FakeDailyAlertRepository:
+        return self._daily_alerts
 
     async def commit(self) -> None:
         self.commits += 1
@@ -1035,6 +1054,9 @@ class FakeDailySubscriptionRepository:
 
     def __init__(self, loyalty: FakeLoyaltyRepository) -> None:
         self.loyalty = loyalty
+        # Wired by FakeUnitOfWork: the stock counts read deliveries and items.
+        self.deliveries: FakeDailyDeliveryRepository
+        self.content: FakeDailyContentRepository
         self.items: dict[int, DailySubscription] = {}
 
     async def get(self, user_id: int) -> DailySubscription | None:
@@ -1128,6 +1150,41 @@ class FakeDailySubscriptionRepository:
             if len(found) == limit:
                 break
         return tuple(found)
+
+    async def received_active_counts(
+        self,
+        *,
+        min_completed: int,
+        only: tuple[int, ...] = (),
+    ) -> dict[int, int]:
+        counts: dict[int, int] = {}
+        for item in await self.deliverable(
+            min_completed=min_completed,
+            limit=len(self.items) + 1,
+            only=only,
+        ):
+            counts[item.user_id] = sum(
+                1
+                for delivery in self.deliveries.items.values()
+                if delivery.user_id == item.user_id
+                and delivery.content_id is not None
+                and delivery.status in _DAILY_HOLDING
+                and self.content.items[delivery.content_id].is_active
+            )
+        return counts
+
+    async def mark_exhausted_notified(
+        self,
+        user_id: int,
+        *,
+        at: datetime,
+    ) -> DailySubscription | None:
+        current = self.items.get(user_id)
+        if current is None:
+            return None
+        updated = replace(current, exhausted_notified_at=at)
+        self.items[user_id] = updated
+        return updated
 
     def _require(self, user_id: int) -> DailySubscription:
         current = self.items.get(user_id)
@@ -1269,6 +1326,9 @@ class FakeDailyContentRepository:
     async def count_active(self) -> int:
         return sum(1 for item in self.items.values() if item.is_active)
 
+    async def added_since(self, since: datetime) -> int:
+        return sum(1 for item in self.items.values() if item.created_at >= since)
+
     async def count_available_for(self, user_id: int) -> int:
         held = {
             delivery.content_id
@@ -1347,11 +1407,30 @@ class FakeDailyDeliveryRepository:
     async def lock(self, delivery_id: int) -> DailyDelivery | None:
         return self.items.get(delivery_id)
 
-    async def lock_due(self, *, now: datetime, limit: int) -> tuple[DailyDelivery, ...]:
+    async def open_many(self, drafts: Sequence[DailyDeliveryDraft]) -> int:
+        return sum([await self.open(draft) is not None for draft in drafts])
+
+    async def lock_due(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        activation_grace: timedelta | None = None,
+    ) -> tuple[DailyDelivery, ...]:
+        def left_to_the_bot(item: DailyDelivery) -> bool:
+            return bool(
+                activation_grace
+                and item.trigger is DailyDeliveryTrigger.ACTIVATION
+                and item.status is DailyDeliveryStatus.PENDING
+                and item.attempts == 0
+                and item.scheduled_for > now - activation_grace
+            )
+
         due = [
             item
             for item in self.items.values()
             if item.deadline_at > now
+            and not left_to_the_bot(item)
             and (
                 (item.status in _DAILY_WAITING and item.next_attempt_at <= now)
                 or (
@@ -1620,6 +1699,29 @@ class FakeDailyDeliveryRepository:
         found = [item for item in self.attempts.values() if item.delivery_id == delivery_id]
         return tuple(sorted(found, key=lambda item: item.attempt_no))
 
+    async def last_sent_at(self, user_id: int) -> datetime | None:
+        sent = [
+            item.sent_at
+            for item in self.items.values()
+            if item.user_id == user_id
+            and item.status is DailyDeliveryStatus.SENT
+            and item.sent_at is not None
+        ]
+        return max(sent, default=None)
+
+    async def outcome_counts(self, *, since: datetime) -> DeliveryCounts:
+        recent = [item for item in self.items.values() if item.scheduled_for >= since]
+        return DeliveryCounts(
+            sent=sum(1 for item in recent if item.status is DailyDeliveryStatus.SENT),
+            failed=sum(
+                1
+                for item in recent
+                if item.status in (DailyDeliveryStatus.FAILED, DailyDeliveryStatus.EXPIRED)
+                and item.last_outcome is not None
+                and item.last_outcome is not DailyAttemptOutcome.BLOCKED
+            ),
+        )
+
     async def count_sent(self, user_id: int) -> int:
         return sum(
             1
@@ -1694,3 +1796,208 @@ class FakeDailyDeliveryRepository:
     def _store(self, item: DailyDelivery) -> DailyDelivery:
         self.items[item.id] = item
         return item
+
+
+class FakeDailyOutboxRepository:
+    """The outbox in a dict, enforcing what the SQL enforces.
+
+    ``dedupe_key`` is unique, a claim leases the message under a new token, and
+    an outcome reported under a lease that was taken over changes nothing.
+    """
+
+    def __init__(self) -> None:
+        self.items: dict[int, DailyOutboxMessage] = {}
+        self._next_id = 1
+
+    async def enqueue(self, draft: DailyOutboxDraft) -> DailyOutboxMessage | None:
+        if any(item.dedupe_key == draft.dedupe_key for item in self.items.values()):
+            return None
+        now = datetime.now(UTC)
+        item = DailyOutboxMessage(
+            id=self._next_id,
+            kind=draft.kind,
+            channel=draft.channel,
+            chat_id=draft.chat_id,
+            body=draft.body,
+            dedupe_key=draft.dedupe_key,
+            status=DailyOutboxStatus.PENDING,
+            attempts=0,
+            next_attempt_at=draft.first_attempt_at,
+            deadline_at=draft.deadline_at,
+            created_at=now,
+            updated_at=now,
+        )
+        self._next_id += 1
+        self.items[item.id] = item
+        return item
+
+    async def get(self, message_id: int) -> DailyOutboxMessage | None:
+        return self.items.get(message_id)
+
+    async def find_by_key(self, dedupe_key: str) -> DailyOutboxMessage | None:
+        for item in self.items.values():
+            if item.dedupe_key == dedupe_key:
+                return item
+        return None
+
+    async def claim_due(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        lease_until: datetime,
+    ) -> tuple[DailyOutboxMessage, ...]:
+        due = [
+            item
+            for item in self.items.values()
+            if item.deadline_at > now
+            and (
+                (item.status is DailyOutboxStatus.PENDING and item.next_attempt_at <= now)
+                or (
+                    item.status is DailyOutboxStatus.SENDING
+                    and item.lease_until is not None
+                    and item.lease_until <= now
+                )
+            )
+        ]
+        due.sort(key=lambda item: (item.next_attempt_at, item.id))
+        claimed = []
+        for item in due[:limit]:
+            leased = replace(
+                item,
+                status=DailyOutboxStatus.SENDING,
+                lease_token=uuid4(),
+                lease_until=lease_until,
+                attempts=item.attempts + 1,
+            )
+            self.items[item.id] = leased
+            claimed.append(leased)
+        return tuple(claimed)
+
+    async def finish_sent(
+        self,
+        lease_token: UUID,
+        *,
+        at: datetime,
+        telegram_message_id: int,
+    ) -> DailyOutboxMessage | None:
+        holder = self._holder(lease_token)
+        if holder is None:
+            return None
+        return self._store(
+            replace(
+                holder,
+                status=DailyOutboxStatus.SENT,
+                sent_at=at,
+                telegram_message_id=telegram_message_id,
+                last_error=None,
+                lease_token=None,
+                lease_until=None,
+            )
+        )
+
+    async def finish_retry(
+        self,
+        lease_token: UUID,
+        *,
+        at: datetime,
+        next_attempt_at: datetime,
+        error: str,
+    ) -> DailyOutboxMessage | None:
+        del at
+        holder = self._holder(lease_token)
+        if holder is None:
+            return None
+        return self._store(
+            replace(
+                holder,
+                status=DailyOutboxStatus.PENDING,
+                next_attempt_at=next_attempt_at,
+                last_error=error,
+                lease_token=None,
+                lease_until=None,
+            )
+        )
+
+    async def finish_failed(
+        self,
+        lease_token: UUID,
+        *,
+        at: datetime,
+        error: str,
+    ) -> DailyOutboxMessage | None:
+        del at
+        holder = self._holder(lease_token)
+        if holder is None:
+            return None
+        return self._store(
+            replace(
+                holder,
+                status=DailyOutboxStatus.FAILED,
+                last_error=error,
+                lease_token=None,
+                lease_until=None,
+            )
+        )
+
+    async def expire_overdue(self, *, now: datetime, limit: int = 100) -> int:
+        overdue = sorted(
+            (
+                item
+                for item in self.items.values()
+                if item.deadline_at <= now
+                and item.status in (DailyOutboxStatus.PENDING, DailyOutboxStatus.SENDING)
+            ),
+            key=lambda item: item.deadline_at,
+        )[:limit]
+        for item in overdue:
+            self._store(
+                replace(
+                    item,
+                    status=DailyOutboxStatus.EXPIRED,
+                    last_error="The deadline passed before the message could be sent",
+                    lease_token=None,
+                    lease_until=None,
+                )
+            )
+        return len(overdue)
+
+    def _holder(self, lease_token: UUID) -> DailyOutboxMessage | None:
+        for item in self.items.values():
+            if item.lease_token == lease_token and item.status is DailyOutboxStatus.SENDING:
+                return item
+        return None
+
+    def _store(self, item: DailyOutboxMessage) -> DailyOutboxMessage:
+        stored = replace(item, updated_at=datetime.now(UTC))
+        self.items[item.id] = stored
+        return stored
+
+
+class FakeDailyAlertRepository:
+    """The owner's alerts in a dict: created ``OK`` on first use."""
+
+    def __init__(self) -> None:
+        self.items: dict[DailyAlertKey, DailyAlert] = {}
+
+    async def lock(self, key: DailyAlertKey) -> DailyAlert:
+        if key not in self.items:
+            self.items[key] = DailyAlert(
+                key=key,
+                state=DailyAlertState.OK,
+                notifications=0,
+                value={},
+                updated_at=datetime.now(UTC),
+            )
+        return self.items[key]
+
+    async def save(self, alert: DailyAlert) -> DailyAlert:
+        stored = replace(alert, value=dict(alert.value), updated_at=datetime.now(UTC))
+        self.items[alert.key] = stored
+        return stored
+
+    async def get(self, key: DailyAlertKey) -> DailyAlert | None:
+        return self.items.get(key)
+
+    async def list_all(self) -> tuple[DailyAlert, ...]:
+        return tuple(self.items[key] for key in sorted(self.items))

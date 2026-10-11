@@ -37,11 +37,13 @@ from app.domain.daily import MINUTES_PER_DAY
 from app.domain.enums import (
     BonusTransactionType,
     Currency,
+    DailyAlertState,
     DailyAttemptOutcome,
     DailyContentKind,
     DailyContentStatus,
     DailyDeliveryStatus,
     DailyDeliveryTrigger,
+    DailyOutboxStatus,
     DailySubscriptionStatus,
     LoyaltyRewardKind,
     LoyaltyRewardStatus,
@@ -147,6 +149,20 @@ _DAILY_DELIVERY_HOLDS_CONTENT_SQL: Final = (
 _DAILY_DELIVERY_DUE_SQL: Final = "status IN ('pending', 'no_content')"
 
 _DAILY_ATTEMPT_SHAPE_SQL: Final = "(finished_at IS NULL) = (outcome IS NULL)"
+
+_DAILY_OUTBOX_LEASE_SHAPE_SQL: Final = (
+    "(status = 'sending' AND lease_token IS NOT NULL AND lease_until IS NOT NULL) "
+    "OR (status <> 'sending' AND lease_token IS NULL AND lease_until IS NULL)"
+)
+_DAILY_OUTBOX_SENT_SHAPE_SQL: Final = (
+    "(status = 'sent' AND sent_at IS NOT NULL) "
+    "OR (status <> 'sent' AND sent_at IS NULL AND telegram_message_id IS NULL)"
+)
+_DAILY_OUTBOX_CHANNEL_SQL: Final = "channel IN ('daily', 'shop')"
+_DAILY_OUTBOX_BODY_LENGTH_SQL: Final = "char_length(body) BETWEEN 1 AND 4096"
+_DAILY_OUTBOX_DUE_SQL: Final = "status = 'pending'"
+_DAILY_OUTBOX_OPEN_SQL: Final = "status IN ('pending', 'sending')"
+_DAILY_ALERT_FIRING_SHAPE_SQL: Final = "state <> 'firing' OR fired_at IS NOT NULL"
 
 #: Operator class that makes ``ILIKE '%term%'`` index-assisted.
 _TRGM_OPS: Final = "gin_trgm_ops"
@@ -786,4 +802,86 @@ class DailyDeliveryAttemptModel(Base):
         CheckConstraint("attempt_no >= 1", name="attempt_no_positive"),
         CheckConstraint(_DAILY_ATTEMPT_SHAPE_SQL, name="outcome_shape"),
         Index("ix_daily_delivery_attempts_finished_at", "finished_at"),
+    )
+
+
+class DailyOutboxModel(TimestampMixin, Base):
+    """A message the Daily runtime owes somebody: an alert, a notice.
+
+    Queued once per ``dedupe_key``, sent under a lease like a delivery, and
+    dropped unsent once its deadline passes.
+    """
+
+    __tablename__ = "daily_outbox"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    channel: Mapped[str] = mapped_column(String(16), nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[DailyOutboxStatus] = mapped_column(
+        _enum_column(DailyOutboxStatus, "daily_outbox_status"),
+        nullable=False,
+        server_default=text("'pending'"),
+    )
+    attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("0"))
+    next_attempt_at: Mapped[datetime] = mapped_column(nullable=False)
+    deadline_at: Mapped[datetime] = mapped_column(nullable=False)
+    lease_token: Mapped[UUID | None] = mapped_column(nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        # The same alert or notice is queued once, whoever decides it.
+        UniqueConstraint("dedupe_key", name="uq_daily_outbox_dedupe_key"),
+        CheckConstraint(_DAILY_OUTBOX_LEASE_SHAPE_SQL, name="lease_shape"),
+        CheckConstraint(_DAILY_OUTBOX_SENT_SHAPE_SQL, name="sent_shape"),
+        CheckConstraint(_DAILY_OUTBOX_CHANNEL_SQL, name="channel_known"),
+        CheckConstraint(_DAILY_OUTBOX_BODY_LENGTH_SQL, name="body_length"),
+        CheckConstraint("attempts >= 0", name="attempts_non_negative"),
+        Index(
+            "ix_daily_outbox_due",
+            "next_attempt_at",
+            postgresql_where=text(_DAILY_OUTBOX_DUE_SQL),
+        ),
+        Index(
+            "ix_daily_outbox_lease_until",
+            "lease_until",
+            postgresql_where=text("status = 'sending'"),
+        ),
+        Index(
+            "ix_daily_outbox_open_deadline",
+            "deadline_at",
+            postgresql_where=text(_DAILY_OUTBOX_OPEN_SQL),
+        ),
+    )
+
+
+class DailyAlertModel(TimestampMixin, Base):
+    """One of the owner's alerts: its state, never its stream of messages."""
+
+    __tablename__ = "daily_alerts"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    state: Mapped[DailyAlertState] = mapped_column(
+        _enum_column(DailyAlertState, "daily_alert_state"),
+        nullable=False,
+        server_default=text("'ok'"),
+    )
+    notifications: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    value: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    )
+    fired_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    notified_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(_DAILY_ALERT_FIRING_SHAPE_SQL, name="firing_shape"),
+        CheckConstraint("notifications >= 0", name="notifications_non_negative"),
     )

@@ -31,6 +31,7 @@ def create_daily_services(container: Container, bot: Bot) -> DailyServices:
         delivery=container.build_daily_delivery(sender),
         library=container.build_daily_library(sender),
         albums=AlbumCollector(),
+        stock=container.build_daily_stock(),
     )
 
 

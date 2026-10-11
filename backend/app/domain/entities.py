@@ -16,11 +16,16 @@ from app.domain.enums import (
     PAYABLE_PROVIDERS,
     BonusTransactionType,
     Currency,
+    DailyAlertKey,
+    DailyAlertState,
     DailyAttemptOutcome,
     DailyContentKind,
     DailyContentStatus,
     DailyDeliveryStatus,
     DailyDeliveryTrigger,
+    DailyOutboxChannel,
+    DailyOutboxKind,
+    DailyOutboxStatus,
     DailySubscriptionStatus,
     LoyaltyRewardKind,
     LoyaltyRewardStatus,
@@ -418,3 +423,57 @@ class DailyDeliveryAttempt:
     error: str | None = None
     retry_after_seconds: int | None = None
     telegram_message_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailyOutboxMessage:
+    """One message the Daily runtime must get to somebody, other than an item.
+
+    Sent with the same discipline as deliveries: a lease while an attempt is
+    under way, retries for uncertain failures, and a deadline after which it
+    is no longer worth sending. ``dedupe_key`` makes enqueueing idempotent:
+    the same alert or notice is queued once, whoever asks twice.
+    """
+
+    id: int
+    kind: DailyOutboxKind
+    channel: DailyOutboxChannel
+    chat_id: int
+    body: str
+    """The message, HTML; anything interpolated was escaped when it was queued."""
+
+    dedupe_key: str
+    status: DailyOutboxStatus
+    attempts: int
+    next_attempt_at: datetime
+    deadline_at: datetime
+    created_at: datetime
+    updated_at: datetime
+    lease_token: UUID | None = None
+    lease_until: datetime | None = None
+    sent_at: datetime | None = None
+    telegram_message_id: int | None = None
+    last_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailyAlert:
+    """The state of one of the owner's alerts.
+
+    An alert notifies on its transitions — firing, resolved — and reminds at
+    most once per cooldown while it keeps firing; it never repeats itself on
+    every evaluation.
+    """
+
+    key: DailyAlertKey
+    state: DailyAlertState
+    notifications: int
+    """How many notifications it has queued so far: the next one's number."""
+
+    value: dict[str, object]
+    """What the last evaluation observed."""
+
+    updated_at: datetime
+    fired_at: datetime | None = None
+    notified_at: datetime | None = None
+    resolved_at: datetime | None = None

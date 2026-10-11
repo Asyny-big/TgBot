@@ -75,11 +75,12 @@ async def handle_help(message: Message) -> None:
 
 
 async def handle_stats(message: Message, daily: DailyServices) -> None:
-    """``/stats``: the library in numbers."""
+    """``/stats``: the library in numbers, and how long it lasts the buyers."""
     numbers = await daily.library.stats(_actor(message))
     if numbers is None:  # pragma: no cover — the router lets only the owner in
         return
-    await message.answer(texts.stats(numbers))
+    snapshot = await daily.stock.snapshot()
+    await message.answer(texts.stats(numbers, snapshot.summary))
 
 
 async def handle_item(message: Message, command: CommandObject, daily: DailyServices) -> None:
