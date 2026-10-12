@@ -16,8 +16,8 @@ import httpx
 import pytest
 from sqlalchemy import text
 
-from app.domain.commands import ProductDraft, UserDraft
-from app.domain.enums import PaymentProvider, PurchaseStatus
+from app.domain.commands import ProductDraft, PurchaseDraft, UserDraft
+from app.domain.enums import Currency, PaymentProvider, PurchaseStatus
 from tests.api_harness import api_settings, build_api_harness
 
 if TYPE_CHECKING:
@@ -322,6 +322,41 @@ async def test_verify_retries_a_failed_delivery(verify_api: ApiHarness) -> None:
     assert report["status_before"] == "paid"
     assert report["status_after"] == "delivered"
     assert report["delivery"]["status"] == "sent"
+
+
+async def test_verify_hands_over_a_free_pack_without_asking_any_provider(
+    verify_api: ApiHarness,
+    crypto_double: CryptoPayDouble,
+) -> None:
+    """An internal grant: delivery is retried, Crypto Pay and Stars are never asked."""
+    product = await _product(verify_api)
+    await verify_api.container.purchases.remember_user(BUYER)
+    async with verify_api.container.uow_factory() as uow:
+        grant = await uow.purchases.create(
+            PurchaseDraft(
+                user_id=BUYER.telegram_id,
+                product_id=product.id,
+                provider=PaymentProvider.INTERNAL,
+                amount=Decimal(0),
+                base_amount=Decimal(150),
+                loyalty_amount=Decimal(150),
+                currency=Currency.XTR,
+                external_id=f"loyalty:{uuid4()}",
+                status=PurchaseStatus.PAID,
+            )
+        )
+
+    first = await _verify(verify_api, grant)
+    second = await _verify(verify_api, grant)
+
+    assert first["provider"] == "internal"
+    assert first["outcome"] == "delivered_now"
+    assert first["status_after"] == "delivered"
+    assert second["outcome"] == "already_delivered"
+    assert crypto_double.calls == 0
+    # A free pack is not revenue and not a paid purchase.
+    overview = await verify_api.container.stats.overview()
+    assert overview.total.purchases_count == 0
 
 
 async def test_verify_reports_a_dead_chat_without_losing_the_entitlement(

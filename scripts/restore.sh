@@ -7,16 +7,23 @@
 # This REPLACES the current database. The sequence matters:
 #
 #   1. verify the dump is readable before anything is touched;
-#   2. stop the api and the bot, so nothing writes while the data is swapped
-#      (PostgreSQL stays up: it is the thing being restored into);
+#   2. stop every service that writes to the database — the api and the bot,
+#      and Daily Content's daily-bot and daily-worker wherever they run — so
+#      nothing writes while the data is swapped (PostgreSQL stays up: it is the
+#      thing being restored into);
 #   3. restore inside a single transaction — a failure leaves the old data intact;
 #   4. bring the schema to the current head, in case the dump predates a
 #      migration that the running images already expect;
-#   5. start the api and the bot again.
+#   5. start the api and the bot again, and daily-bot and daily-worker if they
+#      were running before, then reload nginx: a container started again may
+#      come back on another address, and nginx resolved api and bot when it
+#      started.
 #
 # The bot is stopped rather than left running because an incoming payment during
 # a restore would be written into a database that is about to be replaced, and
-# the buyer would lose their link.
+# the buyer would lose their link. Daily Content is stopped for the same reason:
+# the worker keeps sending and recording deliveries, and the Daily bot keeps
+# recording subscriptions and content requests.
 # =============================================================================
 
 # shellcheck source=scripts/_common.sh
@@ -30,6 +37,34 @@ Usage: ./scripts/restore.sh <dump-file> [--yes]
   --yes        Do not ask for confirmation (for unattended recovery)
 USAGE
     exit 2
+}
+
+# Every service that writes to the database. daily-bot and daily-worker sit
+# behind the `daily` profile: `--profile daily` puts them in the model whether or
+# not .env enables it, and stopping one that was never deployed does nothing.
+DATABASE_WRITERS=(api bot daily-bot daily-worker)
+
+compose_daily() {
+    compose --profile daily "$@"
+}
+
+# The Daily Content services running now — or restarting, which `restart:
+# always` counts as running. Only they are started again after the restore: a
+# stack without Daily Content stays without it.
+running_daily_services() {
+    compose_daily ps --status running --status restarting --services \
+        | grep -xE 'daily-bot|daily-worker' || true
+}
+
+# Start what the restore stopped; nginx then re-resolves api and bot.
+start_again() {
+    log "starting ${RESTART[*]}"
+    compose_daily up -d "${RESTART[@]}"
+    if compose ps --status running --services | grep -qx nginx; then
+        log "reloading nginx, so it resolves the restarted containers"
+        compose exec -T nginx nginx -s reload \
+            || warn "nginx did not reload; run 'make prod-reload' before trusting the edge."
+    fi
 }
 
 DUMP=""
@@ -81,8 +116,11 @@ compose exec -T postgres sh -c '
 confirm "Replace the contents of database '${POSTGRES_DB}' with ${DUMP}?" \
     || die "aborted; nothing was changed."
 
-log "stopping the api and the bot"
-compose stop api bot
+mapfile -t DAILY_RUNNING < <(running_daily_services)
+RESTART=(api bot ${DAILY_RUNNING[@]+"${DAILY_RUNNING[@]}"})
+
+log "stopping everything that writes to the database: ${DATABASE_WRITERS[*]}"
+compose_daily stop "${DATABASE_WRITERS[@]}"
 
 log "restoring ${DUMP}"
 # --clean --if-exists drops the existing objects first; --single-transaction makes
@@ -98,15 +136,16 @@ if ! compose exec -T postgres \
             --exit-on-error \
         < "${DUMP}"; then
     warn "the restore failed and was rolled back; the previous data is still in place."
-    log "starting the api and the bot again"
-    compose up -d api bot
+    start_again
     die "restore failed."
 fi
 
 log "applying any migrations the dump predates"
-compose run --rm migrations alembic upgrade head
+# Nothing is started on a schema the images do not expect: on failure the
+# services stay stopped, and the message says how to start them once it is fixed.
+compose run --rm migrations alembic upgrade head \
+    || die "the dump is restored, but 'alembic upgrade head' failed, so ${RESTART[*]} stay stopped. Fix the schema, then start them: docker compose -f docker-compose.prod.yml --profile daily up -d ${RESTART[*]} && make prod-reload"
 
-log "starting the api and the bot"
-compose up -d api bot
+start_again
 
 log "restore complete — check https://$(env_value TGSHOP_DOMAIN)/ and the bot's deep link"

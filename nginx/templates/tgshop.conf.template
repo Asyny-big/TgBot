@@ -6,9 +6,10 @@
 # restricts substitution to that prefix, so nginx's own $variables survive).
 #
 # Routing:
-#   /webhook/…  → bot   (Telegram updates, Crypto Pay notifications)
-#   /api/…      → api   (admin API)
-#   everything  → the compiled Vue panel, with SPA history fallback
+#   /webhook/daily → daily-bot (the Daily Content bot's Telegram updates)
+#   /webhook/…     → bot   (Telegram updates, Crypto Pay notifications)
+#   /api/…         → api   (admin API)
+#   everything     → the compiled Vue panel, with SPA history fallback
 # =============================================================================
 
 upstream tgshop_api {
@@ -111,6 +112,32 @@ server {
         include    /etc/nginx/snippets/proxy.conf;
         # A payment notification must not be dropped because delivery retries
         # are still running inside the request.
+        proxy_read_timeout 60s;
+
+        include /etc/nginx/snippets/security-headers.conf;
+    }
+
+    # ----------------------------------------------------------------------- #
+    # The Daily Content bot's webhook: its own container, which may not be
+    # deployed at all (the `daily` profile) or may be restarting. So its address
+    # is resolved per request through Docker's DNS instead of at start-up: the
+    # edge — and the shop's webhooks above — start and keep working without
+    # it, and Telegram retries an update that got a 502 meanwhile.
+    # The exact match wins over the /webhook/ prefix; the path is pinned in
+    # docker-compose.prod.yml (DAILY_WEBHOOK_PATH).
+    # ----------------------------------------------------------------------- #
+    location = /webhook/daily {
+        limit_except POST {
+            deny all;
+        }
+
+        client_max_body_size 512k;
+        resolver         127.0.0.11 valid=10s ipv6=off;
+        resolver_timeout 5s;
+        set $tgshop_daily_bot http://daily-bot:8082;
+        proxy_pass $tgshop_daily_bot;
+        include    /etc/nginx/snippets/proxy.conf;
+        # An answer may wait for the database while a delivery is recorded.
         proxy_read_timeout 60s;
 
         include /etc/nginx/snippets/security-headers.conf;

@@ -5,7 +5,15 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { makeOverview, makeProduct, makeRecord, stubApi, usePiniaForEachTest } from "./helpers";
+import {
+  makeOverview,
+  makeProduct,
+  makeRecord,
+  makeReferral,
+  makeReferralSettings,
+  stubApi,
+  usePiniaForEachTest,
+} from "./helpers";
 
 const apiStub = stubApi();
 const sessionExpiredHandlers: (() => void)[] = [];
@@ -24,6 +32,7 @@ vi.mock("@/api", async () => {
 
 const { useProductStore } = await import("@/stores/products");
 const { usePurchaseStore } = await import("@/stores/purchases");
+const { useReferralStore } = await import("@/stores/referrals");
 const { useStatsStore } = await import("@/stores/stats");
 const { useToastStore } = await import("@/stores/toasts");
 
@@ -212,6 +221,75 @@ describe("stats store", () => {
     await store.load();
 
     expect(store.overview?.total.purchases_count).toBe(1);
+    expect(store.loading).toBe(false);
+  });
+});
+
+
+describe("referral store", () => {
+  const referralPage = (items = [makeReferral()]) => ({
+    items,
+    meta: { total: items.length, limit: 20, offset: 0, has_more: false },
+  });
+
+  it("lists relationships and reports the total", async () => {
+    apiStub.referrals.list.mockResolvedValue(referralPage());
+    const store = useReferralStore();
+
+    await store.fetchPage();
+
+    expect(store.items).toHaveLength(1);
+    expect(store.total).toBe(1);
+    expect(store.items[0]?.referrer.bonus_balance).toBe(135);
+  });
+
+  it("a new search starts from the first page", async () => {
+    apiStub.referrals.list.mockResolvedValue(referralPage());
+    const store = useReferralStore();
+    await store.goTo(40);
+
+    await store.applyFilters({ search: "inviter" });
+
+    expect(store.offset).toBe(0);
+    expect(apiStub.referrals.list).toHaveBeenLastCalledWith({
+      limit: 20,
+      offset: 0,
+      search: "inviter",
+    });
+  });
+
+  it("an empty search box is not sent as a filter", async () => {
+    apiStub.referrals.list.mockResolvedValue(referralPage([]));
+    const store = useReferralStore();
+
+    await store.applyFilters({ search: "   " });
+
+    expect(apiStub.referrals.list).toHaveBeenLastCalledWith({
+      limit: 20,
+      offset: 0,
+      search: undefined,
+    });
+    expect(store.isEmpty).toBe(true);
+  });
+
+  it("reads the configured percentages the shop is running with", async () => {
+    apiStub.referrals.settings.mockResolvedValue(makeReferralSettings());
+    const store = useReferralStore();
+
+    await store.fetchSettings();
+
+    expect(store.settings?.discount_percent).toBe(10);
+    expect(store.settings?.reward_percent).toBe(15);
+  });
+
+  it("a failed load is surfaced as a toast rather than swallowed", async () => {
+    apiStub.referrals.list.mockRejectedValue(new Error("boom"));
+    const store = useReferralStore();
+    const toasts = useToastStore();
+
+    await store.fetchPage();
+
+    expect(toasts.items.at(-1)?.kind).toBe("error");
     expect(store.loading).toBe(false);
   });
 });

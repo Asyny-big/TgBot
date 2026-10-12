@@ -16,7 +16,7 @@ from pydantic import SecretStr
 from app.core.config import CryptoBotSettings
 from app.core.exceptions import PaymentGatewayError
 from app.domain.enums import Currency
-from app.domain.payments import InvoiceRequest, PaymentState
+from app.domain.payments import InvoiceRequest, InvoiceSnapshot, PaymentState
 from app.infrastructure.payments.cryptobot import CryptoBotClient
 
 if TYPE_CHECKING:
@@ -153,6 +153,45 @@ async def test_fetch_states_maps_provider_statuses() -> None:
         "2": PaymentState.PAID,
         "3": PaymentState.EXPIRED,
     }
+
+
+async def test_fetch_invoices_returns_state_and_payment_url() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/getInvoices")
+        assert json.loads(request.content)["invoice_ids"] == "7,8,9"
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "result": {
+                    "items": [
+                        {"invoice_id": 7, "status": "active", "bot_invoice_url": "https://t.me/7"},
+                        {"invoice_id": 8, "status": "expired"},
+                        {"invoice_id": 9, "status": "something-new"},
+                    ]
+                },
+            },
+        )
+
+    invoices = await _client(handler).fetch_invoices(["7", "8", "9"])
+
+    assert invoices == {
+        "7": InvoiceSnapshot(
+            external_id="7",
+            state=PaymentState.PENDING,
+            pay_url="https://t.me/7",
+        ),
+        "8": InvoiceSnapshot(external_id="8", state=PaymentState.EXPIRED, pay_url=None),
+    }
+
+
+async def test_fetch_invoices_reports_an_unreachable_provider() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(503, json={"ok": False})
+
+    with pytest.raises(PaymentGatewayError):
+        await _client(handler).fetch_invoices(["7"])
 
 
 async def test_fetch_states_of_nothing_calls_nobody() -> None:

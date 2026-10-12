@@ -49,6 +49,16 @@ class ProductFilters:
 
 
 @dataclass(frozen=True, slots=True)
+class ReferralFilters:
+    """Filters accepted by the referral listing query.
+
+    ``search`` matches the Telegram id or username of either party.
+    """
+
+    search: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class PurchaseFilters:
     """Filters accepted by the purchase search query.
 

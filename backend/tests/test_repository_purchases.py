@@ -8,17 +8,26 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from http import HTTPStatus
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import text
 
-from app.core.exceptions import ConflictError, DuplicatePurchaseError, PurchaseNotFoundError
+from app.core.exceptions import (
+    CheckoutAlreadyPendingError,
+    ConflictError,
+    DuplicatePurchaseError,
+    PurchaseNotFoundError,
+)
 from app.domain.enums import Currency, PaymentProvider, PurchaseStatus
 from app.domain.pagination import PageRequest, PurchaseFilters
 from tests.db import product_draft, purchase_draft, seed_paid_purchase, user_draft
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from app.domain.entities import Product, User
     from app.infrastructure.db.repositories.products import SqlAlchemyProductRepository
     from app.infrastructure.db.repositories.purchases import SqlAlchemyPurchaseRepository
@@ -307,3 +316,148 @@ async def test_the_same_telegram_charge_cannot_be_stored_twice(
 
     with pytest.raises(ConflictError, match="Telegram charge"):
         await purchases.mark_paid(second.id, telegram_charge_id="charge-unique")
+
+
+async def test_expire_moves_only_a_pending_purchase(
+    purchases: SqlAlchemyPurchaseRepository,
+    buyer: User,
+    product: Product,
+) -> None:
+    pending = await purchases.create(purchase_draft(buyer, product, PaymentProvider.CRYPTO))
+
+    expired = await purchases.expire(pending.id)
+    assert expired.status is PurchaseStatus.EXPIRED
+    # Idempotent: expiring twice changes nothing.
+    assert (await purchases.expire(pending.id)).status is PurchaseStatus.EXPIRED
+
+
+async def test_expire_never_touches_a_paid_purchase(
+    purchases: SqlAlchemyPurchaseRepository,
+    buyer: User,
+    product: Product,
+) -> None:
+    pending = await purchases.create(purchase_draft(buyer, product, PaymentProvider.CRYPTO))
+    await purchases.mark_paid(pending.id)
+
+    assert (await purchases.expire(pending.id)).status is PurchaseStatus.PAID
+
+
+async def test_expire_of_an_unknown_purchase_raises(
+    purchases: SqlAlchemyPurchaseRepository,
+) -> None:
+    with pytest.raises(PurchaseNotFoundError):
+        await purchases.expire(uuid4())
+
+
+async def test_pending_checkouts_are_scoped_to_one_buyer_product_and_rail(
+    purchases: SqlAlchemyPurchaseRepository,
+    products: SqlAlchemyProductRepository,
+    users: SqlAlchemyUserRepository,
+    buyer: User,
+    product: Product,
+) -> None:
+    gone = await purchases.create(purchase_draft(buyer, product, PaymentProvider.CRYPTO))
+    await purchases.expire(gone.id)
+    live = await purchases.create(purchase_draft(buyer, product, PaymentProvider.CRYPTO))
+    # None of these may show up: another rail, another product, another buyer.
+    await purchases.create(purchase_draft(buyer, product, PaymentProvider.STARS))
+    other_product = await products.create(product_draft(slug="vip2"))
+    await purchases.create(purchase_draft(buyer, other_product, PaymentProvider.CRYPTO))
+    other_buyer = await users.upsert(user_draft(500100201))
+    await purchases.create(purchase_draft(other_buyer, product, PaymentProvider.CRYPTO))
+
+    found = await purchases.pending_checkouts(buyer.telegram_id, product.id, PaymentProvider.CRYPTO)
+
+    assert [purchase.id for purchase in found] == [live.id]
+
+
+async def test_a_later_checkout_counts_one_buyer_product_and_rail(
+    purchases: SqlAlchemyPurchaseRepository,
+    products: SqlAlchemyProductRepository,
+    users: SqlAlchemyUserRepository,
+    db_session: AsyncSession,
+) -> None:
+    buyer = await users.upsert(user_draft(500100200))
+    product = await products.create(product_draft(slug="vip1"))
+    created = await purchases.create(purchase_draft(buyer, product))
+    # One transaction writes every row at the same instant: age this one.
+    await db_session.execute(
+        text("UPDATE purchases SET created_at = created_at - interval '5 minutes' WHERE id = :id"),
+        {"id": created.id},
+    )
+    first = await purchases.get_for_update(created.id)
+    assert first is not None
+    # All later, none of them counts: another rail, another product, another buyer.
+    await purchases.create(purchase_draft(buyer, product, PaymentProvider.CRYPTO))
+    other_product = await products.create(product_draft(slug="vip2"))
+    await purchases.create(purchase_draft(buyer, other_product))
+    other_buyer = await users.upsert(user_draft(500100201))
+    await purchases.create(purchase_draft(other_buyer, product))
+
+    assert not await purchases.has_later_checkout(first)
+
+    later = await purchases.create(purchase_draft(buyer, product))
+    # Whatever happened to it since: it still replaced the first one.
+    await purchases.expire(later.id)
+
+    assert await purchases.has_later_checkout(first)
+    assert not await purchases.has_later_checkout(later)
+
+
+async def test_rows_written_at_one_instant_still_have_exactly_one_newest(
+    purchases: SqlAlchemyPurchaseRepository,
+    buyer: User,
+    product: Product,
+) -> None:
+    """The newest is the one ``pending_checkouts`` lists first, and only that one."""
+    for _ in range(3):
+        await purchases.create(purchase_draft(buyer, product))
+
+    newest, *older = await purchases.pending_checkouts(
+        buyer.telegram_id,
+        product.id,
+        PaymentProvider.STARS,
+    )
+
+    assert not await purchases.has_later_checkout(newest)
+    replaced = [await purchases.has_later_checkout(purchase) for purchase in older]
+    assert replaced == [True, True]
+
+
+async def test_a_second_pending_crypto_checkout_is_refused_by_the_database(
+    purchases: SqlAlchemyPurchaseRepository,
+    buyer: User,
+    product: Product,
+) -> None:
+    first = await purchases.create(purchase_draft(buyer, product, PaymentProvider.CRYPTO))
+
+    with pytest.raises(CheckoutAlreadyPendingError) as caught:
+        await purchases.create(
+            purchase_draft(buyer, product, PaymentProvider.CRYPTO, external_id="inv-second")
+        )
+
+    assert caught.value.status_code == HTTPStatus.CONFLICT
+    assert caught.value.details["constraint"] == "uq_purchases_user_product_pending_crypto"
+    # The savepoint rolled back only the refused row; the session is still usable.
+    assert await purchases.get(first.id) == first
+    assert await purchases.get_by_external_id(PaymentProvider.CRYPTO, "inv-second") is None
+
+
+async def test_the_pending_crypto_index_leaves_everything_else_alone(
+    purchases: SqlAlchemyPurchaseRepository,
+    buyer: User,
+    product: Product,
+) -> None:
+    """Only a *second live crypto* checkout is refused — nothing the shop relied on before."""
+    expired = await purchases.create(purchase_draft(buyer, product, PaymentProvider.CRYPTO))
+    await purchases.expire(expired.id)
+    # A new crypto checkout once the old one expired.
+    live = await purchases.create(purchase_draft(buyer, product, PaymentProvider.CRYPTO))
+    # Stars checkouts beside it, even two of them: Stars is out of scope here.
+    await purchases.create(purchase_draft(buyer, product, PaymentProvider.STARS))
+    await purchases.create(purchase_draft(buyer, product, PaymentProvider.STARS))
+    # A late payment of the expired invoice, beside the live one.
+    paid = await purchases.mark_paid(expired.id)
+
+    assert paid.status is PurchaseStatus.PAID
+    assert (await purchases.get(live.id)) is not None

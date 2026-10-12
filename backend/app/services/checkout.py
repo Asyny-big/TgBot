@@ -13,15 +13,29 @@ Settlement is orchestration too, in the mandated order and nothing more:
 
     PurchaseService.confirm_payment() → DeliveryService.deliver_purchase()
     (which itself confirms via PurchaseService.mark_delivered())
+
+The loyalty free pack is the one hand-over without an invoice. It is reached
+only from its own button, creates no invoice and asks no provider anything:
+
+    PurchaseService (internal purchase + reward, one commit)
+        → DeliveryService.deliver_purchase()
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from app.core.exceptions import AppError, DuplicatePurchaseError
+from app.core.exceptions import (
+    AppError,
+    CheckoutAlreadyPendingError,
+    DuplicatePurchaseError,
+    PaymentAlreadyReceivedError,
+    PaymentGatewayError,
+    PendingInvoiceExistsError,
+)
 from app.core.logging import get_logger
 from app.domain.enums import PaymentProvider, PurchaseStatus
 from app.domain.payments import InvoiceRequest, PaymentState
@@ -33,11 +47,21 @@ if TYPE_CHECKING:
 
     from app.domain.delivery import DeliveryResult
     from app.domain.entities import Product, Purchase
+    from app.domain.loyalty import FreePackGrant
     from app.domain.payments import CryptoInvoiceGateway, StarsInvoiceSender
     from app.services.delivery import DeliveryService
-    from app.services.purchases import PurchaseService
+    from app.services.purchases import CheckoutSession, PurchaseService
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StarsCheckout:
+    """A Telegram Stars invoice sent into the buyer's chat."""
+
+    purchase: Purchase
+    resumed: bool = False
+    """The buyer's unpaid invoice, sent again instead of a new one."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -46,6 +70,18 @@ class CryptoCheckout:
 
     purchase: Purchase
     pay_url: str
+    resumed: bool = False
+    """The buyer's existing invoice, handed back instead of a new one."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FreePackClaim:
+    """A free pack handed over, and how its delivery went."""
+
+    purchase: Purchase
+    delivery: DeliveryResult
+    repeated: bool = False
+    """The pack this buyer had already claimed, delivered again."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,79 +93,277 @@ class CheckoutService:
     stars: StarsInvoiceSender
     crypto: CryptoInvoiceGateway
 
-    async def start_stars_checkout(self, *, user_id: int, product: Product) -> Purchase:
-        """Create a pending purchase and send the Stars invoice message.
+    async def start_stars_checkout(
+        self,
+        *,
+        user_id: int,
+        product: Product,
+        use_bonus: bool = False,
+    ) -> StarsCheckout:
+        """Send the buyer their one Stars invoice for this product.
 
-        The purchase is recorded first: it is local and cheap, and its payload is
-        what Telegram echoes back with the payment. If Telegram then refuses to
-        send the invoice the purchase simply expires unpaid.
+        A buyer holds at most one live ⭐ invoice per product, as with CryptoBot.
+        Pressing ⭐ again while it is unpaid and within the invoice lifetime
+        sends that same invoice again — same payload, same amount — instead of
+        recording another purchase, so nothing new is priced or held. The bonus
+        choice of a later press does not reissue it either.
+
+        A new invoice is made only when there is no live one, or the live one no
+        longer bills what this press would: the list price moved, or a discount
+        is due now that it does not carry. Every unpaid ⭐ invoice for the
+        product is then expired first and whatever it held released, so the
+        loyalty 50% discount is still held by exactly one unpaid invoice. From
+        then on pre-checkout refuses the old ones: only the newest ⭐ invoice of
+        a product can be paid. (💎 CryptoBot takes the discount from an unpaid
+        ⭐ invoice the same way; see ``start_crypto_checkout``.)
+
+        A new purchase is recorded before its invoice is sent: it is local and
+        cheap, and its payload is what Telegram echoes back with the payment.
+        The invoice is issued for ``purchase.amount``, which is whatever pricing
+        decided inside that transaction — so a discount or a bonus spend can
+        never disagree with what the buyer is asked to pay. If Telegram refuses
+        to send it, the purchase stays pending and the next press sends it
+        again — unless it holds the loyalty discount: that one is expired at
+        once and the discount released, instead of holding it for the invoice
+        lifetime.
 
         Raises:
             LockBusyError: the buyer is already checking this product out.
             DuplicatePurchaseError: the buyer already owns the product.
             ProductInactiveError, ProviderNotSupportedError: cannot be sold this way.
+            InsufficientBonusBalanceError: bonuses were requested but are gone.
             PaymentGatewayError: Telegram refused to send the invoice.
         """
-        payload = uuid4().hex
-        purchase = await self.purchases.start_purchase(
-            user_id=user_id,
-            product_id=product.id,
-            provider=PaymentProvider.STARS,
-            external_id=payload,
-        )
-        await self.stars.send_invoice(
-            InvoiceRequest(
-                user_id=user_id,
-                product_id=product.id,
-                title=product.title,
-                description=product.description,
-                amount=purchase.amount,
-                currency=purchase.currency,
-                payload=payload,
+        async with self.purchases.checkout_session(user_id, product.id) as session:
+            checkout = await self._stars_purchase(session, product=product, use_bonus=use_bonus)
+        purchase = checkout.purchase
+        try:
+            await self.stars.send_invoice(
+                InvoiceRequest(
+                    user_id=user_id,
+                    product_id=product.id,
+                    title=product.title,
+                    description=product.description,
+                    amount=purchase.amount,
+                    currency=purchase.currency,
+                    payload=purchase.external_id,
+                )
             )
-        )
+        except PaymentGatewayError:
+            # An invoice sent again was sent before: the buyer still has it, so
+            # it keeps whatever it holds.
+            if not checkout.resumed and purchase.loyalty_amount > 0:
+                # Nobody can pay an invoice that was never sent: give the
+                # discount back now rather than after the invoice lifetime.
+                await self.purchases.withdraw_unsent_checkout(purchase.id)
+                logger.info("loyalty_stars_invoice_withdrawn", purchase_id=str(purchase.id))
+            raise
         logger.info(
-            "stars_checkout_started",
+            "stars_checkout_resumed" if checkout.resumed else "stars_checkout_started",
             purchase_id=str(purchase.id),
             user_id=user_id,
             product_id=str(product.id),
         )
-        return purchase
+        return checkout
 
-    async def start_crypto_checkout(self, *, user_id: int, product: Product) -> CryptoCheckout:
+    async def _stars_purchase(
+        self,
+        session: CheckoutSession,
+        *,
+        product: Product,
+        use_bonus: bool,
+    ) -> StarsCheckout:
+        """The buyer's live ⭐ invoice for this product, or a newly recorded one."""
+        if await session.owned() is not None:
+            raise DuplicatePurchaseError(product_id=str(product.id), user_id=session.user_id)
+
+        pending = await session.pending(PaymentProvider.STARS)
+        if pending and await self._reusable(session, pending[0], product=product):
+            return StarsCheckout(purchase=pending[0], resumed=True)
+        for stale in pending:
+            await session.expire(stale)
+            logger.info(
+                "stars_invoice_superseded",
+                purchase_id=str(stale.id),
+                user_id=stale.user_id,
+            )
+
+        purchase = await session.record(
+            provider=PaymentProvider.STARS,
+            external_id=uuid4().hex,
+            use_bonus=use_bonus,
+        )
+        return StarsCheckout(purchase=purchase)
+
+    async def _reusable(
+        self,
+        session: CheckoutSession,
+        purchase: Purchase,
+        *,
+        product: Product,
+    ) -> bool:
+        """Whether an unpaid ⭐ invoice may be sent again instead of a new one.
+
+        It must be within the invoice lifetime — the line housekeeping draws —
+        and still bill what this press would, the bonus choice aside: the same
+        list price, and no discount due now that it does not carry. A referral
+        or loyalty discount held *by* this invoice is not available to a fresh
+        quote, so for those the list price alone decides. Any other invoice is
+        compared with a fresh quote without bonuses, which shows a discount the
+        buyer has become entitled to since.
+        """
+        if self.purchases.is_stale(purchase):
+            return False
+        listed = product.price_for(PaymentProvider.STARS)
+        if listed is None or purchase.list_amount != Decimal(listed):
+            return False
+        if purchase.discount_amount > 0 or purchase.loyalty_amount > 0:
+            return True
+        return await session.quote(product, PaymentProvider.STARS) == Decimal(listed)
+
+    async def claim_free_pack(self, *, user_id: int, product: Product) -> FreePackClaim:
+        """Hand ``product`` over as the buyer's loyalty free pack, then deliver it.
+
+        The pack is granted under the same purchase lock a checkout of this
+        product takes, so a claim and a payment button pressed together cannot
+        both go through. Delivery runs after the commit, exactly as it does
+        after a payment: a delivery that fails leaves the pack paid and owned,
+        and pressing again (or the deep link, or the admin's verify) hands it
+        over without granting a second one.
+
+        Raises:
+            LockBusyError: a checkout or claim of this product is running.
+            LoyaltyDisabledError, FreePackNotAvailableError,
+            FreePackAlreadyUsedError, FreePackPendingCheckoutError,
+            DuplicatePurchaseError, ProductInactiveError: see
+                ``PurchaseService._grant_free_pack``.
+        """
+        async with self.purchases.checkout_session(user_id, product.id) as session:
+            grant = await session.grant_free_pack()
+        delivery = await self._hand_over(grant)
+        return FreePackClaim(
+            purchase=grant.purchase,
+            delivery=delivery,
+            repeated=grant.repeated,
+        )
+
+    async def _hand_over(self, grant: FreePackGrant) -> DeliveryResult:
+        """Deliver a fresh pack; send the link again for one already delivered."""
+        if grant.purchase.status is PurchaseStatus.DELIVERED:
+            return await self.delivery.redeliver(grant.purchase.id)
+        return await self.delivery.deliver_purchase(grant.purchase.id)
+
+    @staticmethod
+    async def _supersede_unpaid_loyalty_invoices(session: CheckoutSession) -> None:
+        """Expire this buyer's unpaid Stars invoices for this product that hold the discount.
+
+        Only those: a plain unpaid Stars invoice is left exactly as it was.
+        """
+        for pending in await session.pending(PaymentProvider.STARS):
+            if pending.loyalty_amount > 0:
+                await session.expire(pending)
+                logger.info(
+                    "loyalty_stars_invoice_superseded",
+                    purchase_id=str(pending.id),
+                    user_id=pending.user_id,
+                )
+
+    async def start_crypto_checkout(
+        self,
+        *,
+        user_id: int,
+        product: Product,
+        use_bonus: bool = False,
+    ) -> CryptoCheckout:
         """Create a CryptoBot invoice and the matching pending purchase.
 
+        A buyer holds at most one live invoice per product. The whole checkout
+        runs under the buyer's purchase lock, so a second press cannot reach
+        Crypto Pay while the first is in flight, and an invoice that already
+        exists is asked about before a new one is ever made:
+
+        * still payable on the same terms → that invoice is returned again;
+        * still payable on other terms (the price moved, or the bonus choice
+          differs) → ``PendingInvoiceExistsError``; nothing new is issued;
+        * expired at Crypto Pay → the purchase is expired here too, whatever it
+          held is released, and only then is a new invoice made;
+        * already paid → ``PaymentAlreadyReceivedError``; settlement is running;
+        * Crypto Pay unreachable or does not know it → ``PaymentGatewayError``;
+          a new invoice is never made on a guess.
+
+        When a new invoice is made, an unpaid ⭐ invoice for this product that
+        holds the loyalty 50% discount is expired first, so the discount moves
+        to the CryptoBot invoice and the old ⭐ invoice is refused at
+        pre-checkout. Not the other way round: a CryptoBot invoice cannot be
+        taken back from the buyer, so it keeps the discount until it is paid or
+        expires.
+
         The provider assigns the invoice id that later webhooks are matched on,
-        so the invoice must exist first. Ownership is checked before that call so
-        a buyer who already owns the product never reaches the provider.
+        so a new invoice must exist before its purchase row. The price is
+        therefore computed twice: once to bill the provider, then
+        authoritatively inside the purchase transaction, which refuses the
+        purchase if the two disagree. That is the safe direction: an unmatched
+        CryptoBot invoice expires unpaid, whereas a purchase recorded at a
+        different amount than the buyer was shown would be a real defect.
 
         Raises:
             LockBusyError: the buyer is already checking this product out.
+            CheckoutAlreadyPendingError: another checkout recorded its invoice
+                first (the database index, should the lock ever have expired).
             DuplicatePurchaseError: the buyer already owns the product.
+            PendingInvoiceExistsError: an unpaid invoice on other terms exists.
+            PaymentAlreadyReceivedError: the existing invoice was just paid.
             ProductInactiveError, ProviderNotSupportedError: cannot be sold this way.
+            InsufficientBonusBalanceError: bonuses were requested but are gone.
+            ConflictError: the price moved between the invoice and the purchase.
             PaymentGatewayError: Crypto Pay refused or is unreachable.
         """
-        if await self.purchases.find_owned(user_id, product.id) is not None:
-            raise DuplicatePurchaseError(product_id=str(product.id), user_id=user_id)
+        async with self.purchases.checkout_session(user_id, product.id) as session:
+            if await session.owned() is not None:
+                raise DuplicatePurchaseError(product_id=str(product.id), user_id=user_id)
 
-        price = product.price_for(PaymentProvider.CRYPTO)
-        invoice = await self.crypto.create_invoice(
-            InvoiceRequest(
-                user_id=user_id,
-                product_id=product.id,
-                title=product.title,
-                description=product.description,
-                amount=price if price is not None else 0,
-                currency=PaymentProvider.CRYPTO.currency,
-                payload=uuid4().hex,
+            resumed = await self._resume_crypto_checkout(
+                session,
+                product=product,
+                use_bonus=use_bonus,
             )
-        )
-        purchase = await self.purchases.start_purchase(
-            user_id=user_id,
-            product_id=product.id,
-            provider=PaymentProvider.CRYPTO,
-            external_id=invoice.external_id,
-        )
+            if resumed is not None:
+                return resumed
+
+            # The discount follows the buyer's latest choice, as it does for ⭐:
+            # an unpaid ⭐ invoice for this pack that holds it gives it up.
+            await self._supersede_unpaid_loyalty_invoices(session)
+            amount = await session.quote(product, PaymentProvider.CRYPTO, use_bonus=use_bonus)
+            invoice = await self.crypto.create_invoice(
+                InvoiceRequest(
+                    user_id=user_id,
+                    product_id=product.id,
+                    title=product.title,
+                    description=product.description,
+                    amount=amount,
+                    currency=PaymentProvider.CRYPTO.currency,
+                    payload=uuid4().hex,
+                )
+            )
+            try:
+                purchase = await session.record(
+                    provider=PaymentProvider.CRYPTO,
+                    external_id=invoice.external_id,
+                    use_bonus=use_bonus,
+                    expected_amount=amount,
+                )
+            except CheckoutAlreadyPendingError:
+                # Only reachable if the lock expired mid-checkout and another
+                # press recorded its invoice first. That one is the buyer's;
+                # this one is never shown to them and expires unpaid.
+                logger.warning(
+                    "crypto_invoice_orphaned",
+                    user_id=user_id,
+                    product_id=str(product.id),
+                    invoice_id=invoice.external_id,
+                )
+                raise
+
         logger.info(
             "crypto_checkout_started",
             purchase_id=str(purchase.id),
@@ -138,6 +372,106 @@ class CheckoutService:
             invoice_id=invoice.external_id,
         )
         return CryptoCheckout(purchase=purchase, pay_url=invoice.pay_url or "")
+
+    async def _resume_crypto_checkout(
+        self,
+        session: CheckoutSession,
+        *,
+        product: Product,
+        use_bonus: bool,
+    ) -> CryptoCheckout | None:
+        """Settle what to do with the buyer's existing invoices for this product.
+
+        Returns the checkout to hand back, or ``None`` once nothing payable is
+        left and a new invoice may be made. Before this fix a buyer could hold
+        several, so every pending one is checked, newest first.
+        """
+        pending = await session.pending(PaymentProvider.CRYPTO)
+        if not pending:
+            return None
+
+        snapshots = await self.crypto.fetch_invoices([purchase.external_id for purchase in pending])
+        for purchase in pending:
+            snapshot = snapshots.get(purchase.external_id)
+            if snapshot is None:
+                # Not "expired": the provider simply did not say. Guessing here
+                # is how a buyer ends up with two payable invoices.
+                logger.warning(
+                    "crypto_pending_invoice_unknown",
+                    purchase_id=str(purchase.id),
+                    invoice_id=purchase.external_id,
+                )
+                message = "Crypto Pay does not report the buyer's pending invoice"
+                raise PaymentGatewayError(message, invoice_id=purchase.external_id)
+
+            if snapshot.state is PaymentState.EXPIRED:
+                await session.expire(purchase)
+                continue
+
+            if snapshot.state is PaymentState.PAID:
+                raise PaymentAlreadyReceivedError(
+                    purchase_id=str(purchase.id),
+                    invoice_id=purchase.external_id,
+                )
+
+            if not snapshot.pay_url:
+                message = "Crypto Pay returned a payable invoice without a payment URL"
+                raise PaymentGatewayError(message, invoice_id=purchase.external_id)
+
+            if not await self._same_terms(session, purchase, product=product, use_bonus=use_bonus):
+                logger.info(
+                    "crypto_pending_invoice_on_other_terms",
+                    purchase_id=str(purchase.id),
+                    invoice_id=purchase.external_id,
+                    amount=str(purchase.amount),
+                    use_bonus=use_bonus,
+                )
+                raise PendingInvoiceExistsError(
+                    amount=purchase.amount,
+                    currency=purchase.currency.value,
+                    pay_url=snapshot.pay_url,
+                    purchase_id=str(purchase.id),
+                )
+
+            logger.info(
+                "crypto_checkout_resumed",
+                purchase_id=str(purchase.id),
+                user_id=purchase.user_id,
+                product_id=str(purchase.product_id),
+                invoice_id=purchase.external_id,
+            )
+            return CryptoCheckout(purchase=purchase, pay_url=snapshot.pay_url, resumed=True)
+        return None
+
+    @staticmethod
+    async def _same_terms(
+        session: CheckoutSession,
+        purchase: Purchase,
+        *,
+        product: Product,
+        use_bonus: bool,
+    ) -> bool:
+        """Whether a pending invoice is what this press would be billed now.
+
+        A discount, a loyalty discount or a bonus reservation is held *by* that
+        invoice, so pricing the checkout afresh would not see it as available
+        and would disagree for no reason. For those the terms are compared
+        instead — same list price, same bonus choice. A loyalty discount never
+        combines with bonuses, so for it the bonus choice changes nothing. A
+        plain invoice is simply re-priced: that also catches a discount the
+        buyer has become entitled to since.
+        """
+        listed = product.price_for(PaymentProvider.CRYPTO)
+        if listed is None or purchase.list_amount != Decimal(listed):
+            return False
+        if purchase.loyalty_amount > 0:
+            return True
+        if (purchase.bonus_amount > 0) != use_bonus:
+            return False
+        if purchase.discount_amount > 0 or purchase.bonus_amount > 0:
+            return True
+        fresh = await session.quote(product, PaymentProvider.CRYPTO, use_bonus=use_bonus)
+        return fresh == purchase.amount
 
     async def settle_payment(
         self,
@@ -209,7 +543,23 @@ class CheckoutService:
 
         if purchase.provider is PaymentProvider.STARS:
             return await self._verify_stars(purchase, status_before)
-        return await self._verify_crypto(purchase, status_before)
+        if purchase.provider is PaymentProvider.CRYPTO:
+            return await self._verify_crypto(purchase, status_before)
+        # Not a payment rail (an internal loyalty grant). A database check keeps
+        # those out of pending and expired, so this is unreachable — and if it
+        # ever were reached there is no provider to ask, so none is asked.
+        logger.warning(
+            "verification_without_payment_rail",
+            purchase_id=str(purchase.id),
+            provider=purchase.provider.value,
+            status=purchase.status.value,
+        )
+        return self._report(
+            purchase,
+            VerificationOutcome.NO_PROVIDER_EVIDENCE,
+            status_before,
+            detail="This purchase was not paid through a payment provider.",
+        )
 
     async def _verify_stars(
         self,

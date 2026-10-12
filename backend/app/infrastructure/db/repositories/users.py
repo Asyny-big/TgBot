@@ -6,7 +6,10 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 
+from app.core.exceptions import ConflictError, UserNotFoundError
+from app.infrastructure.db.errors import violated_constraint
 from app.infrastructure.db.mappers import to_user
 from app.infrastructure.db.models import UserModel
 
@@ -57,3 +60,37 @@ class SqlAlchemyUserRepository:
 
     async def count(self) -> int:
         return await self._session.scalar(select(func.count()).select_from(UserModel)) or 0
+
+    async def get_by_referral_code(self, code: str) -> User | None:
+        """Return the owner of this referral code, or ``None``."""
+        statement = select(UserModel).where(UserModel.referral_code == code)
+        model = (await self._session.execute(statement)).scalar_one_or_none()
+        return to_user(model) if model is not None else None
+
+    async def ensure_referral_code(self, telegram_id: int, *, candidate: str) -> str:
+        """Return the user's permanent code, assigning ``candidate`` if unset.
+
+        Read under a row lock so two simultaneous first visits to the bonus
+        screen cannot mint two codes for the same person: the second waits, sees
+        the code the first stored, and returns it.
+
+        A user does not have to buy anything to get a link — this is reached
+        straight from the bonus screen.
+        """
+        statement = select(UserModel).where(UserModel.telegram_id == telegram_id).with_for_update()
+        model = (await self._session.execute(statement)).scalar_one_or_none()
+        if model is None:
+            raise UserNotFoundError(telegram_id=telegram_id)
+        if model.referral_code:
+            return model.referral_code
+
+        try:
+            async with self._session.begin_nested():
+                model.referral_code = candidate
+                await self._session.flush()
+        except IntegrityError as error:
+            if violated_constraint(error) == "uq_users_referral_code":
+                message = "This referral code is already taken"
+                raise ConflictError(message, candidate=candidate) from error
+            raise
+        return candidate

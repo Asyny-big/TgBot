@@ -38,6 +38,12 @@ ENV PYTHONUNBUFFERED=1 \
 RUN groupadd --system --gid 1001 appuser \
     && useradd --system --uid 1001 --gid appuser --home-dir /app --shell /sbin/nologin appuser
 
+# Daily Content computes every window and every date in Europe/Moscow. The
+# base image ships the tz database (Debian's tzdata); this line makes the
+# build fail loudly, here, if it ever stops doing so — instead of the Daily
+# processes failing at import in production.
+RUN python -c "from zoneinfo import ZoneInfo; ZoneInfo('Europe/Moscow')"
+
 WORKDIR /app
 
 COPY --from=builder --chown=1001:1001 /app /app

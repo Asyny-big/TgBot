@@ -49,13 +49,15 @@ nginx with the compiled admin panel baked in.
 
 ## Data model
 
-Three tables; money-critical rules are database constraints, not conventions.
+Five tables; money-critical rules are database constraints, not conventions.
 
 | Table | Purpose | Key invariants |
 | --- | --- | --- |
 | `products` | one digital good per deep-link slug | unique `slug` matching Telegram's payload rules, at least one price set, prices strictly positive |
-| `users` | Telegram profile snapshot | `telegram_id` as primary key, case-insensitive username index for admin search |
-| `purchases` | one attempt to buy one product | unique `(provider, external_id)`, partial unique `(user_id, product_id)` while paid or delivered, unique Telegram charge id, delivered rows must carry a link and a timestamp |
+| `users` | Telegram profile snapshot | `telegram_id` as primary key, case-insensitive username index for admin search, unique `referral_code`, `bonus_balance >= 0` |
+| `purchases` | one attempt to buy one product | unique `(provider, external_id)`, partial unique `(user_id, product_id)` while paid or delivered, unique Telegram charge id, delivered rows must carry a link and a timestamp, the stored price breakdown must add up |
+| `referrals` | one buyer, attributed to whoever invited them | unique `referred_user_id` (one referrer for life), `referrer_user_id <> referred_user_id`, the one-time discount is consumed by at most one purchase |
+| `bonus_transactions` | every movement of every bonus balance, in whole Stars | partial unique `(purchase_id, type)` — one entry of each kind per purchase, which is what makes a replayed webhook credit a reward once |
 
 Prices are independent per rail: `price_stars` (integer XTR) and `price_usdt`
 (`NUMERIC(12,2)`). A rail without a price is simply not offered on the card.
@@ -130,12 +132,22 @@ released.
 /start <slug>          card: photo, title, description, prices, two buttons
                        → nothing is billed, no purchase, no invoice
 ⭐ or 💎 pressed        pending purchase + provider invoice created
+                       (pressed again: the same unpaid invoice comes back)
 payment notification   confirm_payment → deliver_purchase → mark_delivered
 /start <slug> again    already owned → the link is re-sent, never re-charged
 ```
 
 An invoice exists only because a buyer pressed a payment button. Opening a card
 records the visitor's Telegram profile and nothing else.
+
+With bonuses available, one question comes between the button and the invoice —
+"spend them on this purchase?" — and that question is a message, not an invoice.
+A buyer with no bonuses never sees it, and neither does a buyer paying in USDT.
+
+An invited buyer with an unused discount also sees the reduced price on the card
+itself, struck through beside the list price. The extra reads happen inside the
+transaction the card already opened, and every other buyer's card is byte for
+byte what it always was.
 
 ### Resilience
 
@@ -146,8 +158,126 @@ records the visitor's Telegram profile and nothing else.
 | Telegram flood control or an outage | delivery retries with exponential back-off, honouring `retry_after` |
 | The buyer blocked the bot | no retries; the purchase stays `paid` and the next `/start` delivers it |
 | Two payment buttons pressed at once | one invoice: the second press is refused by the lock |
+| The same button pressed again later | the buyer's unpaid invoice is sent back; a new ⭐ invoice only once the old one expired, its price changed or a discount became due |
+| An older ⭐ invoice paid after a newer one was issued | refused at pre-checkout: only the newest ⭐ invoice of a product can be paid |
+| An expired ⭐ invoice that carried bonuses or a discount | refused at pre-checkout: what it held was already given back |
 | Stars and USDT invoices both paid | the database allows exactly one paid copy; the loser is reported, not delivered |
 | An invoice is never paid | housekeeping expires it, and it stops being polled |
+| A referral reward is credited twice | it cannot be: `(purchase_id, type)` is unique, so five replayed webhooks leave one reward |
+| The process dies between delivery and the ledger write | housekeeping credits the missed reward on its next pass |
+| An unpaid invoice reserved bonus units | housekeeping releases them; a reservation is not a charge |
+| The inviter blocked the bot | the reward is stored anyway; the notice is a courtesy, not the money |
+| The referral lookup fails at checkout | it cannot fail separately — pricing runs in the same transaction as the purchase |
+
+## Referrals and bonuses
+
+An addition around the shop, not a change to it. The concept is untouched: there
+is no catalogue, no product list, no search and no list of preview channels
+inside the bot. A sale still starts at a deep link to one specific product.
+
+```
+🎁 Мои бонусы           /bonus, or the button after a purchase
+                        → mints a permanent invitation link, buys nothing
+ref_<code> opened       B is attributed to A, for life. No product is shown.
+                        → [📣 Смотреть preview] → the ordinary deep link
+/start <slug>           B's first purchase: -10%, applied automatically
+payment + delivery      A is credited 15% of what B actually paid
+```
+
+**Anyone may invite.** A user does not have to buy anything to get a link — the
+bonus screen mints one on first open.
+
+**An attribution is permanent.** If A invited B, no later link moves B to C.
+That is `uq_referrals_referred_user_id`, not a check in Python.
+
+**A referral link carries no product.** It records the relationship and points at
+the preview directory. B can then open any product deep link, on any later day,
+and the discount still applies: eligibility is evaluated when the purchase is
+created, never when the link was opened.
+
+**Eligibility is purchase history.** A buyer who has bought here before is not a
+new buyer, however new their Telegram account looks. A refunded purchase counts
+as history too — otherwise a buyer could refund their way back to "new" and
+harvest the discount again.
+
+**Only the direct referrer earns.** A earns from B, and B earns from C. A earns
+nothing from C: there is no second level.
+
+### Bonuses
+
+**One bonus is one Telegram Star.** That is the model, not a configured rate:
+the balance is a single integer, 135 bonuses is 135 Stars of discount, and there
+is no second currency and nothing to convert when spending.
+
+Bonuses are not Telegram Stars, cannot be withdrawn and cannot be transferred —
+they only reduce a future price in this shop, which is why the bot shows them as
+a plain `Баланс` and never as `⭐ Telegram Stars`.
+
+| Rule | Where it is enforced |
+| --- | --- |
+| Bonuses are spendable only on a Stars purchase | the pricing function returns zero outside XTR, and the checkout refuses a request to spend them on a crypto invoice |
+| At most half a Stars price may be paid with bonuses | `REFERRAL_MAX_BONUS_PAYMENT_PERCENT`, read straight off the price: 1000 ⭐ accepts 500 bonuses |
+| A product can never be bought for nothing | the price maths always leaves at least one Star, backed by the existing `amount > 0` check on `purchases` |
+| The same units cannot fund two checkouts | a Redis lock on the balance, `SELECT … FOR UPDATE` on the row, and `bonus_balance >= 0` |
+| The balance is always explained by the ledger | both move in the same transaction; `recompute_balance` can prove it |
+| A first referral purchase never combines the discount with bonuses | the pricing function refuses to; the discount wins |
+
+Units are **reserved** when the invoice is issued, not debited when it is paid.
+Between the two there can be half an hour, and without a reservation a second
+checkout could promise the same units again. A reservation becomes a spend when
+the payment lands, and housekeeping releases it if the invoice is never paid.
+
+### Rewards are final
+
+A refund does **not** reverse a credited reward. There is no reversal, no debt
+and no negative balance, and the existing refund flow is untouched: the purchase
+becomes `refunded` and the bonus ledger does not move. Bonuses that were spent
+on a purchase that is later refunded are not returned either.
+
+### What a USDT sale earns
+
+A purchase settled in USDT still earns its inviter a reward, and the Stars
+equivalent comes from **the product's own two prices**:
+
+```
+stars_per_usdt   = product.price_stars / product.price_usdt
+stars_equivalent = paid_usdt × stars_per_usdt
+reward           = floor(stars_equivalent × REFERRAL_REWARD_PERCENT / 100)
+```
+
+An item priced at `700 ⭐ / 10 USDT` is the shop stating that one USDT is worth
+70 Stars here, so a 10 USDT payment is 700 Stars and earns 105 bonuses. No
+external price feed is consulted and no fixed rate can go stale, because the
+rate is whatever the merchant's own catalogue says at the moment of the sale.
+
+There is deliberately **no rate to configure**. Neither the Bot API nor the
+Crypto Pay API exposes a Stars exchange rate — Crypto Pay does not know `XTR` at
+all, and the only official figures live in the MTProto client API, which a bot
+cannot reach. A hardcoded constant was the alternative, and a hardcoded constant
+silently goes wrong.
+
+The rate actually used is written onto the ledger entry (`stars_per_usdt`), so
+repricing the product tomorrow never recomputes yesterday's reward.
+
+A product priced in USDT **only** declares no equivalence. Its sales credit no
+reward, and the omission is logged (`reward_without_declared_rate`) rather than
+guessed at — set a Stars price on the product if you want its crypto sales to
+pay referrals.
+
+### The preview directory
+
+The bot knows exactly one URL, `REFERRAL_PREVIEW_DIRECTORY_URL`, and stores no
+channel ids, no channel usernames and no channel list. That one hop channel
+holds the links to the current preview channels and is managed outside the bot,
+so changing which channels exist never requires a redeploy. Leave the variable
+empty and the button is simply absent.
+
+### Switching it off
+
+`REFERRAL_ENABLED=false` returns the shop to exactly what it was before this
+feature existed: no invitation payload is recognised, no discount is applied,
+and nothing is accrued or spent. The migration stays in place; only behaviour
+changes.
 
 ## Admin API
 
@@ -342,9 +472,10 @@ Also required:
   challenge for certificate issuance and renewal;
 * outbound HTTPS to `api.telegram.org` and `pay.crypt.bot`.
 
-The resource limits in `docker-compose.prod.yml` add up to about 3.5 GB and 5
-CPUs; on a 2 GB box lower `postgres`'s `shared_buffers` to `128MB` and its memory
-limit to `512m`, and set `API_WORKERS=1`.
+The resource limits in `docker-compose.prod.yml` add up to about 3.7 GB and 6
+CPUs with Daily Content's `daily-bot` and `daily-worker` (about 2.9 GB and 5
+CPUs without them); on a 2 GB box lower `postgres`'s `shared_buffers` to `128MB`
+and its memory limit to `512m`, and set `API_WORKERS=1`.
 
 ## Installation
 
@@ -395,6 +526,18 @@ Values that must change from the development defaults:
 | `REDIS_PASSWORD` | a real secret | the production stack starts Redis with `--requirepass` and refuses to come up without it |
 | `API_WORKERS` | `2` | keep `API_WORKERS × (POSTGRES_POOL_SIZE + POSTGRES_MAX_OVERFLOW)` below PostgreSQL's `max_connections` |
 
+The referral programme needs no changes to run — every `REFERRAL_*` variable has
+a working default. Two are worth a decision before launch:
+
+| Variable | Default | Why you might change it |
+| --- | --- | --- |
+| `REFERRAL_PREVIEW_DIRECTORY_URL` | *(empty)* | the one hop channel invited users are sent to. Empty hides the button, so set it or invited users see no next step |
+| `REFERRAL_ENABLED` | `true` | set to `false` to deploy the schema without switching the feature on |
+
+If you sell through CryptoBot and want those sales to pay referral rewards, give
+each product **both** prices — that pair is what declares the USDT-to-Stars rate
+for its own sales. A product priced in USDT only credits no reward.
+
 Then check the whole file, including the cross-component agreements the
 application cannot see for itself:
 
@@ -435,6 +578,15 @@ against the `crypto-pay-api-signature` header, so a forged notification is
 rejected before the body is parsed. If a notification is lost anyway, the
 reconciliation worker polls Crypto Pay every `BOT_RECONCILIATION_INTERVAL_SECONDS`
 and settles the payment without anyone noticing.
+
+## Daily Content (optional)
+
+A second Telegram bot that sends VIP buyers one new item a day, with its own
+worker and a watchdog. Its containers (`daily-bot`, `daily-worker`) sit behind
+the `daily` Compose profile, so the shop deploys exactly as before until
+`COMPOSE_PROFILES=daily` is set. BotFather setup, the variables, the webhook, a
+beta rollout, switching it off, rollback and the troubleshooting runbook:
+[docs/daily-content.md](docs/daily-content.md) (in Russian).
 
 ## First launch
 
@@ -494,7 +646,12 @@ A password is therefore never stored anywhere, not even hashed at rest.
 # change the credentials
 nano .env                     # SECURITY_ADMIN_USERNAME / SECURITY_ADMIN_PASSWORD
 docker compose -f docker-compose.prod.yml up -d --force-recreate api
+make prod-reload              # nginx must re-resolve the recreated api
 ```
+
+A recreated `api` container may come back on another address, while nginx
+keeps the one it resolved when it started: without the reload the panel can
+answer `502` (see "`502` from a stack that reports itself healthy").
 
 The password must be at least 12 characters; the process refuses to start
 otherwise. Changing it does not end sessions that are already open — to force
@@ -564,31 +721,113 @@ gate that the API and the bot wait on.
 ```bash
 cd /opt/tgshop
 ./scripts/backup.sh                 # always take a dump before an update
+
+# Keep the images that are running now: a rollback starts them again instead of
+# rebuilding the old code. <release> names the version being deployed.
+docker image tag tgshop-backend:latest tgshop-backend:pre-<release>
+docker image tag tgshop-edge:latest tgshop-edge:pre-<release>
+
 git pull
-make prod-build                     # rebuild the images
-make prod-up                        # recreate what changed
+make prod-build                     # build the new images; nothing restarts yet
+make preflight                      # the new release's checks against .env
+
+# The new code accepts this .env, and the new edge its configuration. Both run
+# in throwaway containers; the running stack is not touched.
+docker compose -f docker-compose.prod.yml run --rm --no-deps migrations \
+  python -c "from app.core.config import get_settings; get_settings()"
+docker compose -f docker-compose.prod.yml run --rm --no-deps nginx nginx -t
+
+make prod-migrate                   # the new schema, while the old containers serve
+make prod-up                        # only once prod-migrate has succeeded
+make prod-reload                    # the edge must re-resolve api and bot
 make prod-ps                        # confirm everything is healthy again
 ```
 
-Migrations are applied automatically: `api` and `bot` depend on the `migrations`
-job completing successfully, so a new schema is in place before the new code
-serves a request. If a migration fails, `api` and `bot` are simply not started
-and the previous containers keep running.
+**Do not skip `make prod-reload`.** `upstream tgshop_api { server api:8000; }`
+resolves the name once, when nginx starts. Recreating `api` or `bot` gives the
+new container a different address on the Docker network, and nginx keeps sending
+requests to the old one — so the panel and the API answer `502` while
+`make prod-ps` reports every container healthy, which is the most misleading
+shape a deployment failure can take. A reload re-reads the configuration and
+re-resolves both upstreams; it is instant and drops no connection. `make
+prod-restart` needs it too: it names nginx, but Compose recreates only what
+changed, and after an `.env` edit that is `api` and `bot`, not the edge.
+
+**Migrate before `make prod-up`, never through it.** `api` and `bot` depend on
+the `migrations` job, but `docker compose up -d` stops and removes the old `api`
+and `bot` containers *before* it waits for that job. If a migration fails there,
+the new containers stay `Created` and are never started: the shop is down until
+someone notices. `make prod-migrate` runs the same job on its own while the old
+containers keep serving. If it fails, it changes nothing — every pending
+migration runs in one transaction, so a failure rolls them all back — and the
+update stops there. If it succeeds, `make prod-up` finds the schema already at
+head, its `migrations` job has nothing to do, and the only interruption left is
+the containers' own restart.
+
+Migrating first means the running release meets the new schema for the minute
+between those two commands. Every migration so far is written for that — the
+release before it runs on the new schema unchanged — and a future one that is
+not (it drops or renames something the running code reads) needs a maintenance
+window instead: stop the application containers, migrate, then `make prod-up`.
+
+Stop at the first command that fails. Up to and including `make prod-migrate`,
+nothing that serves has been touched: fix the cause — a missing `.env` value,
+say — and carry on from that command, or abandon the update by putting the
+previous release back the way a rollback does (below): `git checkout` it and
+tag the `pre-<release>` images as `:latest` again. `:latest` already names the
+new images, and otherwise the next `up` would start the new code, migrations
+included, without any of these checks. From `make prod-up` on, a failure is a
+rollback.
 
 One note about migration `0002`, which builds the search indexes: `CREATE INDEX`
 takes a lock that blocks writes to the table while it runs. On a table that
 already holds millions of purchases, apply it during a quiet minute. It took 1.6
-seconds on 200 000 rows.
+seconds on 200 000 rows. Migration `0003` adds one more index to `purchases` and
+carries the same caveat.
 
-To roll back to the previous release:
+### Rolling back
+
+Start the images tagged before the update again. Do not rebuild the old code,
+and never let it migrate. With Daily Content deployed, read
+[docs/daily-content.md](docs/daily-content.md), «Откат», first: when the release
+you return to predates it, `daily-bot` and `daily-worker` must be stopped
+*before* the `git checkout`, while the compose file still describes them.
 
 ```bash
-git checkout <previous-tag>
-make prod-build && make prod-up
+cd /opt/tgshop
+git checkout <previous-tag>         # the compose file that goes with those images
+docker image tag tgshop-backend:pre-<release> tgshop-backend:latest
+docker image tag tgshop-edge:pre-<release> tgshop-edge:latest
+docker compose -f docker-compose.prod.yml up -d --no-deps --no-build api bot nginx
+make prod-reload
+make prod-ps
 ```
 
-A rollback across a migration that dropped a column needs the dump:
-`alembic downgrade` handles the schema, but only a restore brings the data back.
+The schema stays where the new release left it. The old code runs on it
+unchanged but cannot migrate it: its `migrations` job finds the database at a
+revision it has never heard of and fails with `Can't locate revision identified
+by '<rev>'`. `--no-deps` is what keeps that job out of the `up` above, and until
+the next release is deployed it must stay out of everything else too:
+`make prod-migrate` fails, and `make prod-up`, `make prod-restart` or any other
+`up` without `--no-deps` fails on that job — leaving `api` and `bot` stopped
+whenever it recreated them on the way. To recreate them in the meantime (after
+an `.env` edit, say), use `docker compose -f docker-compose.prod.yml up -d
+--no-deps --no-build --force-recreate api bot`, then `make prod-reload`.
+
+Migration `0003` (referrals and bonuses) is **additive only** — two new tables
+and five nullable-or-defaulted columns — and every migration since keeps the
+previous release working too, so rolling back the application is enough and
+the schema can stay. Never `alembic downgrade` in production: the old code does
+not need it, and a downgrade either destroys what only the newer schema holds —
+`0003`'s drops `bonus_transactions`, where a credited reward exists nowhere
+else — or refuses to run, as Daily Content's do while their tables hold data. A
+release the previous one could not run on — none so far — cannot be rolled back
+this way at all: the way back is the dump taken before the update
+(`./scripts/restore.sh`), and everything written since is lost.
+
+No `pre-<release>` tags, because the update was made without them? `make
+prod-build` on the old checkout builds the same code again; then continue with
+the `up` command above.
 
 ## Backups
 
@@ -638,6 +877,37 @@ docker compose -f docker-compose.prod.yml logs --tail 200 api
 Configuration is validated on start-up, so a bad value shows up as a single
 explicit error naming the field, not as a mid-payment failure.
 
+### `502` from a stack that reports itself healthy
+
+```bash
+make prod-reload                                # almost always this
+```
+
+nginx resolved `api` and `bot` when it started. If they were recreated since
+— an update, a rollback, a manual `up -d api` — their addresses changed and the
+edge is still talking to containers that no longer exist. The access log records
+the address it used, so one comparison confirms it:
+
+```bash
+# what nginx is dialling
+docker compose -f docker-compose.prod.yml logs --tail 20 nginx | grep upstream_addr
+# where the container actually is
+docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' \
+  "$(docker compose -f docker-compose.prod.yml ps -q api)"
+```
+
+The container is on two networks, so two addresses are printed; the edge one is
+what nginx should be using. An `upstream_addr` that is neither of them is this
+and nothing more.
+
+Two things to know about it. Recreating a container does not always change its
+address — Docker often hands back the one just released — so the same deployment
+step fails only sometimes, which is exactly why it is worth a runbook line
+rather than trusting that it worked last time. And do not diagnose it with
+`getent hosts api` inside nginx: Docker's embedded DNS answers with the
+*current* address, so that lookup looks correct while nginx is still using the
+stale one it cached at start-up.
+
 ### The database is corrupt or the data is wrong
 
 ```bash
@@ -645,12 +915,17 @@ ls -l backups/
 ./scripts/restore.sh backups/tgshop-20260130-021500Z.dump
 ```
 
-The script verifies the checksum, verifies the archive is readable, stops the API
-and the bot so nothing writes into a database that is about to be replaced,
-restores **inside a single transaction** (a failure rolls back and leaves the
-current data intact), brings the schema to the current head in case the dump
-predates a migration, and starts the API and the bot again. Add `--yes` for
-unattended recovery.
+The script verifies the checksum, verifies the archive is readable, stops
+everything that writes to the database — the API, the bot, and `daily-bot` and
+`daily-worker` wherever Daily Content runs — so nothing writes into a database
+that is about to be replaced, restores **inside a single transaction** (a
+failure rolls back and leaves the current data intact), brings the schema to
+the current head in case the dump predates a migration, then starts the API and
+the bot again — and `daily-bot` and `daily-worker` only if they were running —
+and reloads nginx, which must find them at their new addresses. If the schema
+cannot be brought to head, nothing is started, and the script prints the
+command that starts the services once it is fixed. Add `--yes` for unattended
+recovery.
 
 ### Rebuilding the whole server
 
@@ -698,8 +973,12 @@ The system is designed so this resolves itself, in this order:
 | `GET /internal/health` on `127.0.0.1:8081` in nginx | the edge is accepting connections (container-internal only) |
 
 Liveness probes deliberately do not touch PostgreSQL or Redis: restarting a
-process cannot fix a database outage, and a probe that failed during one would
-turn a dependency blip into a restart loop.
+process cannot fix a database outage, so a probe that failed during one would
+only spread it. Compose does not restart an unhealthy container — `restart:
+always` reacts to a process that exits, not to a failed probe — but it marks
+the container `unhealthy`, and nginx is started only once `api` and `bot`
+report healthy: a deploy made during a database blip would leave the edge
+waiting for it.
 
 ---
 

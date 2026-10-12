@@ -91,6 +91,18 @@ describe("ApiClient", () => {
     expect(calls[0]?.url).toBe("/api/v1/purchases?limit=20&offset=0&status=paid&status=delivered");
   });
 
+  it("sends PUT with a JSON body", async () => {
+    const client = build([jsonResponse(200, { banned: true })]);
+
+    const result = await client.put<{ banned: boolean }>("/daily/subscribers/1/requests-ban", {
+      banned: true,
+    });
+
+    expect(result).toEqual({ banned: true });
+    expect(calls[0]?.init.method).toBe("PUT");
+    expect(calls[0]?.init.body).toBe(JSON.stringify({ banned: true }));
+  });
+
   it("returns null for 204 responses", async () => {
     const client = build([new Response(null, { status: 204 })]);
 

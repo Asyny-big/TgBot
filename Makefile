@@ -11,8 +11,8 @@ COMPOSE_PROD := docker compose -f docker-compose.prod.yml
 .PHONY: help env install lint format typecheck test test-unit check up down restart logs ps shell \
 	migrate migrate-down revision bot-logs openapi \
 	ui-install ui-types ui-lint ui-typecheck ui-test ui-build ui-dev ui-check clean \
-	preflight tls-init renew prod-build prod-up prod-down prod-restart prod-ps prod-logs \
-	prod-migrate backup restore
+	preflight tls-init renew prod-build prod-up prod-down prod-restart prod-reload prod-ps prod-logs \
+	prod-migrate prod-daily-restart prod-daily-logs backup restore
 
 help: ## Show the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -127,6 +127,9 @@ prod-down: ## Stop the production stack and keep the volumes
 prod-restart: ## Rebuild and recreate the application containers
 	$(COMPOSE_PROD) up -d --build api bot nginx
 
+prod-reload: ## Make the edge re-resolve api/bot after they were recreated
+	$(COMPOSE_PROD) exec nginx nginx -s reload
+
 prod-ps: ## Show production container status
 	$(COMPOSE_PROD) ps
 
@@ -135,6 +138,12 @@ prod-logs: ## Follow every production log
 
 prod-migrate: ## Apply pending migrations in production
 	$(COMPOSE_PROD) run --rm migrations alembic upgrade head
+
+prod-daily-restart: ## Rebuild and recreate the Daily Content containers (COMPOSE_PROFILES=daily)
+	$(COMPOSE_PROD) --profile daily up -d --build daily-bot daily-worker
+
+prod-daily-logs: ## Follow the Daily Content logs: bot, worker, watchdog
+	$(COMPOSE_PROD) --profile daily logs -f --tail 100 daily-bot daily-worker
 
 backup: ## Dump the production database into ./backups
 	bash scripts/backup.sh

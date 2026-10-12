@@ -20,6 +20,7 @@ from app.core.resources import Resources
 from app.infrastructure.telegram.factory import (
     create_bot,
     create_delivery_gateway,
+    create_loyalty_notifier,
     create_stars_sender,
 )
 
@@ -35,11 +36,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
     resources = Resources.create(settings)
     container = Container.create(resources)
-    # The admin API sends messages too: re-delivery and manual payment checks.
+    # The admin API sends messages too: re-delivery and manual payment checks —
+    # and the loyalty milestone notice when such a check completes a delivery.
     bot = create_bot(settings)
     checkout = container.build_checkout(
         delivery_gateway=create_delivery_gateway(bot),
         stars=create_stars_sender(bot),
+        milestone_notifier=create_loyalty_notifier(bot, daily=container.build_daily_entry()),
     )
     setattr(app.state, RESOURCES_STATE_KEY, resources)
     setattr(app.state, CONTAINER_STATE_KEY, container)

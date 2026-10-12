@@ -7,12 +7,25 @@ self-contained: no server side state between showing the card and paying.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
+from urllib.parse import urlencode
 from uuid import UUID  # noqa: TC003 — CallbackData resolves annotations at runtime
 
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.bot.texts import CRYPTO_BUTTON, CRYPTO_PAY_BUTTON, STARS_BUTTON
+from app.bot.texts import (
+    BONUS_SECTION_BUTTON,
+    BONUS_SHARE_BUTTON,
+    BONUS_SKIP_BUTTON,
+    BONUS_USE_BUTTON,
+    CRYPTO_BUTTON,
+    CRYPTO_PAY_BUTTON,
+    DAILY_ENTRY_BUTTON,
+    FREE_PACK_BUTTON,
+    PREVIEW_BUTTON,
+    PROGRESS_SECTION_BUTTON,
+    STARS_BUTTON,
+)
 from app.domain.enums import PaymentProvider
 
 if TYPE_CHECKING:
@@ -31,8 +44,18 @@ class PayCallback(CallbackData, prefix="pay"):
     product_id: UUID
 
 
+class FreePackCallback(CallbackData, prefix="freepack"):
+    """ "Take it for free" button payload: the product, never the buyer."""
+
+    product_id: UUID
+
+
 def payment_keyboard(card: ProductCard) -> InlineKeyboardMarkup:
-    """One button per rail that has a price. Pressing one starts the checkout."""
+    """One button per rail that has a price. Pressing one starts the checkout.
+
+    A buyer whose loyalty free pack is waiting also gets "take it for free" on
+    top. The payment buttons stay: the free pack is an offer, not a detour.
+    """
     rows = [
         [
             InlineKeyboardButton(
@@ -45,6 +68,16 @@ def payment_keyboard(card: ProductCard) -> InlineKeyboardMarkup:
         ]
         for option in card.options
     ]
+    if card.free_pack_available:
+        rows.insert(
+            0,
+            [
+                InlineKeyboardButton(
+                    text=FREE_PACK_BUTTON,
+                    callback_data=FreePackCallback(product_id=card.product.id).pack(),
+                )
+            ],
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -53,3 +86,157 @@ def crypto_pay_keyboard(pay_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=CRYPTO_PAY_BUTTON, url=pay_url)]]
     )
+
+
+class BonusCallback(CallbackData, prefix="bonus"):
+    """Opens the "My bonuses" section."""
+
+
+class BonusChoiceCallback(CallbackData, prefix="bonususe"):
+    """The answer to "spend your bonuses on this purchase?".
+
+    The provider and product travel in the callback data, exactly like
+    ``PayCallback``, so the decision stays self-contained: no server side state
+    is kept between showing the price and issuing the invoice.
+    """
+
+    provider: PaymentProvider
+    product_id: UUID
+    use_bonus: bool
+
+
+def preview_keyboard(preview_url: str | None) -> InlineKeyboardMarkup:
+    """Where an invited visitor goes next.
+
+    The bot knows exactly one preview URL, from configuration. It stores no
+    channel list, so changing which channels exist never touches the bot. When
+    the URL is unset the button is simply absent.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if preview_url:
+        rows.append([InlineKeyboardButton(text=PREVIEW_BUTTON, url=preview_url)])
+    rows.append(
+        [InlineKeyboardButton(text=BONUS_SECTION_BUTTON, callback_data=BonusCallback().pack())]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def bonus_section_keyboard(share_url: str) -> InlineKeyboardMarkup:
+    """One button: hand the invitation link to Telegram's own share sheet."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=BONUS_SHARE_BUTTON, url=share_url)]]
+    )
+
+
+def bonus_choice_keyboard(
+    *,
+    provider: PaymentProvider,
+    product_id: UUID,
+) -> InlineKeyboardMarkup:
+    """Spend bonuses on this purchase, or pay the full price."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=BONUS_USE_BUTTON,
+                    callback_data=BonusChoiceCallback(
+                        provider=provider,
+                        product_id=product_id,
+                        use_bonus=True,
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=BONUS_SKIP_BUTTON,
+                    callback_data=BonusChoiceCallback(
+                        provider=provider,
+                        product_id=product_id,
+                        use_bonus=False,
+                    ).pack(),
+                )
+            ],
+        ]
+    )
+
+
+class ProgressCallback(CallbackData, prefix="progress"):
+    """Opens the "🏆 My progress" section. Carries nothing: the buyer is the sender."""
+
+
+def start_menu_keyboard(*, bonuses: bool, progress: bool) -> InlineKeyboardMarkup | None:
+    """The sections reachable without a product link, one button each.
+
+    Only switched-on sections get a button, so with the loyalty programme off
+    this is exactly the bonus hint the bot has always shown — or nothing.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if bonuses:
+        rows.append(
+            [InlineKeyboardButton(text=BONUS_SECTION_BUTTON, callback_data=BonusCallback().pack())]
+        )
+    if progress:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=PROGRESS_SECTION_BUTTON,
+                    callback_data=ProgressCallback().pack(),
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
+def progress_keyboard(*, daily_link: str | None = None) -> InlineKeyboardMarkup:
+    """The "🏆 My progress" button under a loyalty milestone notice.
+
+    Under the VIP notice, for a buyer the Daily bot would serve, the way into
+    it follows: "👑 Открыть VIP Daily".
+    """
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=PROGRESS_SECTION_BUTTON,
+                callback_data=ProgressCallback().pack(),
+            )
+        ]
+    ]
+    if daily_link is not None:
+        rows.append([daily_entry_button(daily_link)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def daily_entry_button(link: str) -> InlineKeyboardButton:
+    """ "👑 Открыть VIP Daily": a deep link that opens the Daily bot."""
+    return InlineKeyboardButton(text=DAILY_ENTRY_BUTTON, url=link)
+
+
+def daily_entry_keyboard(link: str | None) -> InlineKeyboardMarkup | None:
+    """Under the "🏆 My progress" screen: the way into VIP Daily, when there is one."""
+    if link is None:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[daily_entry_button(link)]])
+
+
+def bonus_hint_keyboard(*, progress: str | None = None) -> InlineKeyboardMarkup:
+    """Offer the bonus section after a completed purchase. Never required.
+
+    With ``progress`` — the label ``progress_button_label`` made, given only
+    while the loyalty programme is on — "🏆 Мой прогресс" follows on its own
+    row, so the label keeps the full width. It opens the ``/progress`` screen.
+    """
+    rows = [[InlineKeyboardButton(text=BONUS_SECTION_BUTTON, callback_data=BonusCallback().pack())]]
+    if progress is not None:
+        rows.append([InlineKeyboardButton(text=progress, callback_data=ProgressCallback().pack())])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def share_url(*, referral_link: str, text: str) -> str:
+    """Telegram's native share sheet, pre-filled with the invitation.
+
+    Using ``t.me/share`` rather than a bot-side "forward this" flow keeps the
+    interaction to a single tap and lets the user pick the recipient in their
+    own client.
+    """
+    query = urlencode({"url": referral_link, "text": text})
+    return f"https://t.me/share/url?{query}"

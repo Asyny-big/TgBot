@@ -17,6 +17,10 @@ Business rules about the purchase itself stay in ``PurchaseService``. The flow i
 A failed delivery deliberately leaves the purchase in ``paid``: the buyer keeps
 the right to the link, and the next ``/start`` (or a re-delivery) hands it over.
 No transaction is held open while the transport is being awaited.
+
+A delivery that reaches a loyalty milestone is announced last, after its
+transaction committed. Which milestone — if any — is decided by
+``PurchaseService.record_delivery`` alone; this service only passes it on.
 """
 
 from __future__ import annotations
@@ -44,9 +48,11 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from app.core.config import DeliverySettings
+    from app.domain.bonuses import SaleCompletion
     from app.domain.delivery import DeliveryGateway
     from app.domain.entities import Product, Purchase, User
     from app.domain.locks import LockManager
+    from app.domain.loyalty import MilestoneNotifier
     from app.domain.uow import UnitOfWorkFactory
     from app.services.purchases import PurchaseService
 
@@ -76,6 +82,21 @@ class DeliveryService:
     # rather than bound methods.
     sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep)
     jitter: Callable[[], float] = field(default=random.random)
+    sale_completion: SaleCompletion | None = None
+    """Optional referral reward accrual, invoked once a sale is complete.
+
+    Deliberately last in the sequence and deliberately unable to fail the
+    delivery: the buyer's link is the promise this service exists to keep, and
+    a bonus ledger hiccup must not break it. Housekeeping repairs what is
+    missed, exactly as reconciliation repairs a lost payment webhook.
+    """
+    milestones: MilestoneNotifier | None = None
+    """Optional loyalty milestone notices (5, 10, 15), sent after the commit.
+
+    A courtesy: a notice that fails is logged and the delivery stands. There
+    is no retry and no record of it — a crash between the commit and the send
+    loses that one notice, by design.
+    """
 
     async def deliver_purchase(self, purchase_id: UUID) -> DeliveryResult:
         """Deliver a freshly paid purchase.
@@ -141,8 +162,14 @@ class DeliveryService:
             if not outcome.succeeded:
                 return outcome
 
-            if purchase.status is not PurchaseStatus.DELIVERED:
-                await self.purchases.mark_delivered(purchase_id, delivered_url=delivery_url)
+            newly_delivered = purchase.status is not PurchaseStatus.DELIVERED
+            milestone: int | None = None
+            if newly_delivered:
+                recorded = await self.purchases.record_delivery(
+                    purchase_id,
+                    delivered_url=delivery_url,
+                )
+                milestone = recorded.milestone
 
         logger.info(
             "delivery_completed",
@@ -150,7 +177,49 @@ class DeliveryService:
             attempts=outcome.attempts,
             is_repeat=is_repeat,
         )
+        if newly_delivered:
+            # Only the transition into "delivered" completes a sale — a
+            # re-delivery of something the buyer already owns must not pay a
+            # reward twice, nor pester them a second time.
+            await self._complete_sale(purchase_id, context.user.telegram_id)
+        if milestone is not None:
+            await self._announce_milestone(context.user.telegram_id, milestone)
         return outcome
+
+    async def _announce_milestone(self, user_id: int, milestone: int) -> None:
+        """Tell the buyer which milestone they reached. Never raises.
+
+        Runs after the delivery committed, so nothing here can undo it.
+        """
+        if self.milestones is None:
+            return
+        try:
+            await self.milestones.notify_milestone(user_id, milestone)
+        except Exception as error:
+            logger.error(  # noqa: TRY400 — a courtesy that failed, not a failed delivery
+                "loyalty_milestone_not_announced",
+                user_id=user_id,
+                milestone=milestone,
+                error=str(error),
+            )
+
+    async def _complete_sale(self, purchase_id: UUID, user_id: int) -> None:
+        """Report a completed sale to the bonus feature. Never raises.
+
+        Deliberately after the delivery and deliberately unable to break it: the
+        buyer's link is the promise this service exists to keep.
+        """
+        if self.sale_completion is None:
+            return
+        try:
+            await self.sale_completion.accrue(purchase_id)
+            await self.sale_completion.invite_buyer(user_id)
+        except Exception as error:
+            logger.error(  # noqa: TRY400 — a bonus problem is not a delivery failure
+                "sale_completion_not_reported",
+                purchase_id=str(purchase_id),
+                error=str(error),
+            )
 
     async def _load_context(self, purchase_id: UUID) -> _DeliveryContext:
         """Read the purchase, product and buyer, then close the transaction."""

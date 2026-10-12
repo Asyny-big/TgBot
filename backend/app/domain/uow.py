@@ -14,8 +14,18 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
     from app.domain.repositories import (
+        BonusRepository,
+        DailyAlertRepository,
+        DailyContentRepository,
+        DailyDeliveryRepository,
+        DailyOutboxRepository,
+        DailyReportRepository,
+        DailyRequestRepository,
+        DailySubscriptionRepository,
+        LoyaltyRepository,
         ProductRepository,
         PurchaseRepository,
+        ReferralRepository,
         StatsRepository,
         UserRepository,
     )
@@ -40,8 +50,58 @@ class UnitOfWork(Protocol):
         ...
 
     @property
+    def referrals(self) -> ReferralRepository:
+        """Referral repository bound to this transaction."""
+        ...
+
+    @property
+    def bonuses(self) -> BonusRepository:
+        """Bonus ledger repository bound to this transaction."""
+        ...
+
+    @property
     def stats(self) -> StatsRepository:
         """Statistics repository bound to this transaction."""
+        ...
+
+    @property
+    def loyalty(self) -> LoyaltyRepository:
+        """Loyalty progress and rewards repository bound to this transaction."""
+        ...
+
+    @property
+    def daily_subscriptions(self) -> DailySubscriptionRepository:
+        """Daily Content subscriptions bound to this transaction."""
+        ...
+
+    @property
+    def daily_content(self) -> DailyContentRepository:
+        """The Daily Content library bound to this transaction."""
+        ...
+
+    @property
+    def daily_deliveries(self) -> DailyDeliveryRepository:
+        """Daily Content deliveries bound to this transaction."""
+        ...
+
+    @property
+    def daily_outbox(self) -> DailyOutboxRepository:
+        """The Daily outbox — alerts and notices — bound to this transaction."""
+        ...
+
+    @property
+    def daily_alerts(self) -> DailyAlertRepository:
+        """The owner's Daily alerts bound to this transaction."""
+        ...
+
+    @property
+    def daily_requests(self) -> DailyRequestRepository:
+        """Buyers' content requests bound to this transaction."""
+        ...
+
+    @property
+    def daily_reports(self) -> DailyReportRepository:
+        """The admin panel's Daily reads bound to this transaction."""
         ...
 
     async def commit(self) -> None:

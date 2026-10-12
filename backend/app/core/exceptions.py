@@ -7,6 +7,10 @@ the admin SPA and the bot can react to them without string matching.
 from __future__ import annotations
 
 from http import HTTPStatus
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from decimal import Decimal
 
 
 class AppError(Exception):
@@ -78,6 +82,13 @@ class UserNotFoundError(NotFoundError):
     message = "User not found"
 
 
+class ReferralNotFoundError(NotFoundError):
+    """No referral relationship matches the given identifier."""
+
+    code = "referral_not_found"
+    message = "Referral not found"
+
+
 class SlugAlreadyExistsError(ConflictError):
     """Another product already occupies this deep-link slug."""
 
@@ -132,6 +143,275 @@ class InvalidDeliveryUrlError(ValidationError):
 
     code = "invalid_delivery_url"
     message = "Delivery URL must start with http:// or https://"
+
+
+class SelfReferralError(ValidationError):
+    """A user opened their own invitation link."""
+
+    code = "self_referral"
+    message = "You cannot invite yourself"
+
+
+class ReferralAlreadySetError(ConflictError):
+    """This buyer already has a referrer, and it is never overwritten."""
+
+    code = "referral_already_set"
+    message = "This user already has a referrer"
+
+
+class ReferralNotEligibleError(ConflictError):
+    """The buyer already has purchase history, so no relationship is created."""
+
+    code = "referral_not_eligible"
+    message = "Only a buyer without purchase history can be invited"
+
+
+class DiscountAlreadyUsedError(ConflictError):
+    """The one-time referral discount was already consumed by another purchase.
+
+    Raised only by ``mark_discount_used`` when ``discount_purchase_id`` is
+    already set to a *different* purchase.  A replay with the *same* purchase
+    is idempotent and does not raise.
+    """
+
+    code = "discount_already_used"
+    message = "The referral discount was already used by another purchase"
+
+
+class InsufficientBonusBalanceError(ConflictError):
+    """The bonus balance moved between showing the price and pressing pay."""
+
+    code = "insufficient_bonus_balance"
+    message = "Not enough bonuses to cover this purchase"
+
+
+class PendingInvoiceExistsError(ConflictError):
+    """The buyer already holds an unpaid invoice for this product on other terms.
+
+    No second invoice is issued, and the old one is not handed back as if it
+    matched: the buyer is told what it is for and decides.
+    """
+
+    code = "pending_invoice_exists"
+    message = "An unpaid invoice for this product already exists"
+
+    def __init__(
+        self,
+        *,
+        amount: Decimal,
+        currency: str,
+        pay_url: str | None,
+        **details: object,
+    ) -> None:
+        super().__init__(amount=str(amount), currency=currency, **details)
+        self.amount = amount
+        self.currency = currency
+        self.pay_url = pay_url
+
+
+class CheckoutAlreadyPendingError(ConflictError):
+    """The database already holds a pending checkout for this buyer and product.
+
+    Raised from ``uq_purchases_user_product_pending_crypto``: the checkout lock
+    normally makes this unreachable, so seeing it means two checkouts overlapped
+    anyway. The buyer simply presses again and gets the invoice that won.
+    """
+
+    code = "checkout_already_pending"
+    message = "A checkout for this product is already in progress"
+
+
+class PaymentAlreadyReceivedError(ConflictError):
+    """The buyer's earlier invoice is paid; its settlement has not landed yet."""
+
+    code = "payment_already_received"
+    message = "The payment for this product is already being processed"
+
+
+class BonusesNotAvailableError(ValidationError):
+    """Bonuses were requested on a rail that cannot spend them.
+
+    One bonus is one Telegram Star, so bonuses reduce a Stars invoice and
+    nothing else. The bot never offers the choice on a crypto card, so this
+    surfaces only for a hand-crafted callback.
+    """
+
+    code = "bonuses_not_available"
+    message = "Bonuses can only be spent on a Telegram Stars purchase"
+
+
+class LoyaltyDisabledError(ConflictError):
+    """The loyalty programme is switched off (``LOYALTY_ENABLED=false``)."""
+
+    code = "loyalty_disabled"
+    message = "The loyalty programme is not available"
+
+
+class FreePackNotAvailableError(ConflictError):
+    """The buyer has not completed enough purchases for the free pack yet."""
+
+    code = "free_pack_not_available"
+    message = "The free pack is not available yet"
+
+
+class FreePackAlreadyUsedError(ConflictError):
+    """The one free pack was already handed over — for another product."""
+
+    code = "free_pack_already_used"
+    message = "The free pack was already claimed"
+
+
+class FreePackPendingCheckoutError(ConflictError):
+    """The buyer holds an unpaid invoice for this product, so it is not given away.
+
+    Paying that invoice would then sell a pack the buyer already received.
+    """
+
+    code = "free_pack_pending_checkout"
+    message = "An unpaid invoice for this product exists"
+
+
+class DailyContentDuplicateError(ConflictError):
+    """The same file, or the same text, is already in the Daily Content library."""
+
+    code = "daily_content_duplicate"
+    message = "This item is already in the library"
+
+    def __init__(self, *, existing_id: int, **details: object) -> None:
+        super().__init__(existing_id=existing_id, **details)
+        self.existing_id = existing_id
+
+
+class DailyContentNotFoundError(NotFoundError):
+    """No such item in the Daily Content library."""
+
+    code = "daily_content_not_found"
+    message = "Daily Content item not found"
+
+
+class DailySubscriberNotFoundError(NotFoundError):
+    """The buyer never wrote to the Daily bot."""
+
+    code = "daily_subscriber_not_found"
+    message = "Daily Content subscriber not found"
+
+
+class DailyDeliveryNotFoundError(NotFoundError):
+    """No such Daily Content delivery."""
+
+    code = "daily_delivery_not_found"
+    message = "Daily Content delivery not found"
+
+
+class DailyRequestNotFoundError(NotFoundError):
+    """No such content request, or no such message in it."""
+
+    code = "daily_request_not_found"
+    message = "Content request not found"
+
+
+class DailyRequestVersionConflictError(ConflictError):
+    """The request changed since the panel read it: reload, then decide again.
+
+    ``current_version`` in the details is the version to send next time.
+    """
+
+    code = "daily_request_version_conflict"
+    message = "The request was changed by somebody else"
+
+    def __init__(self, *, request_id: int, current_version: int) -> None:
+        super().__init__(request_id=request_id, current_version=current_version)
+        self.current_version = current_version
+
+
+class DailyIdempotencyKeyReusedError(ConflictError):
+    """The same idempotency key came back with a different request."""
+
+    code = "idempotency_key_reused"
+    message = "This idempotency key was already used for a different request"
+
+
+class DailyLibraryActionError(ConflictError):
+    """The library item's status does not allow this action."""
+
+    code = "daily_library_action_not_allowed"
+    message = "This action is not allowed for the item's status"
+
+
+class DailyNoOwnerError(ConflictError):
+    """Nobody to send to: no owner account is configured for the Daily bot."""
+
+    code = "daily_no_owner"
+    message = "No owner account is configured for the Daily bot"
+
+
+class DailyReplyTooLongError(ValidationError):
+    """The answer does not fit one Telegram message once formatted."""
+
+    code = "daily_reply_too_long"
+    message = "The reply is too long for one Telegram message"
+
+
+class DailySendError(AppError):
+    """Telegram did not take a Daily Content item. Subclasses say how sure that is."""
+
+    status_code = HTTPStatus.BAD_GATEWAY
+    code = "daily_send_failed"
+    message = "The Daily Content item was not sent"
+
+
+class DailySendTransientError(DailySendError):
+    """A temporary failure: the network, Telegram's servers, flood control.
+
+    *Ambiguous*: Telegram may have taken the message before the failure was
+    noticed (a timeout). The same item is therefore sent again later — never a
+    different one on the same day. ``retry_after`` is Telegram's own hint.
+    """
+
+    code = "daily_send_transient"
+    message = "Temporary failure sending the Daily Content item"
+
+    def __init__(
+        self,
+        message: str | None = None,
+        /,
+        *,
+        retry_after: float | None = None,
+        **details: object,
+    ) -> None:
+        super().__init__(message, **details)
+        self.retry_after = retry_after
+
+
+class DailySendBlockedError(DailySendError):
+    """The buyer cannot receive anything: the bot is blocked, the chat is gone.
+
+    Definite: nothing was delivered.
+    """
+
+    code = "daily_send_blocked"
+    message = "The buyer cannot receive messages from the bot"
+
+
+class DailyContentRejectedError(DailySendError):
+    """Telegram refused the item itself: an unusable file, an invalid caption.
+
+    Definite: nothing was delivered. The item is taken out of deliveries and
+    another one is sent instead.
+    """
+
+    code = "daily_content_rejected"
+    message = "Telegram refused the Daily Content item"
+
+
+class DailySendRejectedError(DailySendError):
+    """Telegram refused the message for another reason it will not change its mind on.
+
+    Definite: nothing was delivered.
+    """
+
+    code = "daily_send_rejected"
+    message = "Telegram refused the Daily Content message"
 
 
 class DeliveryError(AppError):

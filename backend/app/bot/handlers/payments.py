@@ -7,17 +7,26 @@ below starts with the buyer pressing ⭐ or 💎.
 from __future__ import annotations
 
 from contextlib import suppress
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
 
-from app.bot.keyboards import PayCallback, crypto_pay_keyboard
+from app.bot.keyboards import (
+    BonusChoiceCallback,
+    PayCallback,
+    bonus_choice_keyboard,
+    crypto_pay_keyboard,
+)
 from app.bot.middlewares import BotServices
 from app.bot.texts import (
     ALREADY_PURCHASED,
+    BONUS_BALANCE_CHANGED,
+    BONUS_NOT_FOR_PRODUCT,
     CARD_UNAVAILABLE,
     CRYPTO_INVOICE_CREATED,
+    CRYPTO_INVOICE_RESUMED,
     DELIVERY_FAILED,
     PAYMENT_IN_PROGRESS,
     PAYMENT_UNAVAILABLE,
@@ -25,11 +34,21 @@ from app.bot.texts import (
     PRE_CHECKOUT_UNAVAILABLE,
     PRE_CHECKOUT_UNKNOWN,
     REFUND_NOTICE,
+    STARS_INVOICE_RESUMED,
+    bonus_prompt,
+    pending_invoice_exists,
 )
 from app.core.exceptions import (
+    AppError,
+    BonusesNotAvailableError,
+    CheckoutAlreadyPendingError,
+    ConflictError,
     DuplicatePurchaseError,
+    InsufficientBonusBalanceError,
     LockBusyError,
+    PaymentAlreadyReceivedError,
     PaymentGatewayError,
+    PendingInvoiceExistsError,
     ProductInactiveError,
     ProductNotFoundError,
     ProviderNotSupportedError,
@@ -41,6 +60,9 @@ from app.domain.enums import PaymentProvider, PurchaseStatus
 if TYPE_CHECKING:
     from aiogram.types import PreCheckoutQuery
 
+    from app.domain.entities import Product
+    from app.services.bonuses import BonusOffer
+
 logger = get_logger(__name__)
 
 
@@ -49,7 +71,19 @@ async def handle_pay_pressed(
     callback_data: PayCallback,
     shop: BotServices,
 ) -> None:
-    """The buyer pressed a payment button: create the purchase and the invoice."""
+    """The buyer pressed a payment button.
+
+    One question may come between the button and the invoice: if the buyer has
+    bonuses that could reduce *this* price, they are asked first. Not when they
+    already hold an unpaid invoice for this pack on this rail: checkout hands
+    that one back — or replaces it once it has run out — on the bonus choice it
+    was issued with, so asking again would change nothing. Everything else —
+    and every buyer without bonuses — goes straight to checkout exactly as
+    before.
+    """
+    if not callback_data.provider.is_payable:
+        await _refuse_unpayable(callback, callback_data.provider)
+        return
     user = callback.from_user
     try:
         product = await shop.purchases.product_for_checkout(callback_data.product_id)
@@ -57,24 +91,173 @@ async def handle_pay_pressed(
         await callback.answer(CARD_UNAVAILABLE, show_alert=True)
         return
 
+    unpaid = await shop.purchases.pending_checkout(user.id, product.id, callback_data.provider)
+    if unpaid is not None:
+        await _start_checkout(
+            callback,
+            shop,
+            product=product,
+            provider=callback_data.provider,
+            use_bonus=unpaid.bonus_amount > 0,
+        )
+        return
+
+    offer = await _bonus_offer(
+        shop, user_id=user.id, product=product, provider=callback_data.provider
+    )
+    if offer is not None:
+        await callback.answer()
+        await _ask_about_bonuses(
+            callback, product=product, provider=callback_data.provider, offer=offer
+        )
+        return
+
+    await _start_checkout(
+        callback,
+        shop,
+        product=product,
+        provider=callback_data.provider,
+        use_bonus=False,
+    )
+
+
+async def handle_bonus_choice(
+    callback: CallbackQuery,
+    callback_data: BonusChoiceCallback,
+    shop: BotServices,
+) -> None:
+    """The buyer answered "spend your bonuses?" — now issue the invoice."""
+    if not callback_data.provider.is_payable:
+        await _refuse_unpayable(callback, callback_data.provider)
+        return
     try:
-        if callback_data.provider is PaymentProvider.STARS:
-            await shop.checkout.start_stars_checkout(user_id=user.id, product=product)
-            await callback.answer()
-        else:
-            checkout = await shop.checkout.start_crypto_checkout(
+        product = await shop.purchases.product_for_checkout(callback_data.product_id)
+    except (ProductNotFoundError, ProductInactiveError):
+        await callback.answer(CARD_UNAVAILABLE, show_alert=True)
+        return
+
+    await _start_checkout(
+        callback,
+        shop,
+        product=product,
+        provider=callback_data.provider,
+        use_bonus=callback_data.use_bonus,
+    )
+
+
+async def _refuse_unpayable(callback: CallbackQuery, provider: PaymentProvider) -> None:
+    """A button for something that is not a payment rail: refuse, bill nothing.
+
+    No such button is ever shown — an internal grant is not something to pay
+    for — so this is a hand-crafted callback. It must never fall through to an
+    invoice on some other rail.
+    """
+    logger.warning(
+        "checkout_refused_for_unpayable_provider",
+        user_id=callback.from_user.id,
+        provider=provider.value,
+    )
+    await callback.answer(CARD_UNAVAILABLE, show_alert=True)
+
+
+async def _bonus_offer(
+    shop: BotServices,
+    *,
+    user_id: int,
+    product: Product,
+    provider: PaymentProvider,
+) -> BonusOffer | None:
+    """The bonus question worth asking, or ``None`` to skip straight to paying.
+
+    Never raises: a bonus lookup that fails must not stop a sale. The buyer
+    simply is not offered bonuses and pays the ordinary price.
+    """
+    price = product.price_for(provider)
+    if price is None:  # pragma: no cover — the button only exists with a price
+        return None
+    try:
+        offer = await shop.pricing.offer_for(
+            user_id=user_id,
+            base_amount=Decimal(price),
+            currency=provider.currency,
+            stars_per_usdt=product.stars_per_usdt,
+        )
+    except AppError as error:
+        logger.error(  # noqa: TRY400 — bonuses are optional, the sale is not
+            "bonus_offer_unavailable",
+            user_id=user_id,
+            product_id=str(product.id),
+            error=str(error),
+        )
+        return None
+    return offer if offer.available else None
+
+
+async def _ask_about_bonuses(
+    callback: CallbackQuery,
+    *,
+    product: Product,
+    provider: PaymentProvider,
+    offer: BonusOffer,
+) -> None:
+    """Show the arithmetic before anything is charged or held."""
+    priced = offer.quote_with_bonus
+    if priced is None or callback.bot is None:  # pragma: no cover — guarded upstream
+        return
+    await callback.bot.send_message(
+        chat_id=callback.from_user.id,
+        text=bonus_prompt(
+            balance=offer.balance,
+            base_amount=priced.base_amount,
+            bonus_amount=priced.bonus_amount,
+            charged_amount=priced.charged_amount,
+        ),
+        reply_markup=bonus_choice_keyboard(provider=provider, product_id=product.id),
+    )
+
+
+async def _start_checkout(
+    callback: CallbackQuery,
+    shop: BotServices,
+    *,
+    product: Product,
+    provider: PaymentProvider,
+    use_bonus: bool,
+) -> None:
+    """Create the purchase and the invoice. The original payment path."""
+    user = callback.from_user
+    try:
+        if provider is PaymentProvider.STARS:
+            checkout = await shop.checkout.start_stars_checkout(
                 user_id=user.id,
                 product=product,
+                use_bonus=use_bonus,
             )
-            await callback.answer()
-            if callback.bot is not None:
-                await callback.bot.send_message(
-                    chat_id=user.id,
-                    text=CRYPTO_INVOICE_CREATED,
-                    reply_markup=crypto_pay_keyboard(checkout.pay_url),
-                )
+            # Their unpaid invoice was sent again: say so, or the buyer may
+            # expect this press to have changed it.
+            await callback.answer(STARS_INVOICE_RESUMED if checkout.resumed else None)
+        elif provider is PaymentProvider.CRYPTO:
+            await _start_crypto_checkout(callback, shop, product=product, use_bonus=use_bonus)
+        else:  # pragma: no cover — both handlers refuse a non-rail before this
+            # Never "not Stars, so crypto": anything that is not a named rail
+            # is refused here as well as at the button.
+            await _refuse_unpayable(callback, provider)
     except LockBusyError:
         await callback.answer(PAYMENT_IN_PROGRESS, show_alert=False)
+    except InsufficientBonusBalanceError:
+        # The balance moved between the question and the answer. Refusing is
+        # safer than silently charging a price the buyer never agreed to.
+        await callback.answer(BONUS_BALANCE_CHANGED, show_alert=True)
+    except BonusesNotAvailableError:
+        # A bonus is a Star, valued on USDT at the product's own rate. This
+        # product declares no such rate (it is priced in USDT only), so the bot
+        # never offers the choice — reaching here is a hand-crafted callback.
+        logger.warning(
+            "bonus_spend_refused_for_provider",
+            user_id=user.id,
+            provider=provider.value,
+        )
+        await callback.answer(BONUS_NOT_FOR_PRODUCT, show_alert=True)
     except DuplicatePurchaseError:
         # Already paid for: no new invoice, just hand the link over again.
         await callback.answer(ALREADY_PURCHASED, show_alert=True)
@@ -85,8 +268,61 @@ async def handle_pay_pressed(
                 await shop.checkout.redeliver(owned.id)
     except ProviderNotSupportedError:
         await callback.answer(CARD_UNAVAILABLE, show_alert=True)
+    except ConflictError:
+        # The price moved while the provider invoice was being created; the
+        # orphaned invoice expires unpaid and the buyer simply retries.
+        await callback.answer(PAYMENT_UNAVAILABLE, show_alert=True)
     except PaymentGatewayError:
         await callback.answer(PAYMENT_UNAVAILABLE, show_alert=True)
+
+
+async def _start_crypto_checkout(
+    callback: CallbackQuery,
+    shop: BotServices,
+    *,
+    product: Product,
+    use_bonus: bool,
+) -> None:
+    """Send the buyer their one CryptoBot invoice for this product.
+
+    The outcomes only the crypto rail has are answered here; everything shared
+    with Stars propagates to ``_start_checkout``.
+    """
+    user = callback.from_user
+    try:
+        checkout = await shop.checkout.start_crypto_checkout(
+            user_id=user.id,
+            product=product,
+            use_bonus=use_bonus,
+        )
+    except PaymentAlreadyReceivedError:
+        # The earlier invoice is paid; reconciliation or the webhook delivers it.
+        await callback.answer(PAYMENT_IN_PROGRESS, show_alert=True)
+        return
+    except CheckoutAlreadyPendingError:
+        # A parallel press recorded its invoice first; pressing again hands
+        # that one back.
+        await callback.answer(PAYMENT_IN_PROGRESS, show_alert=False)
+        return
+    except PendingInvoiceExistsError as error:
+        # No second invoice, and the old one is not passed off as matching:
+        # the buyer sees what it is for and chooses.
+        await callback.answer()
+        if callback.bot is not None:
+            await callback.bot.send_message(
+                chat_id=user.id,
+                text=pending_invoice_exists(amount=error.amount, currency=error.currency),
+                reply_markup=crypto_pay_keyboard(error.pay_url) if error.pay_url else None,
+            )
+        return
+
+    await callback.answer()
+    if callback.bot is not None:
+        await callback.bot.send_message(
+            chat_id=user.id,
+            text=CRYPTO_INVOICE_RESUMED if checkout.resumed else CRYPTO_INVOICE_CREATED,
+            reply_markup=crypto_pay_keyboard(checkout.pay_url),
+        )
 
 
 async def handle_pre_checkout(query: PreCheckoutQuery, shop: BotServices) -> None:
@@ -101,6 +337,15 @@ async def handle_pre_checkout(query: PreCheckoutQuery, shop: BotServices) -> Non
     if purchase.status in (PurchaseStatus.PAID, PurchaseStatus.DELIVERED):
         await query.answer(ok=False, error_message=PRE_CHECKOUT_ALREADY_OWNED)
         return
+    if purchase.status is PurchaseStatus.EXPIRED and purchase.was_reduced:
+        # A Telegram invoice never expires, but what made this one cheaper was
+        # settled when it did: the bonus reservation and the loyalty discount
+        # were given back — possibly to a newer invoice already — and the
+        # referral discount may have been spent since. Paying it now would use
+        # them twice. An expired invoice at the list price is still accepted.
+        logger.info("reduced_stars_invoice_refused", purchase_id=str(purchase.id))
+        await query.answer(ok=False, error_message=PRE_CHECKOUT_UNKNOWN)
+        return
 
     try:
         await shop.purchases.product_for_checkout(purchase.product_id)
@@ -110,6 +355,13 @@ async def handle_pre_checkout(query: PreCheckoutQuery, shop: BotServices) -> Non
 
     if await shop.purchases.find_owned(purchase.user_id, purchase.product_id) is not None:
         await query.answer(ok=False, error_message=PRE_CHECKOUT_ALREADY_OWNED)
+        return
+
+    if await shop.purchases.is_superseded(purchase):
+        # Only the newest ⭐ invoice of a product can be paid: a later press
+        # replaced this one and released whatever it held.
+        logger.info("superseded_stars_invoice_refused", purchase_id=str(purchase.id))
+        await query.answer(ok=False, error_message=PRE_CHECKOUT_UNKNOWN)
         return
 
     await query.answer(ok=True)
@@ -164,6 +416,7 @@ def build_router() -> Router:
     """A fresh router; aiogram allows one parent dispatcher per router instance."""
     router = Router(name="payments")
     router.callback_query(PayCallback.filter())(handle_pay_pressed)
+    router.callback_query(BonusChoiceCallback.filter())(handle_bonus_choice)
     router.pre_checkout_query()(handle_pre_checkout)
     router.message(F.successful_payment)(handle_successful_payment)
     router.message(F.refunded_payment)(handle_refunded_payment)

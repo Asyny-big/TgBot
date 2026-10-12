@@ -9,11 +9,12 @@ runtime failure in the middle of a payment flow.
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Final, Literal, Self
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -28,6 +29,9 @@ _BOT_TOKEN_RE: Final = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{30,}$")
 MIN_WEBHOOK_SECRET_LENGTH: Final = 16
 MIN_JWT_SECRET_LENGTH: Final = 32
 MIN_ADMIN_PASSWORD_LENGTH: Final = 12
+
+MAX_PERCENT: Final = 100
+_PREVIEW_URL_SCHEMES: Final = frozenset({"http", "https"})
 
 CRYPTOBOT_MAINNET_API: Final = "https://pay.crypt.bot/api"
 CRYPTOBOT_TESTNET_API: Final = "https://testnet-pay.crypt.bot/api"
@@ -282,6 +286,355 @@ class DeliverySettings(BaseSettings):
         return self
 
 
+class ReferralSettings(BaseSettings):
+    """Referral programme and internal bonus balance.
+
+    Percentages and the bonus exchange rate are *configuration*, not business
+    data: they are read once on start-up and validated there, exactly like the
+    delivery retry policy. Changing them is a deploy, which is deliberate —
+    a mistyped reward percent must not be applicable through a web form while
+    money is moving.
+
+    ``enabled`` is a master switch. With it off the shop behaves exactly as it
+    did before the feature existed: no referral payload is recognised, no
+    discount is applied and no bonus is accrued or spent.
+
+    There is deliberately no exchange rate here. One bonus is one Telegram
+    Star, and a purchase settled in USDT is converted using the *product's own*
+    two prices at the moment of the sale — see ``Product.stars_per_usdt``. That
+    keeps the shop free of any external price feed, and of any fixed rate that
+    would silently go stale.
+    """
+
+    model_config = _settings_config("REFERRAL_")
+
+    enabled: bool = True
+    discount_percent: int = Field(default=10, ge=0, le=MAX_PERCENT)
+    """Discount on the invited buyer's first qualifying purchase."""
+
+    reward_percent: int = Field(default=15, ge=0, le=MAX_PERCENT)
+    """Share of every settled purchase credited to the inviter as bonuses."""
+
+    max_bonus_payment_percent: int = Field(default=50, ge=0, le=MAX_PERCENT)
+    """Largest share of a Stars price that bonuses may cover.
+
+    One bonus is one Telegram Star, so this is read directly off the price: a
+    1000 Star product accepts at most 500 bonuses at 50%.
+    """
+
+    preview_directory_url: str | None = None
+    """Single hop channel listing the current preview channels.
+
+    The bot stores no channel ids, no channel usernames and no list: it only
+    knows this one URL, so the catalogue of preview channels is managed outside
+    the bot and changing it never requires a redeploy. Empty hides the button.
+    """
+
+    @field_validator("preview_directory_url", mode="before")
+    @classmethod
+    def _blank_url_means_none(cls, value: object) -> object:
+        """Treat ``REFERRAL_PREVIEW_DIRECTORY_URL=`` in an env file as unset."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("preview_directory_url")
+    @classmethod
+    def _validate_preview_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        candidate = value.strip()
+        parsed = urlparse(candidate)
+        if parsed.scheme not in _PREVIEW_URL_SCHEMES or not parsed.netloc:
+            msg = "preview_directory_url must be an absolute http(s) URL"
+            raise ValueError(msg)
+        return candidate
+
+    @model_validator(mode="after")
+    def _keep_a_price_payable(self) -> Self:
+        """A purchase must always leave something to charge.
+
+        A 100% discount would produce a zero invoice, which the purchases table
+        rejects (``amount > 0``) — better to refuse the configuration on
+        start-up than to fail inside a checkout.
+        """
+        if self.discount_percent >= MAX_PERCENT:
+            msg = "discount_percent must leave something to charge (< 100)"
+            raise ValueError(msg)
+        if self.max_bonus_payment_percent >= MAX_PERCENT:
+            msg = "max_bonus_payment_percent must leave something to charge (< 100)"
+            raise ValueError(msg)
+        return self
+
+
+class LoyaltySettings(BaseSettings):
+    """Loyalty programme ("🏆 My progress") master switch.
+
+    Off by default. While it is off the shop behaves exactly as it did before
+    the programme existed: no progress screen, no loyalty price on a card, no
+    reward is recorded and no free pack is handed over. The schema the
+    programme needs is in place either way; turning it on is a deploy.
+    """
+
+    model_config = _settings_config("LOYALTY_")
+
+    enabled: bool = False
+
+
+def _split_telegram_ids(value: object) -> object:
+    """``"1, 2,3"`` → ``(1, 2, 3)``; anything else is left for pydantic to judge."""
+    if isinstance(value, str):
+        return tuple(int(part) for part in value.replace(" ", "").split(",") if part)
+    return value
+
+
+class DailySettings(BaseSettings):
+    """Daily Content bot: the switch, the people it trusts, and delivery timing.
+
+    Off by default. While it is off no item is planned or sent and no buyer is
+    activated; the schema is in place either way.
+    """
+
+    model_config = _settings_config("DAILY_")
+
+    enabled: bool = False
+
+    beta_user_ids: Annotated[tuple[int, ...], NoDecode] = ()
+    """When set, only these buyers are activated and served: a staged launch."""
+
+    admin_telegram_ids: Annotated[tuple[int, ...], NoDecode] = ()
+    """The owner's Telegram accounts: they add content and receive alerts."""
+
+    recovery_hours: int = Field(default=12, ge=1, le=22)
+    """How long after the window's centre a missed delivery may still go out."""
+
+    lease_seconds: int = Field(default=300, ge=60, le=3600)
+    """How long one send attempt owns its delivery before it counts as dead.
+
+    Must comfortably exceed the Telegram request timeout: a lease that runs
+    out while the request is still in flight lets a second worker send the
+    same item again.
+    """
+
+    max_attempts: int = Field(default=10, ge=1, le=50)
+    """Send attempts per delivery before the day is given up."""
+
+    retry_initial_seconds: int = Field(default=30, ge=1, le=3600)
+    """First pause after a temporary failure; it doubles with every attempt."""
+
+    retry_max_seconds: int = Field(default=900, ge=1, le=7200)
+    """Longest pause between two attempts (Telegram's ``retry_after`` may exceed it)."""
+
+    no_content_recheck_seconds: int = Field(default=900, ge=60, le=86400)
+    """How often a buyer with nothing left is looked at again during their day."""
+
+    protect_content: bool = True
+    """Send items with Telegram's ``protect_content``: no forwarding or saving."""
+
+    activation_grace_seconds: int = Field(default=120, ge=0, le=3600)
+    """How long the worker leaves a fresh activation delivery to the bot.
+
+    The bot sends the welcome first and the first item right after it; a
+    worker taking the delivery in between would put the item before the
+    welcome. Once this passes, the worker takes it over — a bot that died
+    halfway never costs the buyer their first item.
+    """
+
+    # The Daily worker (``python -m app.daily_worker``): its loops, its pace,
+    # and the owner's alerts it raises.
+    planner_interval_seconds: int = Field(default=60, ge=10, le=600)
+    """How often the planner opens the deliveries whose window has opened."""
+
+    sender_idle_seconds: int = Field(default=5, ge=1, le=60)
+    """How long the sender waits when nothing is due."""
+
+    send_batch_size: int = Field(default=10, ge=1, le=100)
+    """Deliveries claimed and sent per pass."""
+
+    send_rate_per_second: float = Field(default=20.0, gt=0, le=30)
+    """Messages per second, all kinds together, for one worker process."""
+
+    expire_interval_seconds: int = Field(default=300, ge=30, le=3600)
+    """How often deliveries past their deadline are closed."""
+
+    evaluate_interval_seconds: int = Field(default=600, ge=60, le=3600)
+    """How often the stock, the failures and the token are evaluated."""
+
+    low_stock_days: float = Field(default=3.0, gt=0, le=60)
+    """The owner is warned when the worst-off tenth of buyers has this many days left."""
+
+    alert_cooldown_hours: int = Field(default=24, ge=1, le=168)
+    """A firing alert reminds the owner at most this often."""
+
+    worker_host: str = "0.0.0.0"  # noqa: S104 — the container's health check only
+    worker_port: int = Field(default=8083, ge=1, le=65535)
+
+    # The watchdog: the worker writes a heartbeat to Redis while its loops
+    # turn; the Daily bot's process — another container — reads it and tells
+    # the owner when the worker goes silent, and when it is back.
+    heartbeat_interval_seconds: int = Field(default=15, ge=5, le=300)
+    """How often the worker writes its heartbeat."""
+
+    watchdog_interval_seconds: int = Field(default=60, ge=10, le=600)
+    """How often the Daily bot's process looks at the worker's heartbeat."""
+
+    watchdog_stale_seconds: int = Field(default=300, ge=60, le=3600)
+    """Silence after which the worker counts as down."""
+
+    watchdog_cooldown_minutes: int = Field(default=60, ge=5, le=1440)
+    """While the worker stays down, the owner is reminded at most this often."""
+
+    # The Daily Content bot is its own Telegram bot, run by its own process.
+    # Every field below is optional here, so the API and the shop bot start
+    # without them; the Daily bot process checks them before it starts.
+    bot_token: SecretStr | None = None
+    bot_username: str | None = None
+    use_webhook: bool = True
+    webhook_base_url: str | None = None
+    webhook_path: str = "/webhook/daily"
+    webhook_secret: SecretStr | None = None
+    bot_host: str = "0.0.0.0"  # noqa: S104 — only reachable through nginx
+    bot_port: int = Field(default=8082, ge=1, le=65535)
+    drop_pending_updates: bool = True
+
+    @field_validator("beta_user_ids", "admin_telegram_ids", mode="before")
+    @classmethod
+    def _split_ids(cls, value: object) -> object:
+        return _split_telegram_ids(value)
+
+    @field_validator("bot_token", "webhook_secret", "webhook_base_url", mode="before")
+    @classmethod
+    def _empty_is_unset(cls, value: object) -> object:
+        """``DAILY_BOT_TOKEN=`` left empty means "not configured", never a bad value.
+
+        Every process loads these settings — the shop bot and the API too — so
+        an empty line copied from .env.example must not stop them from starting.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("bot_token")
+    @classmethod
+    def _validate_bot_token(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not _BOT_TOKEN_RE.match(value.get_secret_value()):
+            msg = "bot_token does not look like a Telegram bot token (<id>:<secret>)"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("bot_username", mode="before")
+    @classmethod
+    def _normalise_bot_username(cls, value: object) -> object:
+        if not isinstance(value, str) or not value.strip():
+            return None if isinstance(value, str) else value
+        candidate = value.strip().removeprefix("@")
+        if not _BOT_USERNAME_RE.match(candidate):
+            msg = "bot_username must be a valid Telegram username without '@'"
+            raise ValueError(msg)
+        return candidate
+
+    @field_validator("webhook_path")
+    @classmethod
+    def _validate_webhook_path(cls, value: str) -> str:
+        if not value.startswith("/"):
+            msg = "webhook_path must start with '/'"
+            raise ValueError(msg)
+        return value.rstrip("/")
+
+    @field_validator("webhook_secret")
+    @classmethod
+    def _validate_webhook_secret(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and len(value.get_secret_value()) < MIN_WEBHOOK_SECRET_LENGTH:
+            msg = f"webhook_secret must be at least {MIN_WEBHOOK_SECRET_LENGTH} characters long"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("beta_user_ids", "admin_telegram_ids")
+    @classmethod
+    def _positive_ids(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        if any(telegram_id <= 0 for telegram_id in value):
+            msg = "Telegram ids must be positive integers"
+            raise ValueError(msg)
+        return value
+
+    @property
+    def recovery(self) -> timedelta:
+        """``recovery_hours`` as a duration."""
+        return timedelta(hours=self.recovery_hours)
+
+    @property
+    def lease(self) -> timedelta:
+        """``lease_seconds`` as a duration."""
+        return timedelta(seconds=self.lease_seconds)
+
+    @property
+    def retry_initial(self) -> timedelta:
+        """``retry_initial_seconds`` as a duration."""
+        return timedelta(seconds=self.retry_initial_seconds)
+
+    @property
+    def retry_max(self) -> timedelta:
+        """``retry_max_seconds`` as a duration."""
+        return timedelta(seconds=self.retry_max_seconds)
+
+    @property
+    def no_content_recheck(self) -> timedelta:
+        """``no_content_recheck_seconds`` as a duration."""
+        return timedelta(seconds=self.no_content_recheck_seconds)
+
+    @property
+    def activation_grace(self) -> timedelta:
+        """``activation_grace_seconds`` as a duration."""
+        return timedelta(seconds=self.activation_grace_seconds)
+
+    @property
+    def alert_cooldown(self) -> timedelta:
+        """``alert_cooldown_hours`` as a duration."""
+        return timedelta(hours=self.alert_cooldown_hours)
+
+    @property
+    def watchdog_stale(self) -> timedelta:
+        """``watchdog_stale_seconds`` as a duration."""
+        return timedelta(seconds=self.watchdog_stale_seconds)
+
+    @property
+    def watchdog_cooldown(self) -> timedelta:
+        """``watchdog_cooldown_minutes`` as a duration."""
+        return timedelta(minutes=self.watchdog_cooldown_minutes)
+
+    @model_validator(mode="after")
+    def _heartbeat_beats_well_within_the_watchdog(self) -> Self:
+        """Three missed heartbeats at least before the worker counts as down."""
+        if self.watchdog_stale_seconds < 3 * self.heartbeat_interval_seconds:
+            msg = (
+                "watchdog_stale_seconds must be at least three heartbeat intervals "
+                "(3 * heartbeat_interval_seconds)"
+            )
+            raise ValueError(msg)
+        return self
+
+    def bot_problems(self) -> tuple[str, ...]:
+        """What keeps the Daily bot process from starting; empty when nothing does."""
+        problems: list[str] = []
+        if self.bot_token is None:
+            problems.append("DAILY_BOT_TOKEN is not set")
+        if not self.bot_username:
+            problems.append("DAILY_BOT_USERNAME is not set")
+        if self.use_webhook and not self.webhook_base_url:
+            problems.append("DAILY_WEBHOOK_BASE_URL is required in webhook mode")
+        if self.use_webhook and self.webhook_secret is None:
+            problems.append("DAILY_WEBHOOK_SECRET is required in webhook mode")
+        return tuple(problems)
+
+    @property
+    def webhook_url(self) -> str:
+        """Absolute URL registered in Telegram via ``setWebhook``."""
+        if self.webhook_base_url is None:
+            message = "webhook_url is only available when webhook mode is configured"
+            raise RuntimeError(message)
+        return f"{self.webhook_base_url.rstrip('/')}{self.webhook_path}"
+
+
 class SecuritySettings(BaseSettings):
     """Admin authentication and browser-facing security policy."""
 
@@ -340,6 +693,9 @@ class Settings(BaseModel):
     cryptobot: CryptoBotSettings
     bot: BotSettings
     delivery: DeliverySettings
+    referral: ReferralSettings
+    loyalty: LoyaltySettings
+    daily: DailySettings
     security: SecuritySettings
 
 
@@ -359,5 +715,8 @@ def get_settings() -> Settings:
         cryptobot=_load(CryptoBotSettings),
         bot=_load(BotSettings),
         delivery=_load(DeliverySettings),
+        referral=_load(ReferralSettings),
+        loyalty=_load(LoyaltySettings),
+        daily=_load(DailySettings),
         security=_load(SecuritySettings),
     )

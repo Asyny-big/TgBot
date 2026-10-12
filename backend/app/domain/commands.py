@@ -3,16 +3,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from app.core.exceptions import InvalidPriceError
 from app.domain.patch import UNSET, Maybe, is_set
 
 if TYPE_CHECKING:
-    from decimal import Decimal
+    from datetime import datetime
     from uuid import UUID
 
-    from app.domain.enums import Currency, PaymentProvider, PurchaseStatus
+    from app.domain.daily import DeliveryWindow
+    from app.domain.enums import (
+        BonusTransactionType,
+        Currency,
+        DailyContentKind,
+        DailyDeliveryTrigger,
+        DailyOutboxChannel,
+        DailyOutboxKind,
+        DailyRequestEventKind,
+        DailyRequestStatus,
+        PaymentProvider,
+        PurchaseStatus,
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -78,7 +91,12 @@ class UserDraft:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PurchaseDraft:
-    """A purchase in the ``pending`` state, created together with the invoice."""
+    """A purchase in the ``pending`` state, created together with the invoice.
+
+    ``amount`` is what the buyer is billed. The three optional fields record how
+    that number was reached, so a later price change cannot rewrite the history
+    of an old sale.
+    """
 
     user_id: int
     product_id: UUID
@@ -87,3 +105,119 @@ class PurchaseDraft:
     currency: Currency
     external_id: str
     status: PurchaseStatus | None = None
+    base_amount: Decimal | None = None
+    discount_amount: Decimal = Decimal(0)
+    bonus_amount: Decimal = Decimal(0)
+    loyalty_amount: Decimal = Decimal(0)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ReferralDraft:
+    """A new, permanent attribution of one buyer to their inviter."""
+
+    referrer_user_id: int
+    referred_user_id: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BonusTransactionDraft:
+    """One entry to append to the bonus ledger.
+
+    ``purchase_id`` together with ``type`` is unique in the database, which is
+    what makes a replayed payment notification unable to credit a reward twice.
+    """
+
+    user_id: int
+    amount: int
+    type: BonusTransactionType
+    referral_id: UUID | None = None
+    purchase_id: UUID | None = None
+    stars_per_usdt: Decimal | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailyContentDraft:
+    """A Telegram message the owner added to the Daily Content library.
+
+    Identifiers only — the file itself stays in Telegram and is sent again by
+    its ``file_id``. ``source_chat_id``/``source_message_id`` name the owner's
+    message, so the same update delivered twice adds one item.
+    """
+
+    kind: DailyContentKind
+    source_chat_id: int
+    source_message_id: int
+    added_by: int
+    body: str | None = None
+    """The message text, or the media caption."""
+
+    entities: tuple[dict[str, object], ...] = ()
+    file_id: str | None = None
+    file_unique_id: str | None = None
+    file_size: int | None = None
+    file_name: str | None = None
+    mime_type: str | None = None
+    duration: int | None = None
+    width: int | None = None
+    height: int | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailyDeliveryDraft:
+    """One buyer's delivery for one day, as it is planned."""
+
+    user_id: int
+    trigger: DailyDeliveryTrigger
+    window: DeliveryWindow
+    first_attempt_at: datetime
+    """When the first attempt is due — inside ``window``."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailyOutboxDraft:
+    """A message to queue in the Daily outbox."""
+
+    kind: DailyOutboxKind
+    channel: DailyOutboxChannel
+    chat_id: int
+    body: str
+    """The message, HTML: escape anything interpolated before queueing it."""
+
+    dedupe_key: str
+    """The same key is queued once: the message's identity, not its text."""
+
+    first_attempt_at: datetime
+    deadline_at: datetime
+    """After this the message is dropped unsent."""
+
+    content_id: int | None = None
+    """Send this library item instead of ``body``, which is then a label."""
+
+    request_item_id: int | None = None
+    """Send this request attachment instead of ``body``, which is then a label."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailyRequestDraft:
+    """A buyer's content request, as it is submitted from the bot."""
+
+    user_id: int
+    client_draft_id: UUID
+    purchases_at_submit: int
+    items: tuple[DailyContentDraft, ...]
+    """The draft's messages, in order — parsed exactly like the owner's."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DailyRequestEventDraft:
+    """A line to add to a content request's history."""
+
+    request_id: int
+    kind: DailyRequestEventKind
+    actor: str
+    from_status: DailyRequestStatus | None = None
+    to_status: DailyRequestStatus | None = None
+    body: str | None = None
+    outbox_message_id: int | None = None
+    idempotency_key: str | None = None
+    """Written once: a second event under the same key is not added."""

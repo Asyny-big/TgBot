@@ -279,6 +279,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/referrals/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Referral programme configuration
+         * @description The numbers this process is running with.
+         *
+         *     Changing them is a deploy, not a form: they are validated once on start-up,
+         *     which is what keeps a bad value from surfacing in the middle of a checkout.
+         */
+        get: operations["read_settings_api_v1_referrals_settings_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/referrals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List referral relationships
+         * @description Relationships newest first. ``search`` matches either party.
+         */
+        get: operations["list_referrals_api_v1_referrals_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/stats/overview": {
         parameters: {
             query?: never;
@@ -293,6 +336,340 @@ export interface paths {
         get: operations["overview_api_v1_stats_overview_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/daily/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Daily Content overview
+         * @description Subscriptions, today's deliveries (Moscow date), requests, the outbox,
+         *     the library and the alerts.
+         */
+        get: operations["overview_api_v1_daily_overview_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/daily/alerts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The owner's alerts
+         * @description Every alert evaluated so far, firing or resolved.
+         */
+        get: operations["alerts_api_v1_daily_alerts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/daily/library": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the library
+         * @description Items, newest first. ``search`` matches the number, the text or caption,
+         *     or the file name.
+         */
+        get: operations["list_library_api_v1_daily_library_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/daily/library/{content_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read a library item
+         * @description Raises: DailyContentNotFoundError.
+         */
+        get: operations["get_library_item_api_v1_daily_library__content_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/daily/library/{content_id}/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Disable, enable, archive or restore a library item
+         * @description Exactly what the owner's buttons do, under the same lock; attributed
+         *     ``admin:<username>:<action>``. Repeating an action changes nothing.
+         *
+         *     Raises:
+         *         DailyContentNotFoundError: no such item.
+         *         DailyLibraryActionError: the item's status does not allow the action.
+         *         DailyContentDuplicateError: restoring it would duplicate a live item.
+         */
+        post: operations["change_library_status_api_v1_daily_library__content_id__status_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/daily/library/{content_id}/send-to-me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Have the Daily bot send a library item to the owner
+         * @description Queued for every owner account; the worker sends it as buyers get it.
+         *
+         *     Raises:
+         *         DailyNoOwnerError: no owner account is configured.
+         *         DailyContentNotFoundError: no such item.
+         */
+        post: operations["send_library_item_api_v1_daily_library__content_id__send_to_me_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/daily/subscribers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List subscribers
+         * @description Subscribers, latest first contact first. ``search``: Telegram id or username.
+         */
+        get: operations["list_subscribers_api_v1_daily_subscribers_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/daily/subscribers/{user_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read a subscriber
+         * @description With the latest deliveries and requests. Raises: DailySubscriberNotFoundError.
+         */
+        get: operations["get_subscriber_api_v1_daily_subscribers__user_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/daily/subscribers/{user_id}/requests-ban": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Ban a buyer from content requests, or lift the ban
+         * @description Idempotent. A ban stops the buyer's next step and every send.
+         *
+         *     Raises:
+         *         DailySubscriberNotFoundError: the buyer never wrote to the Daily bot.
+         */
+        put: operations["set_requests_ban_api_v1_daily_subscribers__user_id__requests_ban_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/daily/deliveries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List deliveries
+         * @description Deliveries, latest date first; ``date`` is a Moscow date.
+         */
+        get: operations["list_deliveries_api_v1_daily_deliveries_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/daily/deliveries/{delivery_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read a delivery
+         * @description With its attempts and its item. Raises: DailyDeliveryNotFoundError.
+         */
+        get: operations["get_delivery_api_v1_daily_deliveries__delivery_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/daily/requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List content requests
+         * @description Requests, newest first.
+         */
+        get: operations["list_requests_api_v1_daily_requests_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/daily/requests/{request_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read a content request
+         * @description Its messages, history and answers. Raises: DailyRequestNotFoundError.
+         */
+        get: operations["get_request_api_v1_daily_requests__request_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Change a content request's status or note
+         * @description Applied only to the ``version`` it names.
+         *
+         *     Raises:
+         *         DailyRequestNotFoundError: no such request.
+         *         DailyRequestVersionConflictError: 409 — it changed since; ``details``
+         *             carry ``current_version``. Reload, then decide again.
+         */
+        patch: operations["update_request_api_v1_daily_requests__request_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/daily/requests/{request_id}/replies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Answer the buyer through the Daily bot
+         * @description Queued in the outbox, once per ``idempotency_key``: a retry with the same
+         *     key returns the same answer (``200``, ``created: false``).
+         *
+         *     Raises:
+         *         DailyRequestNotFoundError: no such request.
+         *         DailyIdempotencyKeyReusedError: 409 — the key came with another text.
+         *         DailyReplyTooLongError: the formatted answer exceeds one message.
+         */
+        post: operations["reply_api_v1_daily_requests__request_id__replies_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/daily/requests/{request_id}/items/{item_id}/send-to-me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Have the Daily bot send a request's attachment to the owner
+         * @description Queued for every owner account.
+         *
+         *     Raises:
+         *         DailyNoOwnerError: no owner account is configured.
+         *         DailyRequestNotFoundError: no such request, or no such message in it.
+         */
+        post: operations["send_request_item_api_v1_daily_requests__request_id__items__item_id__send_to_me_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -331,6 +708,648 @@ export interface components {
          * @enum {string}
          */
         Currency: "XTR" | "USDT";
+        /**
+         * DailyAlertKey
+         * @description The owner's alerts — one state each, never a stream of messages.
+         * @enum {string}
+         */
+        DailyAlertKey: "low_stock" | "content_exhausted" | "delivery_failures" | "daily_token_unauthorized";
+        /**
+         * DailyAlertResponse
+         * @description One of the owner's alerts.
+         */
+        DailyAlertResponse: {
+            key: components["schemas"]["DailyAlertKey"];
+            state: components["schemas"]["DailyAlertState"];
+            /** Notifications */
+            notifications: number;
+            /** Value */
+            value: {
+                [key: string]: unknown;
+            };
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Fired At */
+            fired_at: string | null;
+            /** Notified At */
+            notified_at: string | null;
+            /** Resolved At */
+            resolved_at: string | null;
+        };
+        /**
+         * DailyAlertState
+         * @description Whether an alert's condition holds right now.
+         * @enum {string}
+         */
+        DailyAlertState: "ok" | "firing";
+        /**
+         * DailyAttemptOutcome
+         * @description How one send attempt ended.
+         *
+         *     ``SENT`` — Telegram accepted the message.
+         *     ``TRANSIENT`` — a temporary failure (network, 5xx, flood control): retried.
+         *     ``PERMANENT`` — Telegram refused for a reason a retry cannot fix.
+         *     ``BLOCKED`` — the buyer blocked the bot or deleted their account.
+         *     ``CONTENT_INVALID`` — Telegram no longer accepts the item's file.
+         *     ``LEASE_LOST`` — the attempt finished after its lease had been taken over;
+         *         its result was not applied to the delivery.
+         *     ``CRASHED`` — found unfinished when its lease ran out: the process died
+         *         mid-send. Telegram may or may not have accepted the message.
+         * @enum {string}
+         */
+        DailyAttemptOutcome: "sent" | "transient" | "permanent" | "blocked" | "content_invalid" | "lease_lost" | "crashed";
+        /**
+         * DailyBuyerResponse
+         * @description How the shop knows a buyer.
+         */
+        DailyBuyerResponse: {
+            /** User Id */
+            user_id: number;
+            /** Username */
+            username: string | null;
+            /** First Name */
+            first_name: string | null;
+        };
+        /**
+         * DailyContentKind
+         * @description The kinds of Telegram message the library can hold and send again.
+         * @enum {string}
+         */
+        DailyContentKind: "text" | "photo" | "video" | "animation" | "document" | "audio" | "voice" | "video_note";
+        /**
+         * DailyContentResponse
+         * @description A library item, as the panel shows it — never its file.
+         */
+        DailyContentResponse: {
+            /** Id */
+            id: number;
+            status: components["schemas"]["DailyContentStatus"];
+            kind: components["schemas"]["DailyContentKind"];
+            /** Body */
+            body: string | null;
+            /** File Name */
+            file_name: string | null;
+            /** Mime Type */
+            mime_type: string | null;
+            /** File Size */
+            file_size: number | null;
+            /** Duration */
+            duration: number | null;
+            /** Width */
+            width: number | null;
+            /** Height */
+            height: number | null;
+            /** Added By */
+            added_by: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Status Changed At
+             * Format: date-time
+             */
+            status_changed_at: string;
+            /** Status Reason */
+            status_reason: string | null;
+            /** Sent Count */
+            sent_count: number | null;
+        };
+        /**
+         * DailyContentStatus
+         * @description Whether an item of the library takes part in deliveries.
+         *
+         *     ``ACTIVE`` — offered to everybody who has not received it yet.
+         *     ``DISABLED`` — taken out of deliveries for now, by the owner or because
+         *         Telegram no longer accepts its file; can be enabled again.
+         *     ``ARCHIVED`` — the soft delete: hidden from deliveries and from the
+         *         default library view. Rows are never physically deleted — they are
+         *         part of every buyer's delivery history.
+         * @enum {string}
+         */
+        DailyContentStatus: "active" | "disabled" | "archived";
+        /** DailyDeliveryAttemptResponse */
+        DailyDeliveryAttemptResponse: {
+            /** Id */
+            id: number;
+            /** Attempt No */
+            attempt_no: number;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /** Finished At */
+            finished_at: string | null;
+            /** Content Id */
+            content_id: number | null;
+            outcome: components["schemas"]["DailyAttemptOutcome"] | null;
+            /** Error */
+            error: string | null;
+            /** Retry After Seconds */
+            retry_after_seconds: number | null;
+            /** Telegram Message Id */
+            telegram_message_id: number | null;
+        };
+        /** DailyDeliveryCountsResponse */
+        DailyDeliveryCountsResponse: {
+            /** Pending */
+            pending: number;
+            /** Sending */
+            sending: number;
+            /** Sent */
+            sent: number;
+            /** No Content */
+            no_content: number;
+            /** Failed */
+            failed: number;
+            /** Expired */
+            expired: number;
+            /** Cancelled */
+            cancelled: number;
+        };
+        /** DailyDeliveryDetailResponse */
+        DailyDeliveryDetailResponse: {
+            delivery: components["schemas"]["DailyDeliveryResponse"];
+            /** Attempts */
+            attempts: components["schemas"]["DailyDeliveryAttemptResponse"][];
+            item: components["schemas"]["DailyContentResponse"] | null;
+        };
+        /**
+         * DailyDeliveryResponse
+         * @description One buyer's delivery for one day.
+         */
+        DailyDeliveryResponse: {
+            /** Id */
+            id: number;
+            /** User Id */
+            user_id: number;
+            buyer: components["schemas"]["DailyBuyerResponse"] | null;
+            /**
+             * Delivery Date
+             * Format: date
+             */
+            delivery_date: string;
+            trigger: components["schemas"]["DailyDeliveryTrigger"];
+            status: components["schemas"]["DailyDeliveryStatus"];
+            /**
+             * Scheduled For
+             * Format: date-time
+             */
+            scheduled_for: string;
+            /**
+             * Window Opens At
+             * Format: date-time
+             */
+            window_opens_at: string;
+            /**
+             * Window Closes At
+             * Format: date-time
+             */
+            window_closes_at: string;
+            /**
+             * Deadline At
+             * Format: date-time
+             */
+            deadline_at: string;
+            /**
+             * Next Attempt At
+             * Format: date-time
+             */
+            next_attempt_at: string;
+            /** Attempts */
+            attempts: number;
+            /** Content Id */
+            content_id: number | null;
+            /** Sent At */
+            sent_at: string | null;
+            last_outcome: components["schemas"]["DailyAttemptOutcome"] | null;
+            /** Last Error */
+            last_error: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * DailyDeliveryStatus
+         * @description Lifecycle of one buyer's delivery for one day.
+         *
+         *     ``PENDING`` — waiting for its first or next attempt.
+         *     ``SENDING`` — an attempt holds the row under a lease right now. A lease
+         *         that runs out means the attempt died: the row is taken over and the
+         *         *same* item is sent again.
+         *     ``SENT`` — Telegram accepted the item. Final.
+         *     ``NO_CONTENT`` — nothing left that the buyer has not received; looked at
+         *         again until the day's deadline, in case new items arrive.
+         *     ``FAILED`` — Telegram refused for good (the bot is blocked, the chat is
+         *         gone, the item is unusable). Final.
+         *     ``EXPIRED`` — the day's deadline passed without a successful send. Final.
+         *     ``CANCELLED`` — the buyer paused or lost access before it was sent. Final.
+         * @enum {string}
+         */
+        DailyDeliveryStatus: "pending" | "sending" | "sent" | "no_content" | "failed" | "expired" | "cancelled";
+        /**
+         * DailyDeliveryTrigger
+         * @description Why a delivery exists.
+         *
+         *     ``ACTIVATION`` — the item sent right away when the buyer first used the bot;
+         *         it is that day's delivery.
+         *     ``SCHEDULE`` — the daily item, due in the buyer's personal window.
+         * @enum {string}
+         */
+        DailyDeliveryTrigger: "activation" | "schedule";
+        /** DailyKindCountResponse */
+        DailyKindCountResponse: {
+            kind: components["schemas"]["DailyContentKind"];
+            /** Count */
+            count: number;
+        };
+        /**
+         * DailyLibraryActionName
+         * @description What the panel can do to a library item. Nothing deletes.
+         * @enum {string}
+         */
+        DailyLibraryActionName: "disable" | "enable" | "archive" | "restore";
+        /** DailyLibraryCountsResponse */
+        DailyLibraryCountsResponse: {
+            /** Active */
+            active: number;
+            /** Disabled */
+            disabled: number;
+            /** Archived */
+            archived: number;
+            /** Total */
+            total: number;
+            /** Active By Kind */
+            active_by_kind: components["schemas"]["DailyKindCountResponse"][];
+        };
+        /** DailyLibraryStatusRequest */
+        DailyLibraryStatusRequest: {
+            action: components["schemas"]["DailyLibraryActionName"];
+        };
+        /** DailyOutboxCountsResponse */
+        DailyOutboxCountsResponse: {
+            /** Open */
+            open: number;
+            /** Failed Recently */
+            failed_recently: number;
+        };
+        /**
+         * DailyOutboxKind
+         * @description What a message of the Daily outbox is: not a library item.
+         *
+         *     Stored as plain text, not a database enum, so later kinds need no
+         *     migration.
+         * @enum {string}
+         */
+        DailyOutboxKind: "alert" | "exhausted_notice" | "request_reply" | "library_preview" | "request_attachment";
+        /**
+         * DailyOutboxMessageResponse
+         * @description A message of the Daily outbox: where it stands.
+         */
+        DailyOutboxMessageResponse: {
+            /** Id */
+            id: number;
+            kind: components["schemas"]["DailyOutboxKind"];
+            status: components["schemas"]["DailyOutboxStatus"];
+            /** Chat Id */
+            chat_id: number;
+            /** Attempts */
+            attempts: number;
+            /**
+             * Next Attempt At
+             * Format: date-time
+             */
+            next_attempt_at: string;
+            /**
+             * Deadline At
+             * Format: date-time
+             */
+            deadline_at: string;
+            /** Sent At */
+            sent_at: string | null;
+            /** Last Error */
+            last_error: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        };
+        /**
+         * DailyOutboxStatus
+         * @description Lifecycle of one outbox message.
+         *
+         *     ``PENDING`` — waiting for its first or next attempt.
+         *     ``SENDING`` — an attempt holds it under a lease; a lease that runs out
+         *         means the attempt died, and the message is sent again (at least once).
+         *     ``SENT`` — Telegram accepted it. Final.
+         *     ``FAILED`` — Telegram refused it for good, or the attempts ran out. Final.
+         *     ``EXPIRED`` — its deadline passed unsent: news that late is no news. Final.
+         * @enum {string}
+         */
+        DailyOutboxStatus: "pending" | "sending" | "sent" | "failed" | "expired";
+        /**
+         * DailyOverviewResponse
+         * @description The Daily Content overview page.
+         */
+        DailyOverviewResponse: {
+            /** Enabled */
+            enabled: boolean;
+            /**
+             * Today
+             * Format: date
+             */
+            today: string;
+            subscriptions: components["schemas"]["DailySubscriptionCountsResponse"];
+            deliveries_today: components["schemas"]["DailyDeliveryCountsResponse"];
+            requests: components["schemas"]["DailyRequestCountsResponse"];
+            outbox: components["schemas"]["DailyOutboxCountsResponse"];
+            library: components["schemas"]["DailyLibraryCountsResponse"];
+            /** Alerts */
+            alerts: components["schemas"]["DailyAlertResponse"][];
+        };
+        /**
+         * DailyReplyRequest
+         * @description An answer to the buyer; the key makes a retry the same answer.
+         */
+        DailyReplyRequest: {
+            /** Text */
+            text: string;
+            /**
+             * Idempotency Key
+             * Format: uuid
+             */
+            idempotency_key: string;
+        };
+        /**
+         * DailyReplyResponse
+         * @description One answer of the owner's and its fate.
+         */
+        DailyReplyResponse: {
+            state: components["schemas"]["DailyReplyState"];
+            event: components["schemas"]["DailyRequestEventResponse"];
+            message: components["schemas"]["DailyOutboxMessageResponse"] | null;
+            outcome: components["schemas"]["DailyRequestEventResponse"] | null;
+        };
+        /** DailyReplyResultResponse */
+        DailyReplyResultResponse: {
+            reply: components["schemas"]["DailyReplyResponse"];
+            /** Created */
+            created: boolean;
+        };
+        /**
+         * DailyReplyState
+         * @enum {string}
+         */
+        DailyReplyState: "queued" | "sent" | "failed";
+        /** DailyRequestCountsResponse */
+        DailyRequestCountsResponse: {
+            /** New */
+            new: number;
+            /** In Review */
+            in_review: number;
+            /** Completed */
+            completed: number;
+            /** Rejected */
+            rejected: number;
+        };
+        /** DailyRequestDetailResponse */
+        DailyRequestDetailResponse: {
+            request: components["schemas"]["DailyRequestResponse"];
+            /** Items */
+            items: components["schemas"]["DailyRequestItemResponse"][];
+            /** Events */
+            events: components["schemas"]["DailyRequestEventResponse"][];
+            /** Replies */
+            replies: components["schemas"]["DailyReplyResponse"][];
+            /** Banned */
+            banned: boolean;
+        };
+        /**
+         * DailyRequestEventKind
+         * @description What happened to a content request — its audit trail.
+         *
+         *     Stored as plain text, not a database enum, so later kinds need no
+         *     migration.
+         * @enum {string}
+         */
+        DailyRequestEventKind: "submitted" | "status_changed" | "note_changed" | "reply_queued" | "reply_sent" | "reply_failed";
+        /**
+         * DailyRequestEventResponse
+         * @description A line of the request's history.
+         */
+        DailyRequestEventResponse: {
+            /** Id */
+            id: number;
+            kind: components["schemas"]["DailyRequestEventKind"];
+            /** Actor */
+            actor: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            from_status: components["schemas"]["DailyRequestStatus"] | null;
+            to_status: components["schemas"]["DailyRequestStatus"] | null;
+            /** Body */
+            body: string | null;
+            /** Outbox Message Id */
+            outbox_message_id: number | null;
+        };
+        /**
+         * DailyRequestItemResponse
+         * @description One message of a request — its text, or what its file is.
+         */
+        DailyRequestItemResponse: {
+            /** Id */
+            id: number;
+            /** Position */
+            position: number;
+            kind: components["schemas"]["DailyContentKind"];
+            /** Body */
+            body: string | null;
+            /** File Name */
+            file_name: string | null;
+            /** Mime Type */
+            mime_type: string | null;
+            /** File Size */
+            file_size: number | null;
+            /** Duration */
+            duration: number | null;
+            /** Has File */
+            has_file: boolean;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        };
+        /**
+         * DailyRequestPatchRequest
+         * @description A change of status or note, as read at ``version``.
+         *
+         *     Omitting a field leaves it alone; ``admin_note: null`` (or empty) clears the
+         *     note. ``status`` cannot be null.
+         */
+        DailyRequestPatchRequest: {
+            /** Version */
+            version: number;
+            status?: components["schemas"]["DailyRequestStatus"] | null;
+            /** Admin Note */
+            admin_note?: string | null;
+        };
+        /**
+         * DailyRequestResponse
+         * @description A content request; ``version`` is what a change must name.
+         */
+        DailyRequestResponse: {
+            /** Id */
+            id: number;
+            /** User Id */
+            user_id: number;
+            buyer: components["schemas"]["DailyBuyerResponse"] | null;
+            status: components["schemas"]["DailyRequestStatus"];
+            /** Version */
+            version: number;
+            /** Purchases At Submit */
+            purchases_at_submit: number;
+            /** Admin Note */
+            admin_note: string | null;
+            /** Item Count */
+            item_count: number | null;
+            /** Reply Count */
+            reply_count: number | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Closed At */
+            closed_at: string | null;
+        };
+        /**
+         * DailyRequestStatus
+         * @description Where a buyer's content request stands with the owner.
+         * @enum {string}
+         */
+        DailyRequestStatus: "new" | "in_review" | "completed" | "rejected";
+        /** DailyRequestsBanRequest */
+        DailyRequestsBanRequest: {
+            /** Banned */
+            banned: boolean;
+        };
+        /**
+         * DailySendToOwnerRequest
+         * @description "Send it to me": the key makes a repeated click — or a retry — one send.
+         */
+        DailySendToOwnerRequest: {
+            /**
+             * Idempotency Key
+             * Format: uuid
+             */
+            idempotency_key: string;
+        };
+        /**
+         * DailySendToOwnerResponse
+         * @description The messages taking the item to the owner's accounts.
+         */
+        DailySendToOwnerResponse: {
+            /** Messages */
+            messages: components["schemas"]["DailyOutboxMessageResponse"][];
+            /** Created */
+            created: boolean;
+        };
+        /** DailySubscriberDetailResponse */
+        DailySubscriberDetailResponse: {
+            subscriber: components["schemas"]["DailySubscriberResponse"];
+            /** Deliveries */
+            deliveries: components["schemas"]["DailyDeliveryResponse"][];
+            /** Requests */
+            requests: components["schemas"]["DailyRequestResponse"][];
+        };
+        /**
+         * DailySubscriberResponse
+         * @description A buyer's Daily subscription and its numbers.
+         */
+        DailySubscriberResponse: {
+            /** User Id */
+            user_id: number;
+            /** Username */
+            username: string | null;
+            /** First Name */
+            first_name: string | null;
+            status: components["schemas"]["DailySubscriptionStatus"];
+            /**
+             * First Interaction At
+             * Format: date-time
+             */
+            first_interaction_at: string;
+            /** Activated At */
+            activated_at: string | null;
+            /** Anchor Minute */
+            anchor_minute: number | null;
+            /** Paused At */
+            paused_at: string | null;
+            /** Blocked At */
+            blocked_at: string | null;
+            /** Requests Banned At */
+            requests_banned_at: string | null;
+            /** Requests Banned By */
+            requests_banned_by: string | null;
+            /** Completed Purchases */
+            completed_purchases: number;
+            /** Received */
+            received: number;
+            /** Last Received At */
+            last_received_at: string | null;
+            /** Open Requests */
+            open_requests: number;
+            /** Can Suggest */
+            can_suggest: boolean;
+        };
+        /** DailySubscriptionCountsResponse */
+        DailySubscriptionCountsResponse: {
+            /** Inactive */
+            inactive: number;
+            /** Active */
+            active: number;
+            /** Paused */
+            paused: number;
+            /** Blocked */
+            blocked: number;
+            /** Banned */
+            banned: number;
+        };
+        /**
+         * DailySubscriptionStatus
+         * @description Where a buyer stands with the Daily Content bot.
+         *
+         *     ``INACTIVE`` — wrote to the bot, but had no access then: nothing is sent.
+         *     ``ACTIVE`` — activated; receives one item a day in their own window.
+         *     ``PAUSED`` — activated, but asked not to receive anything for now.
+         *
+         *     A blocked bot is not a status of its own: it is a fact recorded next to
+         *     whichever of these applies, and unblocking simply clears it.
+         * @enum {string}
+         */
+        DailySubscriptionStatus: "inactive" | "active" | "paused";
         /**
          * DeliveryAttemptResponse
          * @description Outcome of the delivery attempt triggered by an admin action.
@@ -410,6 +1429,30 @@ export interface components {
             /** Has More */
             has_more: boolean;
         };
+        /** PageResponse[DailyContentResponse] */
+        PageResponse_DailyContentResponse_: {
+            /** Items */
+            items: components["schemas"]["DailyContentResponse"][];
+            meta: components["schemas"]["PageMeta"];
+        };
+        /** PageResponse[DailyDeliveryResponse] */
+        PageResponse_DailyDeliveryResponse_: {
+            /** Items */
+            items: components["schemas"]["DailyDeliveryResponse"][];
+            meta: components["schemas"]["PageMeta"];
+        };
+        /** PageResponse[DailyRequestResponse] */
+        PageResponse_DailyRequestResponse_: {
+            /** Items */
+            items: components["schemas"]["DailyRequestResponse"][];
+            meta: components["schemas"]["PageMeta"];
+        };
+        /** PageResponse[DailySubscriberResponse] */
+        PageResponse_DailySubscriberResponse_: {
+            /** Items */
+            items: components["schemas"]["DailySubscriberResponse"][];
+            meta: components["schemas"]["PageMeta"];
+        };
         /** PageResponse[ProductResponse] */
         PageResponse_ProductResponse_: {
             /** Items */
@@ -422,12 +1465,25 @@ export interface components {
             items: components["schemas"]["PurchaseRecordResponse"][];
             meta: components["schemas"]["PageMeta"];
         };
+        /** PageResponse[ReferralRecordResponse] */
+        PageResponse_ReferralRecordResponse_: {
+            /** Items */
+            items: components["schemas"]["ReferralRecordResponse"][];
+            meta: components["schemas"]["PageMeta"];
+        };
         /**
          * PaymentProvider
-         * @description Payment rails available on a product card.
+         * @description How a purchase came to be paid for.
+         *
+         *     ``STARS`` and ``CRYPTO`` are payment rails: they appear as buttons on a
+         *     product card and bill the buyer through a provider. ``INTERNAL`` is not a
+         *     rail. It marks a pack the shop hands over itself (a loyalty free pack): no
+         *     invoice, no provider, no money. Code that takes a payment must therefore
+         *     accept only ``PAYABLE_PROVIDERS`` and refuse anything else explicitly — never
+         *     treat "not Stars" as "crypto".
          * @enum {string}
          */
-        PaymentProvider: "stars" | "crypto";
+        PaymentProvider: "stars" | "crypto" | "internal";
         /**
          * PaymentState
          * @description Provider view of an invoice, used when reconciling lost notifications.
@@ -615,6 +1671,60 @@ export interface components {
             components: {
                 [key: string]: "ok" | "fail";
             };
+        };
+        /**
+         * ReferralPartyResponse
+         * @description One side of a referral relationship, with their bonus balance.
+         */
+        ReferralPartyResponse: {
+            buyer: components["schemas"]["BuyerResponse"];
+            /** Bonus Balance */
+            bonus_balance: number;
+        };
+        /**
+         * ReferralRecordResponse
+         * @description One relationship: who invited whom, and what it has produced.
+         */
+        ReferralRecordResponse: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            referrer: components["schemas"]["ReferralPartyResponse"];
+            referred: components["schemas"]["ReferralPartyResponse"];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Discount Used At */
+            discount_used_at: string | null;
+            /** Discount Purchase Id */
+            discount_purchase_id: string | null;
+            /** Referred Purchase Count */
+            referred_purchase_count: number;
+            /** Reward Total */
+            reward_total: number;
+        };
+        /**
+         * ReferralSettingsResponse
+         * @description The referral programme's configured numbers, as the shop is running them.
+         *
+         *     No exchange rate: one bonus is one Telegram Star, and a USDT sale is
+         *     converted using the product's own two prices at the moment of the sale.
+         */
+        ReferralSettingsResponse: {
+            /** Enabled */
+            enabled: boolean;
+            /** Discount Percent */
+            discount_percent: number;
+            /** Reward Percent */
+            reward_percent: number;
+            /** Max Bonus Payment Percent */
+            max_bonus_payment_percent: number;
+            /** Preview Directory Url */
+            preview_directory_url: string | null;
         };
         /**
          * RefreshRequest
@@ -1147,6 +2257,59 @@ export interface operations {
             };
         };
     };
+    read_settings_api_v1_referrals_settings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReferralSettingsResponse"];
+                };
+            };
+        };
+    };
+    list_referrals_api_v1_referrals_get: {
+        parameters: {
+            query?: {
+                search?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PageResponse_ReferralRecordResponse_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     overview_api_v1_stats_overview_get: {
         parameters: {
             query?: never;
@@ -1163,6 +2326,521 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OverviewResponse"];
+                };
+            };
+        };
+    };
+    overview_api_v1_daily_overview_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailyOverviewResponse"];
+                };
+            };
+        };
+    };
+    alerts_api_v1_daily_alerts_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailyAlertResponse"][];
+                };
+            };
+        };
+    };
+    list_library_api_v1_daily_library_get: {
+        parameters: {
+            query?: {
+                status?: components["schemas"]["DailyContentStatus"] | null;
+                kind?: components["schemas"]["DailyContentKind"] | null;
+                search?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PageResponse_DailyContentResponse_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_library_item_api_v1_daily_library__content_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                content_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailyContentResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    change_library_status_api_v1_daily_library__content_id__status_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                content_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DailyLibraryStatusRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailyContentResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    send_library_item_api_v1_daily_library__content_id__send_to_me_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                content_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DailySendToOwnerRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailySendToOwnerResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_subscribers_api_v1_daily_subscribers_get: {
+        parameters: {
+            query?: {
+                status?: components["schemas"]["DailySubscriptionStatus"] | null;
+                blocked?: boolean | null;
+                banned?: boolean | null;
+                search?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PageResponse_DailySubscriberResponse_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_subscriber_api_v1_daily_subscribers__user_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailySubscriberDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_requests_ban_api_v1_daily_subscribers__user_id__requests_ban_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DailyRequestsBanRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailySubscriberDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_deliveries_api_v1_daily_deliveries_get: {
+        parameters: {
+            query?: {
+                status?: components["schemas"]["DailyDeliveryStatus"] | null;
+                user_id?: number | null;
+                date?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PageResponse_DailyDeliveryResponse_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_delivery_api_v1_daily_deliveries__delivery_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                delivery_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailyDeliveryDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_requests_api_v1_daily_requests_get: {
+        parameters: {
+            query?: {
+                status?: components["schemas"]["DailyRequestStatus"] | null;
+                user_id?: number | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PageResponse_DailyRequestResponse_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_request_api_v1_daily_requests__request_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                request_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailyRequestDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_request_api_v1_daily_requests__request_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                request_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DailyRequestPatchRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailyRequestDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reply_api_v1_daily_requests__request_id__replies_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                request_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DailyReplyRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailyReplyResultResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    send_request_item_api_v1_daily_requests__request_id__items__item_id__send_to_me_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                request_id: number;
+                item_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DailySendToOwnerRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailySendToOwnerResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

@@ -29,11 +29,19 @@ from app.core.container import Container
 from app.infrastructure.cache.rate_limit import RedisRateLimiter
 from app.infrastructure.db.uow import SqlAlchemyUnitOfWorkFactory
 from app.infrastructure.payments.cryptobot import CryptoBotClient
-from app.infrastructure.telegram.factory import create_delivery_gateway, create_stars_sender
+from app.infrastructure.telegram.factory import (
+    create_delivery_gateway,
+    create_loyalty_notifier,
+    create_stars_sender,
+)
 from app.main import create_app
 from app.services.auth import AuthService
+from app.services.bonuses import BonusService
+from app.services.loyalty import LoyaltyService
+from app.services.pricing import PricingService
 from app.services.products import ProductService
 from app.services.purchases import PurchaseService
+from app.services.referrals import ReferralService
 from app.services.stats import StatsService
 from tests.bot_harness import RecordingBot
 from tests.settings_factory import build_settings
@@ -137,6 +145,13 @@ def build_api_harness(
     )
     from app.infrastructure.cache.revocation import RedisTokenRevocationStore  # noqa: PLC0415
 
+    bonuses = BonusService(
+        uow_factory=uow_factory,
+        locks=locks,
+        settings=settings.referral,
+    )
+    loyalty = LoyaltyService(uow_factory=uow_factory, settings=settings.loyalty)
+    pricing = PricingService(uow_factory=uow_factory, bonuses=bonuses, loyalty=loyalty)
     container = Container(
         settings=settings,
         uow_factory=uow_factory,
@@ -144,7 +159,20 @@ def build_api_harness(
         rate_limiter=RedisRateLimiter(redis),
         crypto_payments=crypto_client,
         products=ProductService(uow_factory=uow_factory, telegram=settings.telegram),
-        purchases=PurchaseService(uow_factory=uow_factory, locks=locks),
+        purchases=PurchaseService(
+            uow_factory=uow_factory,
+            locks=locks,
+            pricing=pricing,
+            loyalty=loyalty,
+        ),
+        referrals=ReferralService(
+            uow_factory=uow_factory,
+            telegram=settings.telegram,
+            settings=settings.referral,
+        ),
+        bonuses=bonuses,
+        pricing=pricing,
+        loyalty=loyalty,
         stats=StatsService(uow_factory=uow_factory),
         auth=AuthService(settings.security, RedisTokenRevocationStore(redis)),
     )
@@ -152,6 +180,7 @@ def build_api_harness(
     checkout = container.build_checkout(
         delivery_gateway=create_delivery_gateway(bot),
         stars=create_stars_sender(bot),
+        milestone_notifier=create_loyalty_notifier(bot),
     )
 
     app = create_app(settings)

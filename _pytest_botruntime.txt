@@ -1,0 +1,10 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.11, pytest-8.4.2, pluggy-1.6.0 -- D:\ProjectGIT\TgBot\backend\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\ProjectGIT\TgBot\backend
+configfile: pyproject.toml
+plugins: anyio-4.14.2, asyncio-1.4.0, cov-7.1.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=function, asyncio_default_test_loop_scope=function
+collecting ... collected 0 items
+
+============================ no tests ran in 0.01s ============================

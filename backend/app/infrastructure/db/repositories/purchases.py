@@ -9,11 +9,16 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func, or_, select, union, update
+from sqlalchemy import and_, func, or_, select, union, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
-from app.core.exceptions import ConflictError, DuplicatePurchaseError, PurchaseNotFoundError
+from app.core.exceptions import (
+    CheckoutAlreadyPendingError,
+    ConflictError,
+    DuplicatePurchaseError,
+    PurchaseNotFoundError,
+)
 from app.domain.enums import ACCESS_GRANTING_STATUSES, PurchaseStatus
 from app.domain.pagination import Page
 from app.infrastructure.db.errors import LIKE_ESCAPE, like_pattern, violated_constraint
@@ -21,6 +26,7 @@ from app.infrastructure.db.mappers import to_purchase, to_record
 from app.infrastructure.db.models import ProductModel, PurchaseModel, UserModel
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from uuid import UUID
 
     from sqlalchemy import ColumnElement, Select
@@ -47,6 +53,10 @@ class SqlAlchemyPurchaseRepository:
             provider=draft.provider,
             status=draft.status or PurchaseStatus.PENDING,
             amount=draft.amount,
+            base_amount=draft.base_amount,
+            discount_amount=draft.discount_amount,
+            bonus_amount=draft.bonus_amount,
+            loyalty_amount=draft.loyalty_amount,
             currency=draft.currency,
             external_id=draft.external_id,
         )
@@ -63,6 +73,17 @@ class SqlAlchemyPurchaseRepository:
 
     async def get(self, purchase_id: UUID) -> Purchase | None:
         model = await self._session.get(PurchaseModel, purchase_id)
+        return to_purchase(model) if model is not None else None
+
+    async def get_for_update(self, purchase_id: UUID) -> Purchase | None:
+        statement = (
+            select(PurchaseModel)
+            .where(PurchaseModel.id == purchase_id)
+            .with_for_update()
+            # Whatever this session read before, the locked row is the truth.
+            .execution_options(populate_existing=True)
+        )
+        model = (await self._session.execute(statement)).scalar_one_or_none()
         return to_purchase(model) if model is not None else None
 
     async def get_by_external_id(
@@ -92,6 +113,45 @@ class SqlAlchemyPurchaseRepository:
         )
         model = (await self._session.execute(statement)).scalar_one_or_none()
         return to_purchase(model) if model is not None else None
+
+    async def has_history(
+        self,
+        user_id: int,
+        *,
+        statuses: Sequence[PurchaseStatus],
+    ) -> bool:
+        """Whether this buyer has ever reached one of these statuses.
+
+        ``EXISTS`` rather than a count: the answer is a boolean and the query
+        can stop at the first matching row.
+        """
+        statement = select(
+            select(PurchaseModel.id)
+            .where(
+                PurchaseModel.user_id == user_id,
+                PurchaseModel.status.in_(statuses),
+            )
+            .exists()
+        )
+        return bool(await self._session.scalar(statement))
+
+    async def has_pending_discount(self, user_id: int) -> bool:
+        """Whether this buyer already has a pending purchase with a discount.
+
+        ``EXISTS`` with only ``PENDING``: once a purchase moves beyond pending
+        the discount is either burned (paid) or the invoice expired, neither of
+        which should block a future checkout.
+        """
+        statement = select(
+            select(PurchaseModel.id)
+            .where(
+                PurchaseModel.user_id == user_id,
+                PurchaseModel.status == PurchaseStatus.PENDING,
+                PurchaseModel.discount_amount > 0,
+            )
+            .exists()
+        )
+        return bool(await self._session.scalar(statement))
 
     async def mark_paid(
         self,
@@ -175,6 +235,57 @@ class SqlAlchemyPurchaseRepository:
         expired = (await self._session.execute(statement)).scalars().all()
         return len(expired)
 
+    async def expire(self, purchase_id: UUID) -> Purchase:
+        model = await self._lock(purchase_id)
+        if model.status is not PurchaseStatus.PENDING:
+            # Paid, delivered or already expired in the meantime: not ours to touch.
+            return to_purchase(model)
+        model.status = PurchaseStatus.EXPIRED
+        await self._session.flush()
+        await self._session.refresh(model)
+        return to_purchase(model)
+
+    async def pending_checkouts(
+        self,
+        user_id: int,
+        product_id: UUID,
+        provider: PaymentProvider,
+    ) -> tuple[Purchase, ...]:
+        statement = (
+            select(PurchaseModel)
+            .where(
+                PurchaseModel.user_id == user_id,
+                PurchaseModel.product_id == product_id,
+                PurchaseModel.provider == provider,
+                PurchaseModel.status == PurchaseStatus.PENDING,
+            )
+            .order_by(PurchaseModel.created_at.desc(), PurchaseModel.id.desc())
+        )
+        models = (await self._session.execute(statement)).scalars().all()
+        return tuple(to_purchase(model) for model in models)
+
+    async def has_later_checkout(self, purchase: Purchase) -> bool:
+        # Later in the order ``pending_checkouts`` lists them — created_at, then
+        # id — so "the newest" means the same to both, even for rows written in
+        # one transaction.
+        statement = select(
+            select(PurchaseModel.id)
+            .where(
+                PurchaseModel.user_id == purchase.user_id,
+                PurchaseModel.product_id == purchase.product_id,
+                PurchaseModel.provider == purchase.provider,
+                or_(
+                    PurchaseModel.created_at > purchase.created_at,
+                    and_(
+                        PurchaseModel.created_at == purchase.created_at,
+                        PurchaseModel.id > purchase.id,
+                    ),
+                ),
+            )
+            .exists()
+        )
+        return bool(await self._session.scalar(statement))
+
     async def list_pending(
         self,
         provider: PaymentProvider,
@@ -236,6 +347,8 @@ class SqlAlchemyPurchaseRepository:
         constraint = violated_constraint(error)
         if constraint == "uq_purchases_user_product_paid":
             return DuplicatePurchaseError()
+        if constraint == "uq_purchases_user_product_pending_crypto":
+            return CheckoutAlreadyPendingError(constraint=constraint, external_id=external_id)
         if constraint == "uq_purchases_provider_external_id":
             message = "This invoice is already recorded"
             return ConflictError(message, constraint=constraint, external_id=external_id)

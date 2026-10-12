@@ -132,6 +132,98 @@ expect_min_length POSTGRES_PASSWORD 16
 expect_present REDIS_PASSWORD
 expect_min_length REDIS_PASSWORD 16
 
+printf '\nReferral programme\n'
+referral_enabled="$(env_value REFERRAL_ENABLED)"
+if [[ "${referral_enabled}" == "false" ]]; then
+    pass "REFERRAL_ENABLED=false — the referral and bonus feature is switched off"
+else
+    pass "REFERRAL_ENABLED=${referral_enabled:-true} (default true)"
+    preview_url="$(env_value REFERRAL_PREVIEW_DIRECTORY_URL)"
+    if [[ -z "${preview_url}" ]]; then
+        flag "REFERRAL_PREVIEW_DIRECTORY_URL is empty — invited users will not see a preview button"
+    elif [[ "${preview_url}" != https://* ]]; then
+        fail "REFERRAL_PREVIEW_DIRECTORY_URL must be an absolute https:// URL"
+    else
+        pass "REFERRAL_PREVIEW_DIRECTORY_URL is set"
+    fi
+    # A 100% discount or bonus share would produce a zero invoice, which the
+    # purchases table rejects. The application refuses to start on these, so
+    # catching them here saves a failed deploy.
+    for key in REFERRAL_DISCOUNT_PERCENT REFERRAL_MAX_BONUS_PAYMENT_PERCENT; do
+        value="$(env_value "${key}")"
+        if [[ -n "${value}" ]] && [[ "${value}" =~ ^[0-9]+$ ]] && (( value >= 100 )); then
+            fail "${key}=${value} would leave nothing to charge; it must be below 100"
+        fi
+    done
+    reward="$(env_value REFERRAL_REWARD_PERCENT)"
+    if [[ -n "${reward}" ]] && [[ "${reward}" =~ ^[0-9]+$ ]] && (( reward > 100 )); then
+        fail "REFERRAL_REWARD_PERCENT=${reward} is above 100"
+    fi
+    # Removed with the "1 bonus = 1 Star" model: a USDT sale is now converted
+    # using the product's own two prices, so a configured rate is meaningless.
+    if [[ -n "$(env_value REFERRAL_BONUS_UNITS_PER_USDT)" ]]; then
+        flag "REFERRAL_BONUS_UNITS_PER_USDT is no longer used and can be deleted from .env"
+    fi
+fi
+
+printf '\nDaily Content\n'
+# Optional: the daily-bot and daily-worker containers run only when the `daily`
+# Compose profile is on. Their webhook path and ports are pinned in
+# docker-compose.prod.yml, so only what .env decides is checked here.
+daily_enabled="$(env_value DAILY_ENABLED)"
+profiles="$(env_value COMPOSE_PROFILES)"
+if [[ ",${profiles// /}," != *",daily,"* ]]; then
+    if [[ "${daily_enabled}" == "true" ]]; then
+        fail "DAILY_ENABLED=true but COMPOSE_PROFILES does not include 'daily' — the Daily containers would not run"
+    else
+        pass "Daily Content is not deployed (COMPOSE_PROFILES has no 'daily')"
+    fi
+else
+    pass "COMPOSE_PROFILES includes 'daily' — daily-bot and daily-worker will run"
+    expect_present DAILY_BOT_TOKEN
+    expect_present DAILY_BOT_USERNAME
+    daily_token="$(env_value DAILY_BOT_TOKEN)"
+    if [[ -n "${daily_token}" && "${daily_token}" == "$(env_value TELEGRAM_BOT_TOKEN)" ]]; then
+        fail "DAILY_BOT_TOKEN must not be the shop bot's TELEGRAM_BOT_TOKEN — the Daily bot's webhook would steal the shop's updates"
+    fi
+    daily_username="$(env_value DAILY_BOT_USERNAME)"
+    shop_username="$(env_value TELEGRAM_BOT_USERNAME)"
+    if [[ -n "${daily_username}" && "${daily_username,,}" == "${shop_username,,}" ]]; then
+        fail "DAILY_BOT_USERNAME must not be the shop bot's TELEGRAM_BOT_USERNAME"
+    fi
+
+    daily_base="$(env_value DAILY_WEBHOOK_BASE_URL)"
+    if [[ -n "${domain}" && "${daily_base}" == "https://${domain}" ]]; then
+        pass "DAILY_WEBHOOK_BASE_URL matches TGSHOP_DOMAIN"
+    else
+        fail "DAILY_WEBHOOK_BASE_URL must be exactly 'https://${domain}' (found '${daily_base}') — Telegram would post to a host nginx does not serve"
+    fi
+    expect_min_length DAILY_WEBHOOK_SECRET 16
+    daily_secret="$(env_value DAILY_WEBHOOK_SECRET)"
+    if [[ -n "${daily_secret}" && "${daily_secret}" == "$(env_value TELEGRAM_WEBHOOK_SECRET)" ]]; then
+        fail "DAILY_WEBHOOK_SECRET must differ from TELEGRAM_WEBHOOK_SECRET"
+    fi
+
+    if [[ -z "$(env_value DAILY_ADMIN_TELEGRAM_IDS)" ]]; then
+        flag "DAILY_ADMIN_TELEGRAM_IDS is empty — nobody can add content, and the alerts and the watchdog reach no one"
+    else
+        pass "DAILY_ADMIN_TELEGRAM_IDS is set"
+    fi
+
+    if [[ "${daily_enabled}" == "true" ]]; then
+        if [[ -n "$(env_value DAILY_BETA_USER_IDS)" ]]; then
+            pass "DAILY_ENABLED=true with DAILY_BETA_USER_IDS — a beta: only those buyers are served"
+        else
+            flag "DAILY_ENABLED=true and DAILY_BETA_USER_IDS is empty — every VIP buyer is served (the full launch)"
+        fi
+        if [[ "$(env_value LOYALTY_ENABLED)" != "true" ]]; then
+            flag "LOYALTY_ENABLED is not true — the shop shows the '👑 Открыть VIP Daily' button only on the loyalty screens"
+        fi
+    else
+        pass "DAILY_ENABLED=${daily_enabled:-false} — deployed and idle; set it to true to launch"
+    fi
+fi
+
 printf '\nSecurity\n'
 expect_min_length SECURITY_JWT_SECRET 32
 expect_not_placeholder SECURITY_JWT_SECRET

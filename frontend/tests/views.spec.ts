@@ -9,8 +9,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type * as ProductStoreModule from "@/stores/products";
 import type * as PurchaseStoreModule from "@/stores/purchases";
+import type * as ReferralStoreModule from "@/stores/referrals";
 
-import { makeOverview, makeProduct, makeRecord } from "./helpers";
+import { makeOverview, makeProduct, makeRecord, makeReferral, makeReferralSettings } from "./helpers";
 
 const productStore = {
   items: [makeProduct()],
@@ -50,6 +51,23 @@ const purchaseStore = {
   resend: vi.fn(),
 };
 
+const referralStore = {
+  items: [makeReferral()],
+  settings: makeReferralSettings(),
+  total: 1,
+  limit: 20,
+  offset: 0,
+  page: 1,
+  pages: 1,
+  loading: false,
+  loaded: true,
+  isEmpty: false,
+  fetchPage: vi.fn(),
+  fetchSettings: vi.fn(),
+  applyFilters: vi.fn(),
+  goTo: vi.fn(),
+};
+
 const statsStore = { overview: makeOverview(), loading: false, load: vi.fn() };
 
 // Only the store hook is replaced; the module's constants (page sizes) stay real.
@@ -61,11 +79,16 @@ vi.mock("@/stores/purchases", async () => {
   const actual = await vi.importActual<typeof PurchaseStoreModule>("@/stores/purchases");
   return { ...actual, usePurchaseStore: () => purchaseStore };
 });
+vi.mock("@/stores/referrals", async () => {
+  const actual = await vi.importActual<typeof ReferralStoreModule>("@/stores/referrals");
+  return { ...actual, useReferralStore: () => referralStore };
+});
 vi.mock("@/stores/stats", () => ({ useStatsStore: () => statsStore }));
 
 const ProductsView = (await import("@/views/ProductsView.vue")).default;
 const PurchasesView = (await import("@/views/PurchasesView.vue")).default;
 const DashboardView = (await import("@/views/DashboardView.vue")).default;
+const ReferralsView = (await import("@/views/ReferralsView.vue")).default;
 
 beforeEach(() => {
   setActivePinia(createPinia());
@@ -180,5 +203,52 @@ describe("DashboardView", () => {
     expect(text).toContain("⭐ 150");
     expect(text).toContain("💎 5 USDT");
     expect(text).toContain("Покупателей");
+  });
+});
+
+
+describe("ReferralsView", () => {
+  it("loads both the relationships and the configuration", () => {
+    mount(ReferralsView);
+
+    expect(referralStore.fetchPage).toHaveBeenCalledOnce();
+    expect(referralStore.fetchSettings).toHaveBeenCalledOnce();
+  });
+
+  it("shows both parties, their balances and what the relationship earned", () => {
+    const wrapper = mount(ReferralsView);
+
+    const row = wrapper.find("tbody tr");
+    expect(row.text()).toContain("@inviter");
+    expect(row.text()).toContain("@invited");
+    expect(row.text()).toContain("135");
+  });
+
+  it("reports the percentages the shop is running with", () => {
+    const wrapper = mount(ReferralsView);
+
+    const text = wrapper.text();
+    expect(text).toContain("10%");
+    expect(text).toContain("15%");
+    expect(text).toContain("50%");
+    // The model, stated where an operator will see it.
+    expect(text).toContain("1 бонус = 1 ⭐");
+  });
+
+  it("offers nothing to edit — the configuration is a deploy, not a form", () => {
+    const wrapper = mount(ReferralsView);
+
+    expect(wrapper.findAll("input[type='number']")).toHaveLength(0);
+    const labels = wrapper.findAll("button").map((button) => button.text());
+    expect(labels).not.toContain("Сохранить");
+  });
+
+  it("says plainly when the programme is switched off", () => {
+    referralStore.settings = makeReferralSettings({ enabled: false });
+
+    const wrapper = mount(ReferralsView);
+
+    expect(wrapper.text()).toContain("выключена");
+    referralStore.settings = makeReferralSettings();
   });
 });

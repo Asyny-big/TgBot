@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from uuid import UUID
 
+    from app.domain.entities import Purchase
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DeliveryMessage:
@@ -47,6 +49,17 @@ class DeliveryResult:
     def succeeded(self) -> bool:
         """Whether the buyer now has the link."""
         return self.status in (DeliveryStatus.SENT, DeliveryStatus.ALREADY_DELIVERED)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RecordedDelivery:
+    """A purchase recorded as delivered, and the loyalty milestone that reached."""
+
+    purchase: Purchase
+    milestone: int | None = None
+    """5, 10 or 15 when this delivery — a genuine ``paid → delivered`` — was
+    the buyer's 5th, 10th or 15th completed purchase. ``None`` otherwise, and
+    always while the loyalty programme is off."""
 
 
 class DeliveryGateway(Protocol):

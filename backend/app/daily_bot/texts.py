@@ -1,0 +1,536 @@
+"""Texts of the Daily Content bot, in one place for review.
+
+The bot sends HTML. The buyer's texts interpolate numbers and times only; the
+owner's cards also show a caption and a status reason, and those are escaped.
+"""
+
+from __future__ import annotations
+
+import math
+from html import escape
+from typing import TYPE_CHECKING, Final
+
+from app.domain.daily import (
+    DAILY_ACCESS_MILESTONE,
+    DAILY_TIMEZONE,
+    MINUTES_PER_DAY,
+    WINDOW_HALF_WIDTH,
+)
+from app.domain.daily_alerts import AlertNotice
+from app.domain.daily_requests import (
+    REQUEST_MAX_ITEMS,
+    REQUEST_OPEN_LIMIT,
+    REQUEST_SUBMIT_LIMIT,
+    REQUEST_TEXT_LIMIT,
+)
+from app.domain.daily_watchdog import WatchdogNotice
+from app.domain.enums import DailyAlertKey, DailyContentKind, DailyContentStatus
+from app.domain.loyalty import CONTENT_SUGGESTION_MILESTONE
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+    from datetime import timedelta
+
+    from app.daily_bot.intake import Refusal
+    from app.domain.daily import LibraryStats, StockSummary
+    from app.domain.entities import DailyContent
+
+STATUS_BUTTON: Final = "📊 Мой статус"
+PAUSE_BUTTON: Final = "⏸ Пауза"
+RESUME_BUTTON: Final = "▶️ Возобновить"
+SUGGEST_BUTTON: Final = "💡 Предложить контент"
+MENU_BUTTONS: Final = frozenset({STATUS_BUTTON, PAUSE_BUTTON, RESUME_BUTTON, SUGGEST_BUTTON})
+"""The buyer's menu: never taken for a message of a draft."""
+
+DISABLED: Final = "Раздел скоро откроется."
+NO_CONTENT: Final = "Материалы скоро появятся — пришлём автоматически."
+PAUSED: Final = "⏸ Пауза включена. Возобновить — кнопкой ниже."
+RESUMED: Final = "▶️ Выдача возобновлена."
+HELP: Final = (
+    "Команды:\n/status — мой статус\n/pause — пауза\n/resume — возобновить\n/help — справка"
+)
+OWNER_HELP: Final = (
+    "👑 Режим владельца.\n"
+    "Пришлите или перешлите сюда фото, видео, GIF, документ, аудио, голосовое "
+    "или кружок — материал сразу попадёт в библиотеку. Текст добавляется "
+    "кнопкой «➕ Добавить».\n\n"
+    "/stats — библиотека в цифрах\n"
+    "/item 121 — карточка материала #121\n"
+    "/help — эта справка"
+)
+TOO_FAST: Final = "Слишком много запросов. Подождите пару секунд."
+
+COMMANDS: Final = (
+    ("start", "Начать"),
+    ("status", "Мой статус"),
+    ("pause", "Пауза"),
+    ("resume", "Возобновить"),
+    ("help", "Справка"),
+)
+"""The bot's command menu: (command, description)."""
+
+OWNER_COMMANDS: Final = (
+    ("stats", "Библиотека в цифрах"),
+    ("item", "Карточка материала: /item 121"),
+    ("help", "Справка"),
+)
+"""The command menu shown in the owner's own chat."""
+
+_HALF_WINDOW_MINUTES: Final = int(WINDOW_HALF_WIDTH.total_seconds()) // 60
+
+
+# --------------------------------------------------------------------------- #
+# The owner's library                                                         #
+# --------------------------------------------------------------------------- #
+
+UNDO_BUTTON: Final = "↩️ Отменить"
+DISABLE_BUTTON: Final = "🚫 Отключить"
+ENABLE_BUTTON: Final = "✅ Включить"
+ARCHIVE_BUTTON: Final = "🗄 В архив"
+RESTORE_BUTTON: Final = "♻️ Восстановить"
+SHOW_BUTTON: Final = "👁 Показать"
+ADD_TEXT_BUTTON: Final = "➕ Добавить"
+SKIP_TEXT_BUTTON: Final = "✖️ Не добавлять"
+
+TEXT_PROMPT: Final = "Добавить этот текст в библиотеку?"
+TEXT_SKIPPED: Final = "Текст не добавлен."
+TEXT_GONE: Final = "Не нашёл исходное сообщение. Отправьте текст ещё раз."
+NOT_SAVED: Final = "❌ Не сохранено (ошибка базы). Перешлите сообщение ещё раз."
+ITEM_USAGE: Final = "Номер материала: /item 121"
+UNCHANGED: Final = "Без изменений."
+NOT_ALLOWED: Final = "Из архива материал возвращается кнопкой «♻️ Восстановить»."
+UNAVAILABLE: Final = "Недоступно."
+
+KIND_LABELS: Final = {
+    DailyContentKind.TEXT: "текст",
+    DailyContentKind.PHOTO: "фото",
+    DailyContentKind.VIDEO: "видео",
+    DailyContentKind.ANIMATION: "GIF",
+    DailyContentKind.DOCUMENT: "документ",
+    DailyContentKind.AUDIO: "аудио",
+    DailyContentKind.VOICE: "голосовое",
+    DailyContentKind.VIDEO_NOTE: "кружок",
+}
+STATUS_LABELS: Final = {
+    DailyContentStatus.ACTIVE: "активен",
+    DailyContentStatus.DISABLED: "отключён",
+    DailyContentStatus.ARCHIVED: "в архиве",
+}
+_REFUSED_LABELS: Final = {
+    "sticker": "стикер",
+    "poll": "опрос",
+    "location": "геопозиция",
+    "venue": "место на карте",
+    "contact": "контакт",
+    "dice": "кубик",
+    "game": "игра",
+    "story": "история",
+    "paid_media": "платное медиа",
+    "live_photo": "живое фото",
+    "checklist": "чек-лист",
+    "invoice": "счёт",
+}
+_SUPPORTED: Final = "текст, фото, видео, GIF, документ, аудио, голосовое, кружок"
+_CAPTION_PREVIEW: Final = 80
+
+
+def duration_label(seconds: int) -> str:
+    """``45`` → ``"0:45"``, ``3725`` → ``"1:02:05"``."""
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+def item_label(item: DailyContent) -> str:
+    """``"#121 · видео 0:45"``."""
+    label = f"#{item.id} · {KIND_LABELS[item.kind]}"
+    return f"{label} {duration_label(item.duration)}" if item.duration else label
+
+
+def added(item: DailyContent, *, active_total: int) -> str:
+    return f"✅ Добавлено {item_label(item)} · активных: {active_total}"
+
+
+def already_added(item: DailyContent) -> str:
+    return f"✅ Уже добавлено {item_label(item)} · {STATUS_LABELS[item.status]}"
+
+
+def duplicate(item: DailyContent) -> str:
+    return f"⚠️ Уже есть {item_label(item)} · {STATUS_LABELS[item.status]}"
+
+
+def archived_twin(item: DailyContent) -> str:
+    return f"🗄 Этот материал уже был в библиотеке: {item_label(item)}, в архиве. Восстановить?"
+
+
+def refused(refusal: Refusal) -> str:
+    if refusal.protected:
+        return "⛔ Это сообщение защищено от пересылки — его нельзя добавить."
+    what = _REFUSED_LABELS.get(refusal.content_type, "этот тип сообщений")
+    return f"⛔ Не поддерживается: {what}. Можно: {_SUPPORTED}."
+
+
+def restore_blocked(twin: DailyContent) -> str:
+    return f"⚠️ Нельзя восстановить: такой же материал уже есть — {item_label(twin)}."
+
+
+def item_not_found(content_id: int) -> str:
+    return f"Материал #{content_id} не найден."
+
+
+def preview_failed(error: str) -> str:
+    """A pop-up answer, not a message: plain text, never HTML."""
+    return f"Не удалось показать: {error}"
+
+
+def card(item: DailyContent) -> str:
+    """The owner's card of one item."""
+    added_at = item.created_at.astimezone(DAILY_TIMEZONE).strftime("%d.%m.%Y %H:%M")
+    lines = [
+        f"<b>{item_label(item)}</b> · {STATUS_LABELS[item.status]}",
+        f"Добавлен: {added_at} МСК",
+    ]
+    if item.body:
+        excerpt = (
+            item.body if len(item.body) <= _CAPTION_PREVIEW else f"{item.body[:_CAPTION_PREVIEW]}…"
+        )
+        lines.append(
+            f"{'Текст' if item.kind is DailyContentKind.TEXT else 'Подпись'}: {escape(excerpt)}"
+        )
+    if item.file_name:
+        lines.append(f"Файл: {escape(item.file_name)}")
+    lines.append(f"Источник: чат {item.source_chat_id}, сообщение {item.source_message_id}")
+    if item.status is not DailyContentStatus.ACTIVE and item.status_reason:
+        lines.append(f"Причина: {escape(item.status_reason)}")
+    return "\n".join(lines)
+
+
+def stats(numbers: LibraryStats, stock: StockSummary | None = None) -> str:
+    """``/stats``: the library, and how long it lasts the buyers."""
+    lines = [
+        "📚 Библиотека",
+        (
+            f"Активных: {numbers.active} · отключено: {numbers.disabled} · "
+            f"в архиве: {numbers.archived}"
+        ),
+    ]
+    kinds = [
+        f"{KIND_LABELS[kind]} {count}"
+        for kind in DailyContentKind
+        if (count := numbers.active_by_kind.get(kind, 0))
+    ]
+    lines.append("Активные по типам: " + (" · ".join(kinds) if kinds else "пока пусто"))
+    if stock is None:
+        lines.append("Подписчиков с выдачей пока нет.")
+    else:
+        lines.append(
+            f"Подписчиков: {stock.active_users} · запас в среднем "
+            f"{_number(stock.average_remaining)} · минимум {stock.minimum_remaining} · "
+            f"посмотрели всё: {stock.exhausted_users}"
+        )
+        lines.append(f"Прогноз запаса: {_days(stock.forecast_days)}")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# The runtime: the buyer's notice and the owner's alerts                      #
+# --------------------------------------------------------------------------- #
+
+EXHAUSTED: Final = "Вы посмотрели все материалы 🎉 Новые придут автоматически, как только появятся."
+"""Sent once per episode to a buyer who has received everything there is."""
+
+_ALERT_RESOLVED: Final = {
+    DailyAlertKey.LOW_STOCK: "✅ Daily: запас материалов снова в норме.",
+    DailyAlertKey.CONTENT_EXHAUSTED: "✅ Daily: новые материалы снова есть у всех подписчиков.",
+    DailyAlertKey.DELIVERY_FAILURES: "✅ Daily: доставка снова идёт нормально.",
+    DailyAlertKey.DAILY_TOKEN_UNAUTHORIZED: "✅ Daily-бот: Telegram снова принимает токен.",
+}
+
+
+def alert(key: DailyAlertKey, notice: AlertNotice, value: Mapping[str, object]) -> str:
+    """The owner's message about one alert: it fired, still fires, or resolved."""
+    if notice is AlertNotice.RESOLVE:
+        return _ALERT_RESOLVED[key]
+    text = _alert_firing(key, value)
+    return f"🔁 Напоминание. {text}" if notice is AlertNotice.REMIND else text
+
+
+def _alert_firing(key: DailyAlertKey, value: Mapping[str, object]) -> str:
+    if key is DailyAlertKey.LOW_STOCK:
+        forecast = _days(value.get("forecast_days"))
+        threshold = _number(value.get("threshold_days"))
+        return (
+            f"⚠️ Daily: материалов мало — у части подписчиков запас примерно на "
+            f"{forecast} (порог — {threshold} дн.). "
+            f"Активных материалов: {value.get('active_items', 0)}. "
+            "Добавьте новые — бот разошлёт их сам."
+        )
+    if key is DailyAlertKey.CONTENT_EXHAUSTED:
+        return (
+            f"⚠️ Daily: подписчиков, посмотревших всё: {value.get('exhausted_users', 0)}. "
+            "Новые материалы придут им автоматически, как только вы их добавите."
+        )
+    if key is DailyAlertKey.DELIVERY_FAILURES:
+        return (
+            f"⚠️ Daily: за сутки не доставлено {value.get('failed', 0)} из "
+            f"{value.get('total', 0)} ({value.get('percent', 0)}%). "
+            "Проверьте бота и материалы."
+        )
+    return (
+        "🚨 Daily-бот: Telegram отклоняет токен (401). Выдача не идёт — проверьте DAILY_BOT_TOKEN."
+    )
+
+
+def _number(value: object) -> str:
+    """``3.0`` → ``"3"``, ``4.25`` → ``"4.2"``."""
+    if isinstance(value, int | float):
+        return f"{value:.1f}".removesuffix(".0")
+    return "—"
+
+
+def _days(value: object) -> str:
+    """Days of stock; ``None`` or infinity — new items arrive faster than they go."""
+    if value is None or (isinstance(value, float) and math.isinf(value)):
+        return "без ограничения"
+    return f"{_number(value)} дн."
+
+
+def album_summary(
+    *,
+    added_ids: Sequence[int],
+    existing_ids: Sequence[int],
+    archived_ids: Sequence[int],
+    refused_count: int,
+    failed_count: int,
+) -> str:
+    """One answer for a whole album."""
+    total = len(added_ids) + len(existing_ids) + len(archived_ids) + refused_count + failed_count
+    lines = [f"📦 Альбом: {total}"]
+    if added_ids:
+        lines.append(f"✅ Добавлено {len(added_ids)}: {_ids(added_ids)}")
+    if existing_ids:
+        lines.append(f"⚠️ Уже было {len(existing_ids)}: {_ids(existing_ids)}")
+    if archived_ids:
+        lines.append(
+            f"🗄 Было в архиве {len(archived_ids)}: {_ids(archived_ids)} — вернуть через /item"
+        )
+    if refused_count:
+        lines.append(f"⛔ Не поддерживается: {refused_count}")
+    if failed_count:
+        lines.append(f"❌ Не сохранено: {failed_count} — перешлите альбом ещё раз")
+    return "\n".join(lines)
+
+
+def _span(duration: timedelta | None) -> str:
+    """``0:04:30`` → ``"4 мин"``, ``2:05:00`` → ``"2 ч 5 мин"``; at least a minute."""
+    minutes = max(1, int(duration.total_seconds() // 60)) if duration is not None else 1
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} ч {minutes} мин" if hours else f"{minutes} мин"
+
+
+def watchdog_notice(
+    notice: WatchdogNotice,
+    *,
+    silence: timedelta,
+    downtime: timedelta | None = None,
+) -> str:
+    """The watchdog's word to the owner: the worker went silent, still is, or is back."""
+    match notice:
+        case WatchdogNotice.DOWN:
+            return (
+                f"🚨 Daily-воркер молчит {_span(silence)}: выдача, ответы покупателям и "
+                "алерты стоят. Проверьте контейнер daily-worker."
+            )
+        case WatchdogNotice.STILL_DOWN:
+            return f"🚨 Daily-воркер всё ещё молчит: {_span(silence)}."
+        case WatchdogNotice.RECOVERED:
+            return f"✅ Daily-воркер снова работает. Перерыв: {_span(downtime)}."
+
+
+def _ids(content_ids: Sequence[int]) -> str:
+    return ", ".join(f"#{content_id}" for content_id in sorted(content_ids))
+
+
+def clock_label(minute_of_day: int) -> str:
+    """``755`` → ``"12:35"``; wraps around midnight."""
+    minute = minute_of_day % MINUTES_PER_DAY
+    return f"{minute // 60:02d}:{minute % 60:02d}"
+
+
+def welcome(anchor_minute: int) -> str:
+    """Sent once, right before the first item."""
+    return (
+        f"👑 Добро пожаловать в VIP Daily! Каждый день около {clock_label(anchor_minute)} (МСК) "
+        "здесь будет новый материал. Вот первый:"
+    )
+
+
+def no_access(completed_purchases: int) -> str:
+    """For a buyer who has not reached the access threshold yet."""
+    return (
+        f"Daily-контент открывается с {DAILY_ACCESS_MILESTONE}-й покупки. "
+        f"Сейчас у вас {completed_purchases} из {DAILY_ACCESS_MILESTONE}."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Content requests                                                            #
+# --------------------------------------------------------------------------- #
+
+SEND_DRAFT_BUTTON: Final = "✅ Отправить"
+CANCEL_DRAFT_BUTTON: Final = "✖️ Отмена"
+
+DRAFT_STARTED: Final = (
+    "💡 Пришлите сюда то, что хотели бы видеть в подборках: текст, фото, видео, GIF, "
+    f"документ, аудио, голосовое или кружок — до {REQUEST_MAX_ITEMS} сообщений.\n"
+    "Когда закончите, нажмите «✅ Отправить». Передумали — «✖️ Отмена» или /cancel."
+)
+DRAFT_TEXT_TOO_LONG: Final = (
+    f"⚠️ Текст длиннее {REQUEST_TEXT_LIMIT} символов — сократите его и пришлите ещё раз."
+)
+DRAFT_FULL: Final = (
+    f"⚠️ В черновике уже {REQUEST_MAX_ITEMS} сообщений — больше не поместится. "
+    "Нажмите «✅ Отправить»."
+)
+DRAFT_EMPTY: Final = "Черновик пуст — пришлите хотя бы одно сообщение."
+DRAFT_CANCELLED: Final = "Черновик удалён."
+DRAFT_EXPIRED: Final = "Черновик устарел. Чтобы начать заново, нажмите «💡 Предложить контент»."
+REQUEST_THANKS: Final = (
+    "Спасибо! Ваше пожелание принято. Мы рассмотрим его при формировании следующих подборок."
+)
+REQUEST_BUSY: Final = "⏳ Уже отправляем…"
+REQUEST_ALREADY_SENT: Final = "Это пожелание уже отправлено ✅"
+REQUEST_BANNED: Final = "Отправка пожеланий для вас недоступна."
+REQUEST_TOO_MANY_OPEN: Final = (
+    f"У вас уже {REQUEST_OPEN_LIMIT} пожелания на рассмотрении. Новое можно будет "
+    "отправить, когда мы ответим на одно из них."
+)
+REQUEST_RATE_LIMITED: Final = (
+    f"За сутки можно отправить не больше {REQUEST_SUBMIT_LIMIT} пожеланий. Попробуйте позже."
+)
+REQUEST_FAILED: Final = "Не получилось отправить. Нажмите «✅ Отправить» ещё раз."
+
+
+def request_not_eligible(completed_purchases: int) -> str:
+    """For a buyer under the suggestion milestone."""
+    return (
+        f"Предлагать контент можно с {CONTENT_SUGGESTION_MILESTONE}-й покупки. "
+        f"Сейчас у вас {completed_purchases} из {CONTENT_SUGGESTION_MILESTONE}."
+    )
+
+
+def draft_added(count: int) -> str:
+    """After a message joined the draft."""
+    return f"Добавлено: {count}/{REQUEST_MAX_ITEMS}"
+
+
+def draft_exists(count: int) -> str:
+    """The suggest button pressed while a draft is open."""
+    return (
+        f"Черновик уже открыт: {count}/{REQUEST_MAX_ITEMS}. "
+        "Пришлите ещё сообщения или нажмите «✅ Отправить»."
+    )
+
+
+def draft_album(*, added: int, count: int, full: int, too_long: int, refused: int) -> str:
+    """One answer for an album sent into a draft."""
+    lines = [f"📦 Из альбома добавлено: {added} · в черновике {count}/{REQUEST_MAX_ITEMS}"]
+    if full:
+        lines.append(f"⚠️ Не поместилось: {full}")
+    if too_long:
+        lines.append(f"⚠️ Слишком длинный текст: {too_long}")
+    if refused:
+        lines.append(f"⛔ Не поддерживается: {refused}. Можно: {_SUPPORTED}.")
+    return "\n".join(lines)
+
+
+def request_reply(request_id: int, text: str) -> str:
+    """The owner's answer, as the buyer receives it. The owner's text is escaped."""
+    return f"💬 Ответ на ваше пожелание #{request_id}:\n\n{escape(text, quote=False)}"
+
+
+def status(*, received: int, available: int, anchor_minute: int, paused: bool) -> str:
+    """The "📊 My status" line."""
+    opens = clock_label(anchor_minute - _HALF_WINDOW_MINUTES)
+    closes = clock_label(anchor_minute + _HALF_WINDOW_MINUTES)
+    state = "на паузе" if paused else "активна"
+    return (
+        f"📊 Получено: {received} · Доступно новых: {available} · "
+        f"Окно: {opens}–{closes} МСК · Статус: {state}"
+    )
+
+
+__all__ = [
+    "ADD_TEXT_BUTTON",
+    "ARCHIVE_BUTTON",
+    "CANCEL_DRAFT_BUTTON",
+    "COMMANDS",
+    "DISABLED",
+    "DISABLE_BUTTON",
+    "DRAFT_CANCELLED",
+    "DRAFT_EMPTY",
+    "DRAFT_EXPIRED",
+    "DRAFT_FULL",
+    "DRAFT_STARTED",
+    "DRAFT_TEXT_TOO_LONG",
+    "ENABLE_BUTTON",
+    "EXHAUSTED",
+    "HELP",
+    "ITEM_USAGE",
+    "KIND_LABELS",
+    "MENU_BUTTONS",
+    "NOT_ALLOWED",
+    "NOT_SAVED",
+    "NO_CONTENT",
+    "OWNER_COMMANDS",
+    "OWNER_HELP",
+    "PAUSED",
+    "PAUSE_BUTTON",
+    "REQUEST_ALREADY_SENT",
+    "REQUEST_BANNED",
+    "REQUEST_BUSY",
+    "REQUEST_FAILED",
+    "REQUEST_RATE_LIMITED",
+    "REQUEST_THANKS",
+    "REQUEST_TOO_MANY_OPEN",
+    "RESTORE_BUTTON",
+    "RESUMED",
+    "RESUME_BUTTON",
+    "SEND_DRAFT_BUTTON",
+    "SHOW_BUTTON",
+    "SKIP_TEXT_BUTTON",
+    "STATUS_BUTTON",
+    "STATUS_LABELS",
+    "SUGGEST_BUTTON",
+    "TEXT_GONE",
+    "TEXT_PROMPT",
+    "TEXT_SKIPPED",
+    "TOO_FAST",
+    "UNAVAILABLE",
+    "UNCHANGED",
+    "UNDO_BUTTON",
+    "added",
+    "album_summary",
+    "alert",
+    "already_added",
+    "archived_twin",
+    "card",
+    "clock_label",
+    "draft_added",
+    "draft_album",
+    "draft_exists",
+    "duplicate",
+    "duration_label",
+    "item_label",
+    "item_not_found",
+    "no_access",
+    "preview_failed",
+    "refused",
+    "request_not_eligible",
+    "request_reply",
+    "restore_blocked",
+    "stats",
+    "status",
+    "watchdog_notice",
+    "welcome",
+]

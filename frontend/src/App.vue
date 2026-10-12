@@ -40,6 +40,45 @@ async function signOut(): Promise<void> {
       >
         Покупки
       </RouterLink>
+      <RouterLink
+        to="/referrals"
+        active-class="active"
+      >
+        Рефералы
+      </RouterLink>
+      <div class="section">
+        Daily
+      </div>
+      <RouterLink
+        to="/daily"
+        active-class="active"
+      >
+        Сводка
+      </RouterLink>
+      <RouterLink
+        to="/daily/requests"
+        active-class="active"
+      >
+        Пожелания
+      </RouterLink>
+      <RouterLink
+        to="/daily/library"
+        active-class="active"
+      >
+        Библиотека
+      </RouterLink>
+      <RouterLink
+        to="/daily/subscribers"
+        active-class="active"
+      >
+        Подписчики
+      </RouterLink>
+      <RouterLink
+        to="/daily/deliveries"
+        active-class="active"
+      >
+        Доставки
+      </RouterLink>
       <div class="spacer" />
       <div class="who">
         {{ auth.username }}

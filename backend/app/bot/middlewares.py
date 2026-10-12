@@ -16,8 +16,13 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from app.domain.locks import LockManager
+    from app.services.bonuses import BonusService
     from app.services.checkout import CheckoutService
+    from app.services.daily_entry import DailyEntry
+    from app.services.loyalty import LoyaltyService
+    from app.services.pricing import PricingService
     from app.services.purchases import PurchaseService
+    from app.services.referrals import ReferralService
 
 logger = get_logger(__name__)
 
@@ -28,9 +33,24 @@ _THROTTLE_KEY_TEMPLATE: Final = "throttle:{user_id}"
 class BotServices:
     """The services a handler is allowed to use."""
 
-    def __init__(self, purchases: PurchaseService, checkout: CheckoutService) -> None:
+    def __init__(  # noqa: PLR0913 — one handle per service a handler may use
+        self,
+        *,
+        purchases: PurchaseService,
+        checkout: CheckoutService,
+        referrals: ReferralService,
+        bonuses: BonusService,
+        loyalty: LoyaltyService,
+        pricing: PricingService,
+        daily: DailyEntry,
+    ) -> None:
         self.purchases = purchases
         self.checkout = checkout
+        self.referrals = referrals
+        self.bonuses = bonuses
+        self.loyalty = loyalty
+        self.pricing = pricing
+        self.daily = daily
 
 
 class ServicesMiddleware(BaseMiddleware):

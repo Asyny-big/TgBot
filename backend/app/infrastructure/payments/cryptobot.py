@@ -20,7 +20,7 @@ import httpx
 
 from app.core.exceptions import PaymentGatewayError
 from app.core.logging import get_logger
-from app.domain.payments import Invoice, PaymentState
+from app.domain.payments import Invoice, InvoiceSnapshot, PaymentState
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -91,7 +91,16 @@ class CryptoBotClient:
 
     async def fetch_states(self, external_ids: Sequence[str]) -> Mapping[str, PaymentState]:
         """Return the provider state of each invoice id that still exists."""
-        states: dict[str, PaymentState] = {}
+        snapshots = await self.fetch_invoices(external_ids)
+        return {invoice_id: snapshot.state for invoice_id, snapshot in snapshots.items()}
+
+    async def fetch_invoices(self, external_ids: Sequence[str]) -> Mapping[str, InvoiceSnapshot]:
+        """Return the state and payment URL of each invoice id that still exists.
+
+        An invoice in a status this client does not recognise is left out, so
+        a caller treats it exactly like one the provider does not know.
+        """
+        snapshots: dict[str, InvoiceSnapshot] = {}
         for offset in range(0, len(external_ids), _STATES_PER_REQUEST):
             batch = external_ids[offset : offset + _STATES_PER_REQUEST]
             if not batch:
@@ -108,9 +117,15 @@ class CryptoBotClient:
                 if invoice_id is None or not isinstance(status, str):  # pragma: no cover
                     continue
                 state = _STATE_BY_STATUS.get(status)
-                if state is not None:
-                    states[str(invoice_id)] = state
-        return states
+                if state is None:
+                    continue
+                pay_url = item.get("bot_invoice_url") or item.get("pay_url")
+                snapshots[str(invoice_id)] = InvoiceSnapshot(
+                    external_id=str(invoice_id),
+                    state=state,
+                    pay_url=pay_url if isinstance(pay_url, str) else None,
+                )
+        return snapshots
 
     def verify_signature(self, body: bytes, signature: str | None) -> bool:
         """Whether the raw webhook body carries a valid Crypto Pay signature."""
