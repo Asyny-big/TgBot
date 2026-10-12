@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import text
 
 from app.core.exceptions import (
     CheckoutAlreadyPendingError,
@@ -25,6 +26,8 @@ from app.domain.pagination import PageRequest, PurchaseFilters
 from tests.db import product_draft, purchase_draft, seed_paid_purchase, user_draft
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from app.domain.entities import Product, User
     from app.infrastructure.db.repositories.products import SqlAlchemyProductRepository
     from app.infrastructure.db.repositories.purchases import SqlAlchemyPurchaseRepository
@@ -366,6 +369,59 @@ async def test_pending_checkouts_are_scoped_to_one_buyer_product_and_rail(
     found = await purchases.pending_checkouts(buyer.telegram_id, product.id, PaymentProvider.CRYPTO)
 
     assert [purchase.id for purchase in found] == [live.id]
+
+
+async def test_a_later_checkout_counts_one_buyer_product_and_rail(
+    purchases: SqlAlchemyPurchaseRepository,
+    products: SqlAlchemyProductRepository,
+    users: SqlAlchemyUserRepository,
+    db_session: AsyncSession,
+) -> None:
+    buyer = await users.upsert(user_draft(500100200))
+    product = await products.create(product_draft(slug="vip1"))
+    created = await purchases.create(purchase_draft(buyer, product))
+    # One transaction writes every row at the same instant: age this one.
+    await db_session.execute(
+        text("UPDATE purchases SET created_at = created_at - interval '5 minutes' WHERE id = :id"),
+        {"id": created.id},
+    )
+    first = await purchases.get_for_update(created.id)
+    assert first is not None
+    # All later, none of them counts: another rail, another product, another buyer.
+    await purchases.create(purchase_draft(buyer, product, PaymentProvider.CRYPTO))
+    other_product = await products.create(product_draft(slug="vip2"))
+    await purchases.create(purchase_draft(buyer, other_product))
+    other_buyer = await users.upsert(user_draft(500100201))
+    await purchases.create(purchase_draft(other_buyer, product))
+
+    assert not await purchases.has_later_checkout(first)
+
+    later = await purchases.create(purchase_draft(buyer, product))
+    # Whatever happened to it since: it still replaced the first one.
+    await purchases.expire(later.id)
+
+    assert await purchases.has_later_checkout(first)
+    assert not await purchases.has_later_checkout(later)
+
+
+async def test_rows_written_at_one_instant_still_have_exactly_one_newest(
+    purchases: SqlAlchemyPurchaseRepository,
+    buyer: User,
+    product: Product,
+) -> None:
+    """The newest is the one ``pending_checkouts`` lists first, and only that one."""
+    for _ in range(3):
+        await purchases.create(purchase_draft(buyer, product))
+
+    newest, *older = await purchases.pending_checkouts(
+        buyer.telegram_id,
+        product.id,
+        PaymentProvider.STARS,
+    )
+
+    assert not await purchases.has_later_checkout(newest)
+    replaced = [await purchases.has_later_checkout(purchase) for purchase in older]
+    assert replaced == [True, True]
 
 
 async def test_a_second_pending_crypto_checkout_is_refused_by_the_database(

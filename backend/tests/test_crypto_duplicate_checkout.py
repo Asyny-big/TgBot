@@ -717,7 +717,7 @@ async def test_stars_pricing_is_untouched(
     await _invite(unit)
     shop = _fake_shop(unit, locks, referral=REFERRAL)
 
-    stars = await shop.checkout.start_stars_checkout(user_id=BUYER, product=product)
+    stars = (await shop.checkout.start_stars_checkout(user_id=BUYER, product=product)).purchase
 
     assert stars.amount == Decimal(900)
     assert stars.discount_amount == Decimal(100)

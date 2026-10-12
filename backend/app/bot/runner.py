@@ -29,7 +29,8 @@ from aiohttp import web
 
 from app.bot.factory import create_checkout, create_dispatcher
 from app.bot.handlers.bonuses import BONUS_COMMAND
-from app.bot.texts import BONUS_SECTION_BUTTON
+from app.bot.handlers.progress import PROGRESS_COMMAND
+from app.bot.texts import BONUS_SECTION_BUTTON, PROGRESS_SECTION_BUTTON
 from app.bot.webhooks import register_cryptobot_webhook, register_health_route
 from app.bot.workers import HousekeepingWorker, ReconciliationWorker
 from app.core.config import get_settings
@@ -191,20 +192,24 @@ async def run_webhook(runtime: BotRuntime, stop: asyncio.Event) -> None:
         await runner.cleanup()
 
 
-async def _publish_commands(runtime: BotRuntime) -> None:
-    """Put the bonus section in the client's Menu button.
+async def _publish_commands(bot: Bot, settings: Settings) -> None:
+    """Put the sections reachable without a product link in the client's Menu button.
 
-    The only always-available entry point the bot has, and deliberately the only
-    command: there is no catalogue to browse and no product list to command.
+    "🎁 Мои бонусы" while the referral programme is on, "🏆 Мой прогресс" while
+    the loyalty programme is on — and deliberately nothing else: there is no
+    catalogue to browse and no product list to command. Each start replaces the
+    whole list, so a section switched off leaves the menu on the next restart.
     Failure is a cosmetic problem, so it is logged rather than raised.
     """
-    if not runtime.settings.referral.enabled:
+    commands: list[BotCommand] = []
+    if settings.referral.enabled:
+        commands.append(BotCommand(command=BONUS_COMMAND, description=BONUS_SECTION_BUTTON))
+    if settings.loyalty.enabled:
+        commands.append(BotCommand(command=PROGRESS_COMMAND, description=PROGRESS_SECTION_BUTTON))
+    if not commands:
         return
     try:
-        await runtime.bot.set_my_commands(
-            [BotCommand(command=BONUS_COMMAND, description=BONUS_SECTION_BUTTON)],
-            scope=BotCommandScopeAllPrivateChats(),
-        )
+        await bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())
     except Exception as error:
         logger.warning("bot_commands_not_published", error=str(error))
 
@@ -228,7 +233,7 @@ async def main() -> None:
 
     checks = await resources.check()
     logger.info("bot_dependencies_checked", **checks)
-    await _publish_commands(runtime)
+    await _publish_commands(runtime.bot, settings)
 
     stop = asyncio.Event()
     _install_signal_handlers(stop)

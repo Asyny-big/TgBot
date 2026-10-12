@@ -34,6 +34,7 @@ from app.bot.texts import (
     PRE_CHECKOUT_UNAVAILABLE,
     PRE_CHECKOUT_UNKNOWN,
     REFUND_NOTICE,
+    STARS_INVOICE_RESUMED,
     bonus_prompt,
     pending_invoice_exists,
 )
@@ -73,9 +74,12 @@ async def handle_pay_pressed(
     """The buyer pressed a payment button.
 
     One question may come between the button and the invoice: if the buyer has
-    bonuses that could reduce *this* price, they are asked first. Everything
-    else — and every buyer without bonuses — goes straight to checkout exactly
-    as before.
+    bonuses that could reduce *this* price, they are asked first. Not when they
+    already hold an unpaid invoice for this pack on this rail: checkout hands
+    that one back — or replaces it once it has run out — on the bonus choice it
+    was issued with, so asking again would change nothing. Everything else —
+    and every buyer without bonuses — goes straight to checkout exactly as
+    before.
     """
     if not callback_data.provider.is_payable:
         await _refuse_unpayable(callback, callback_data.provider)
@@ -85,6 +89,17 @@ async def handle_pay_pressed(
         product = await shop.purchases.product_for_checkout(callback_data.product_id)
     except (ProductNotFoundError, ProductInactiveError):
         await callback.answer(CARD_UNAVAILABLE, show_alert=True)
+        return
+
+    unpaid = await shop.purchases.pending_checkout(user.id, product.id, callback_data.provider)
+    if unpaid is not None:
+        await _start_checkout(
+            callback,
+            shop,
+            product=product,
+            provider=callback_data.provider,
+            use_bonus=unpaid.bonus_amount > 0,
+        )
         return
 
     offer = await _bonus_offer(
@@ -213,12 +228,14 @@ async def _start_checkout(
     user = callback.from_user
     try:
         if provider is PaymentProvider.STARS:
-            await shop.checkout.start_stars_checkout(
+            checkout = await shop.checkout.start_stars_checkout(
                 user_id=user.id,
                 product=product,
                 use_bonus=use_bonus,
             )
-            await callback.answer()
+            # Their unpaid invoice was sent again: say so, or the buyer may
+            # expect this press to have changed it.
+            await callback.answer(STARS_INVOICE_RESUMED if checkout.resumed else None)
         elif provider is PaymentProvider.CRYPTO:
             await _start_crypto_checkout(callback, shop, product=product, use_bonus=use_bonus)
         else:  # pragma: no cover — both handlers refuse a non-rail before this
@@ -320,12 +337,13 @@ async def handle_pre_checkout(query: PreCheckoutQuery, shop: BotServices) -> Non
     if purchase.status in (PurchaseStatus.PAID, PurchaseStatus.DELIVERED):
         await query.answer(ok=False, error_message=PRE_CHECKOUT_ALREADY_OWNED)
         return
-    if purchase.status is PurchaseStatus.EXPIRED and purchase.loyalty_amount > 0:
-        # A Telegram invoice never expires, but this one's loyalty discount was
-        # given back when it did — possibly to a newer invoice already. Paying
-        # it now would use the discount twice. Plain expired invoices are left
-        # as they always were.
-        logger.info("loyalty_stars_invoice_refused", purchase_id=str(purchase.id))
+    if purchase.status is PurchaseStatus.EXPIRED and purchase.was_reduced:
+        # A Telegram invoice never expires, but what made this one cheaper was
+        # settled when it did: the bonus reservation and the loyalty discount
+        # were given back — possibly to a newer invoice already — and the
+        # referral discount may have been spent since. Paying it now would use
+        # them twice. An expired invoice at the list price is still accepted.
+        logger.info("reduced_stars_invoice_refused", purchase_id=str(purchase.id))
         await query.answer(ok=False, error_message=PRE_CHECKOUT_UNKNOWN)
         return
 
@@ -337,6 +355,13 @@ async def handle_pre_checkout(query: PreCheckoutQuery, shop: BotServices) -> Non
 
     if await shop.purchases.find_owned(purchase.user_id, purchase.product_id) is not None:
         await query.answer(ok=False, error_message=PRE_CHECKOUT_ALREADY_OWNED)
+        return
+
+    if await shop.purchases.is_superseded(purchase):
+        # Only the newest ⭐ invoice of a product can be paid: a later press
+        # replaced this one and released whatever it held.
+        logger.info("superseded_stars_invoice_refused", purchase_id=str(purchase.id))
+        await query.answer(ok=False, error_message=PRE_CHECKOUT_UNKNOWN)
         return
 
     await query.answer(ok=True)

@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func, or_, select, union, update
+from sqlalchemy import and_, func, or_, select, union, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
@@ -263,6 +263,28 @@ class SqlAlchemyPurchaseRepository:
         )
         models = (await self._session.execute(statement)).scalars().all()
         return tuple(to_purchase(model) for model in models)
+
+    async def has_later_checkout(self, purchase: Purchase) -> bool:
+        # Later in the order ``pending_checkouts`` lists them — created_at, then
+        # id — so "the newest" means the same to both, even for rows written in
+        # one transaction.
+        statement = select(
+            select(PurchaseModel.id)
+            .where(
+                PurchaseModel.user_id == purchase.user_id,
+                PurchaseModel.product_id == purchase.product_id,
+                PurchaseModel.provider == purchase.provider,
+                or_(
+                    PurchaseModel.created_at > purchase.created_at,
+                    and_(
+                        PurchaseModel.created_at == purchase.created_at,
+                        PurchaseModel.id > purchase.id,
+                    ),
+                ),
+            )
+            .exists()
+        )
+        return bool(await self._session.scalar(statement))
 
     async def list_pending(
         self,

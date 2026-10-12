@@ -68,6 +68,7 @@ from app.bot.texts import (
     REFUND_NOTICE,
     SECTION_UNAVAILABLE,
     STARS_BUTTON,
+    STARS_INVOICE_RESUMED,
     bonus_section,
     referral_welcome,
 )
@@ -944,7 +945,12 @@ async def test_a_returning_buyer_gets_the_link_without_paying_again(
 
 
 async def test_double_press_of_the_pay_button_creates_one_invoice(harness: BotHarness) -> None:
-    """Two simultaneous presses: the TTL bounded lock lets exactly one through."""
+    """Two simultaneous presses make one purchase and one invoice.
+
+    The TTL bounded lock lets one press through at a time. The other is told the
+    payment is in progress — or, when the first had already finished, is sent
+    that same invoice again. Never a second purchase.
+    """
     product = await _product(harness)
     user = make_user()
     await harness.feed(start_update(product.slug, user=user))
@@ -968,14 +974,15 @@ async def test_double_press_of_the_pay_button_creates_one_invoice(harness: BotHa
         ),
     )
 
-    assert len(harness.bot.methods(SendInvoice)) == 1
-    assert len(await harness.container.purchases.list_pending(PaymentProvider.STARS)) == 1
-    busy = [
-        answer
-        for answer in harness.bot.methods(AnswerCallbackQuery)
-        if answer.text == PAYMENT_IN_PROGRESS
-    ]
-    assert len(busy) == 1
+    (pending,) = await harness.container.purchases.list_pending(PaymentProvider.STARS)
+    sent = harness.bot.methods(SendInvoice)
+    assert {invoice.payload for invoice in sent} == {pending.external_id}
+    answers = sorted(
+        (answer.text or "" for answer in harness.bot.methods(AnswerCallbackQuery)),
+        key=len,
+    )
+    assert answers in (["", PAYMENT_IN_PROGRESS], ["", STARS_INVOICE_RESUMED])
+    assert len(sent) == (1 if PAYMENT_IN_PROGRESS in answers else 2)
 
 
 async def test_pressing_stars_then_crypto_pays_only_once(harness: BotHarness) -> None:
@@ -1016,6 +1023,149 @@ async def test_pressing_stars_then_crypto_pays_only_once(harness: BotHarness) ->
     overview = await harness.container.stats.overview()
     assert overview.total.purchases_count == 1
     assert len([text for text in harness.bot.texts() if DELIVERY_URL in text]) == 1
+
+
+async def test_pressing_stars_again_resends_the_same_invoice(harness: BotHarness) -> None:
+    """One live ⭐ invoice per product: pressing again sends that invoice, not a new one."""
+    product = await _product(harness)
+    user = make_user()
+    await harness.feed(start_update(product.slug, user=user))
+    for update_id in (24, 25):
+        await harness.feed(
+            pay_button_update(
+                provider=PaymentProvider.STARS,
+                product_id=product.id,
+                user=user,
+                update_id=update_id,
+            )
+        )
+
+    first, again = harness.bot.methods(SendInvoice)
+    assert first.payload == again.payload
+    assert first.prices[0].amount == again.prices[0].amount == STARS_PRICE
+    answers = [answer.text for answer in harness.bot.methods(AnswerCallbackQuery)]
+    assert answers == [None, STARS_INVOICE_RESUMED]
+    async with harness.container.uow_factory() as uow:
+        recorded = await uow.session.scalar(
+            sql_text("SELECT count(*) FROM purchases WHERE product_id = :product"),
+            {"product": product.id},
+        )
+    assert recorded == 1
+
+    await harness.feed(
+        pre_checkout_update(payload=first.payload, amount=STARS_PRICE, user=user, update_id=26)
+    )
+    assert harness.bot.methods(AnswerPreCheckoutQuery)[-1].ok is True
+    await harness.feed(
+        successful_payment_update(
+            payload=first.payload,
+            amount=STARS_PRICE,
+            user=user,
+            update_id=27,
+        )
+    )
+    assert len([text for text in harness.bot.texts() if DELIVERY_URL in text]) == 1
+
+
+async def test_an_older_stars_invoice_is_refused_once_a_newer_one_exists(
+    harness: BotHarness,
+) -> None:
+    """Only the newest ⭐ invoice of a product can be paid — an expired one included."""
+    product = await _product(harness)
+    user = make_user()
+    await harness.feed(start_update(product.slug, user=user))
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=user,
+            update_id=28,
+        )
+    )
+    await harness.container.purchases.expire_stale(now=datetime.now(UTC) + timedelta(hours=2))
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=user,
+            update_id=29,
+        )
+    )
+    old, new = harness.bot.methods(SendInvoice)
+    assert old.payload != new.payload
+
+    await harness.feed(
+        pre_checkout_update(payload=old.payload, amount=STARS_PRICE, user=user, update_id=30)
+    )
+    refused = harness.bot.methods(AnswerPreCheckoutQuery)[-1]
+    assert refused.ok is False
+    assert refused.error_message == PRE_CHECKOUT_UNKNOWN
+
+    await harness.feed(
+        pre_checkout_update(payload=new.payload, amount=STARS_PRICE, user=user, update_id=31)
+    )
+    assert harness.bot.methods(AnswerPreCheckoutQuery)[-1].ok is True
+
+
+async def test_an_expired_stars_invoice_paid_with_bonuses_is_refused(harness: BotHarness) -> None:
+    """Housekeeping gave the bonuses back: paying that invoice now would spend them twice."""
+    user = make_user(telegram_id=5120, username="bonuslate")
+    product = await _product(harness, price_stars=1000, price_usdt=None)
+    await harness.feed(start_update(product.slug, user=user, update_id=32))
+    await _seed_bonus_balance(harness, user.id, 300)
+    await harness.feed(
+        bonus_choice_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            use_bonus=True,
+            user=user,
+            update_id=33,
+        )
+    )
+    invoice = harness.bot.methods(SendInvoice)[-1]
+    assert invoice.prices[0].amount == 700
+    await harness.container.purchases.expire_stale(now=datetime.now(UTC) + timedelta(hours=2))
+    assert await harness.container.bonuses.release_stale_holds() == 1
+    assert await harness.container.bonuses.balance_of(user.id) == 300
+
+    await harness.feed(
+        pre_checkout_update(payload=invoice.payload, amount=700, user=user, update_id=34)
+    )
+
+    refused = harness.bot.methods(AnswerPreCheckoutQuery)[-1]
+    assert refused.ok is False
+    assert refused.error_message == PRE_CHECKOUT_UNKNOWN
+
+
+async def test_an_expired_stars_invoice_with_the_referral_discount_is_refused(
+    harness: BotHarness,
+) -> None:
+    """The one-time discount is only spent on payment, so a late one could spend it twice."""
+    inviter = make_user(telegram_id=5121, username="inviter21")
+    invited = make_user(telegram_id=5122, username="invited22")
+    payload = await _referral_link_payload(harness, inviter)
+    await harness.feed(start_update(payload, user=invited, update_id=35))
+    product = await _product(harness, price_stars=1000, price_usdt=None)
+    await harness.feed(start_update(product.slug, user=invited, update_id=36))
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=invited,
+            update_id=37,
+        )
+    )
+    invoice = harness.bot.methods(SendInvoice)[-1]
+    assert invoice.prices[0].amount == 900
+    await harness.container.purchases.expire_stale(now=datetime.now(UTC) + timedelta(hours=2))
+
+    await harness.feed(
+        pre_checkout_update(payload=invoice.payload, amount=900, user=invited, update_id=38)
+    )
+
+    refused = harness.bot.methods(AnswerPreCheckoutQuery)[-1]
+    assert refused.ok is False
+    assert refused.error_message == PRE_CHECKOUT_UNKNOWN
 
 
 async def test_many_buyers_purchase_in_parallel(harness: BotHarness) -> None:
@@ -1892,6 +2042,161 @@ async def test_a_buyer_without_bonuses_is_never_asked(harness: BotHarness) -> No
     assert harness.bot.methods(SendInvoice)[-1].prices[0].amount == 1000
 
 
+def _bonus_prompts(harness: BotHarness) -> list[str]:
+    return [text for text in harness.bot.texts() if "Использовать их для этой покупки?" in text]
+
+
+async def _take_bonuses(
+    harness: BotHarness,
+    *,
+    user: TelegramUser,
+    product: Product,
+    provider: PaymentProvider,
+    first_update: int,
+) -> None:
+    """Press the rail's button, get the bonus question, answer "use them"."""
+    await harness.feed(
+        pay_button_update(
+            provider=provider,
+            product_id=product.id,
+            user=user,
+            update_id=first_update,
+        )
+    )
+    assert len(_bonus_prompts(harness)) == 1
+    await harness.feed(
+        bonus_choice_update(
+            provider=provider,
+            product_id=product.id,
+            use_bonus=True,
+            user=user,
+            update_id=first_update + 1,
+        )
+    )
+
+
+async def _bonus_buyer(harness: BotHarness, *, telegram_id: int, product: Product) -> TelegramUser:
+    user = make_user(telegram_id=telegram_id, username=f"bonus{telegram_id}")
+    await harness.feed(start_update(product.slug, user=user, update_id=telegram_id))
+    await _seed_bonus_balance(harness, user.id, 300)
+    return user
+
+
+async def test_pressing_stars_again_does_not_ask_about_bonuses_again(harness: BotHarness) -> None:
+    """The unpaid invoice is sent once more, with the bonuses it already holds."""
+    product = await _product(harness, price_stars=1000, price_usdt=None)
+    user = await _bonus_buyer(harness, telegram_id=5508, product=product)
+    await _take_bonuses(
+        harness, user=user, product=product, provider=PaymentProvider.STARS, first_update=611
+    )
+    (first,) = harness.bot.methods(SendInvoice)
+    assert first.prices[0].amount == 700
+
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=user,
+            update_id=613,
+        )
+    )
+
+    assert len(_bonus_prompts(harness)) == 1
+    again = harness.bot.methods(SendInvoice)[-1]
+    assert (again.payload, again.prices[0].amount) == (first.payload, 700)
+    assert harness.bot.methods(AnswerCallbackQuery)[-1].text == STARS_INVOICE_RESUMED
+
+
+async def test_pressing_cryptobot_again_does_not_ask_about_bonuses_again(
+    harness: BotHarness,
+) -> None:
+    """CryptoBot compares the bonus choice too: the invoice's own choice is passed on."""
+    product = await _product(harness)
+    user = await _bonus_buyer(harness, telegram_id=5509, product=product)
+    await _take_bonuses(
+        harness, user=user, product=product, provider=PaymentProvider.CRYPTO, first_update=621
+    )
+    assert len(harness.crypto.created) == 1
+    assert harness.crypto.created[0]["amount"] != str(USDT_PRICE)
+
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.CRYPTO,
+            product_id=product.id,
+            user=user,
+            update_id=623,
+        )
+    )
+
+    assert len(_bonus_prompts(harness)) == 1
+    assert len(harness.crypto.created) == 1
+    assert harness.bot.last_text() == CRYPTO_INVOICE_RESUMED
+
+
+async def _age_purchases(harness: BotHarness, user_id: int) -> None:
+    """Move the buyer's purchases past the invoice lifetime."""
+    async with harness.container.uow_factory() as uow:
+        await uow.session.execute(
+            sql_text(
+                "UPDATE purchases SET created_at = created_at - interval '31 minutes'"
+                " WHERE user_id = :user_id"
+            ),
+            {"user_id": user_id},
+        )
+
+
+async def test_a_run_out_invoice_is_replaced_on_its_own_bonus_choice(harness: BotHarness) -> None:
+    """Before housekeeping ends it, its bonuses are still held: the replacement
+    takes them over instead of billing the full price without asking."""
+    product = await _product(harness, price_stars=1000, price_usdt=None)
+    user = await _bonus_buyer(harness, telegram_id=5510, product=product)
+    await _take_bonuses(
+        harness, user=user, product=product, provider=PaymentProvider.STARS, first_update=631
+    )
+    (first,) = harness.bot.methods(SendInvoice)
+    await _age_purchases(harness, user.id)
+
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=user,
+            update_id=633,
+        )
+    )
+
+    assert len(_bonus_prompts(harness)) == 1
+    replacement = harness.bot.methods(SendInvoice)[-1]
+    assert replacement.payload != first.payload
+    assert replacement.prices[0].amount == 700
+
+
+async def test_the_bonus_question_returns_once_housekeeping_ends_the_invoice(
+    harness: BotHarness,
+) -> None:
+    product = await _product(harness, price_stars=1000, price_usdt=None)
+    user = await _bonus_buyer(harness, telegram_id=5511, product=product)
+    await _take_bonuses(
+        harness, user=user, product=product, provider=PaymentProvider.STARS, first_update=641
+    )
+    await _age_purchases(harness, user.id)
+    await harness.container.purchases.expire_stale()
+    await harness.container.bonuses.release_stale_holds()
+    invoices_before = len(harness.bot.methods(SendInvoice))
+
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=user,
+            update_id=643,
+        )
+    )
+
+    assert len(_bonus_prompts(harness)) == 2
+    assert len(harness.bot.methods(SendInvoice)) == invoices_before
+
+
 # --------------------------------------------------------------------------- #
 # Loyalty: "🏆 My progress" (read only)
 # --------------------------------------------------------------------------- #
@@ -2128,10 +2433,10 @@ async def test_no_bonus_question_while_the_loyalty_discount_applies(
     assert not [text for text in loyalty_harness.bot.texts() if "бонусов" in text]
 
 
-async def test_a_replaced_discounted_stars_invoice_is_refused_at_pre_checkout(
+async def test_pressing_stars_again_resends_the_discounted_invoice(
     loyalty_harness: BotHarness,
 ) -> None:
-    """Decision B through the bot: the old invoice cannot be paid, the new one can."""
+    """Decision B through the bot: one discounted invoice, sent again, paid once."""
     user = make_user(telegram_id=5303, username="repress")
     await _seed_received_packs(loyalty_harness, user.id, 5)
     product = await _product(loyalty_harness)
@@ -2146,27 +2451,22 @@ async def test_a_replaced_discounted_stars_invoice_is_refused_at_pre_checkout(
                 update_id=update_id,
             )
         )
-    old, new = loyalty_harness.bot.methods(SendInvoice)
-    assert old.prices[0].amount == new.prices[0].amount == 75
+    first, again = loyalty_harness.bot.methods(SendInvoice)
+    assert first.payload == again.payload
+    assert first.prices[0].amount == again.prices[0].amount == 75
+    assert loyalty_harness.bot.methods(AnswerCallbackQuery)[-1].text == STARS_INVOICE_RESUMED
 
     await loyalty_harness.feed(
-        pre_checkout_update(payload=old.payload, amount=75, user=user, update_id=324)
-    )
-    refused = loyalty_harness.bot.methods(AnswerPreCheckoutQuery)[-1]
-    assert refused.ok is False
-    assert refused.error_message == PRE_CHECKOUT_UNKNOWN
-
-    await loyalty_harness.feed(
-        pre_checkout_update(payload=new.payload, amount=75, user=user, update_id=325)
+        pre_checkout_update(payload=again.payload, amount=75, user=user, update_id=324)
     )
     assert loyalty_harness.bot.methods(AnswerPreCheckoutQuery)[-1].ok is True
     await loyalty_harness.feed(
         successful_payment_update(
-            payload=new.payload,
+            payload=again.payload,
             amount=75,
             charge_id="charge-loyal",
             user=user,
-            update_id=326,
+            update_id=325,
         )
     )
 
@@ -2174,6 +2474,93 @@ async def test_a_replaced_discounted_stars_invoice_is_refused_at_pre_checkout(
     async with loyalty_harness.container.uow_factory() as uow:
         rewards = await uow.loyalty.rewards_of(user.id)
     assert [(reward.milestone, reward.status.value) for reward in rewards] == [(5, "consumed")]
+
+
+async def test_a_replaced_discounted_stars_invoice_is_refused_at_pre_checkout(
+    loyalty_harness: BotHarness,
+) -> None:
+    """A new price replaces the invoice: the old one cannot be paid, the new one can."""
+    user = make_user(telegram_id=5306, username="repriced")
+    await _seed_received_packs(loyalty_harness, user.id, 5)
+    product = await _product(loyalty_harness)
+    await loyalty_harness.feed(start_update(product.slug, user=user, update_id=326))
+    await loyalty_harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=user,
+            update_id=327,
+        )
+    )
+    await loyalty_harness.container.products.update(product.id, ProductUpdate(price_stars=200))
+    await loyalty_harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=user,
+            update_id=328,
+        )
+    )
+    old, new = loyalty_harness.bot.methods(SendInvoice)
+    assert (old.prices[0].amount, new.prices[0].amount) == (75, 100)
+
+    await loyalty_harness.feed(
+        pre_checkout_update(payload=old.payload, amount=75, user=user, update_id=329)
+    )
+    refused = loyalty_harness.bot.methods(AnswerPreCheckoutQuery)[-1]
+    assert refused.ok is False
+    assert refused.error_message == PRE_CHECKOUT_UNKNOWN
+
+    await loyalty_harness.feed(
+        pre_checkout_update(payload=new.payload, amount=100, user=user, update_id=330)
+    )
+    assert loyalty_harness.bot.methods(AnswerPreCheckoutQuery)[-1].ok is True
+    await loyalty_harness.feed(
+        successful_payment_update(
+            payload=new.payload,
+            amount=100,
+            charge_id="charge-repriced",
+            user=user,
+            update_id=331,
+        )
+    )
+
+    assert len([text for text in loyalty_harness.bot.texts() if DELIVERY_URL in text]) == 1
+    async with loyalty_harness.container.uow_factory() as uow:
+        rewards = await uow.loyalty.rewards_of(user.id)
+    assert [(reward.milestone, reward.status.value) for reward in rewards] == [(5, "consumed")]
+
+
+async def test_cryptobot_after_stars_takes_the_discount_from_the_stars_invoice(
+    loyalty_harness: BotHarness,
+) -> None:
+    """⭐ pressed first, then 💎: CryptoBot bills the discounted price, and the ⭐
+    invoice that held the discount can no longer be paid."""
+    user = make_user(telegram_id=5507, username="switcher")
+    await _seed_received_packs(loyalty_harness, user.id, 5)
+    product = await _product(loyalty_harness)
+    await loyalty_harness.feed(start_update(product.slug, user=user, update_id=601))
+
+    for update_id, provider in ((602, PaymentProvider.STARS), (603, PaymentProvider.CRYPTO)):
+        await loyalty_harness.feed(
+            pay_button_update(
+                provider=provider,
+                product_id=product.id,
+                user=user,
+                update_id=update_id,
+            )
+        )
+
+    (stars_invoice,) = loyalty_harness.bot.methods(SendInvoice)
+    assert stars_invoice.prices[0].amount == 75
+    assert [created["amount"] for created in loyalty_harness.crypto.created] == ["2.50"]
+
+    await loyalty_harness.feed(
+        pre_checkout_update(payload=stars_invoice.payload, amount=75, user=user, update_id=604)
+    )
+    refused = loyalty_harness.bot.methods(AnswerPreCheckoutQuery)[-1]
+    assert refused.ok is False
+    assert refused.error_message == PRE_CHECKOUT_UNKNOWN
 
 
 async def test_an_expired_plain_stars_invoice_still_passes_pre_checkout(

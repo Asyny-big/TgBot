@@ -1,4 +1,4 @@
-"""Runtime behaviour of the bot process: liveness route and graceful shutdown.
+"""Runtime behaviour of the bot process: liveness route, graceful shutdown, menu.
 
 These are the pieces a container runtime interacts with. They are tested here
 without a database, because neither of them may depend on one: a liveness probe
@@ -14,12 +14,20 @@ import signal
 from typing import TYPE_CHECKING
 
 import pytest
+from aiogram.methods import SetMyCommands
+from aiogram.types import BotCommandScopeAllPrivateChats
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from app import __version__
-from app.bot.runner import _install_signal_handlers, _wait_for_shutdown
+from app.bot.handlers.bonuses import BONUS_COMMAND
+from app.bot.handlers.progress import PROGRESS_COMMAND
+from app.bot.runner import _install_signal_handlers, _publish_commands, _wait_for_shutdown
+from app.bot.texts import BONUS_SECTION_BUTTON, PROGRESS_SECTION_BUTTON
 from app.bot.webhooks import HEALTH_PATH, register_health_route
+from app.core.config import LoyaltySettings, ReferralSettings
+from tests.bot_harness import RecordingBot
+from tests.settings_factory import build_settings
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -116,3 +124,52 @@ async def test_a_transport_that_finishes_on_its_own_ends_the_wait() -> None:
 
     assert transport.done()
     assert not stop.is_set()
+
+
+# --------------------------------------------------------------------------- #
+# The Menu button                                                             #
+# --------------------------------------------------------------------------- #
+
+BONUS = (BONUS_COMMAND, BONUS_SECTION_BUTTON)
+PROGRESS = (PROGRESS_COMMAND, PROGRESS_SECTION_BUTTON)
+
+
+@pytest.mark.parametrize(
+    ("referral", "loyalty", "menu"),
+    [
+        (True, True, [BONUS, PROGRESS]),
+        (True, False, [BONUS]),
+        (False, True, [PROGRESS]),
+    ],
+    ids=["both", "referral-only", "loyalty-only"],
+)
+async def test_the_menu_lists_every_section_that_is_switched_on(
+    referral: bool,
+    loyalty: bool,
+    menu: list[tuple[str, str]],
+) -> None:
+    bot = RecordingBot()
+    settings = build_settings(
+        referral=ReferralSettings(enabled=referral),
+        loyalty=LoyaltySettings(enabled=loyalty),
+    )
+
+    await _publish_commands(bot, settings)
+    await bot.session.close()
+
+    (published,) = bot.methods(SetMyCommands)
+    assert [(command.command, command.description) for command in published.commands] == menu
+    assert isinstance(published.scope, BotCommandScopeAllPrivateChats)
+
+
+async def test_the_menu_is_left_alone_when_no_section_is_on() -> None:
+    bot = RecordingBot()
+    settings = build_settings(
+        referral=ReferralSettings(enabled=False),
+        loyalty=LoyaltySettings(enabled=False),
+    )
+
+    await _publish_commands(bot, settings)
+    await bot.session.close()
+
+    assert bot.methods(SetMyCommands) == []

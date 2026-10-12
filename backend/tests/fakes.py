@@ -440,6 +440,19 @@ class FakePurchaseRepository:
         # Insertion order stands in for created_at, which is constant in the fakes.
         return tuple(reversed(pending))
 
+    async def has_later_checkout(self, purchase: Purchase) -> bool:
+        # Insertion order again: whatever was stored after this purchase came later.
+        stored = list(self.items.values())
+        position = next(
+            (index for index, existing in enumerate(stored) if existing.id == purchase.id),
+            len(stored),
+        )
+        return any(
+            (later.user_id, later.product_id, later.provider)
+            == (purchase.user_id, purchase.product_id, purchase.provider)
+            for later in stored[position + 1 :]
+        )
+
     async def list_pending(
         self,
         provider: PaymentProvider,

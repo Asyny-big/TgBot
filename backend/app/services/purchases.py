@@ -682,6 +682,11 @@ class PurchaseService:
         async with self.uow_factory() as uow:
             return await uow.purchases.find_access_granting(user_id, product_id)
 
+    async def is_superseded(self, purchase: Purchase) -> bool:
+        """Whether the buyer started a later checkout of this product on the same rail."""
+        async with self.uow_factory() as uow:
+            return await uow.purchases.has_later_checkout(purchase)
+
     async def list_pending(
         self,
         provider: PaymentProvider,
@@ -700,6 +705,11 @@ class PurchaseService:
         if expired:
             logger.info("pending_purchases_expired", count=expired)
         return expired
+
+    def is_stale(self, purchase: Purchase, *, now: datetime | None = None) -> bool:
+        """Whether this purchase's invoice lifetime has passed: what ``expire_stale`` expires."""
+        moment = now or datetime.now(UTC)
+        return purchase.created_at < moment - self.invoice_ttl
 
     async def withdraw_unsent_checkout(self, purchase_id: UUID) -> Purchase:
         """Expire a pending purchase whose invoice never reached the buyer.
@@ -722,6 +732,21 @@ class PurchaseService:
             status=expired.status.value,
         )
         return expired
+
+    async def pending_checkout(
+        self,
+        user_id: int,
+        product_id: UUID,
+        provider: PaymentProvider,
+    ) -> Purchase | None:
+        """The buyer's newest unpaid invoice for this product on this rail, if any.
+
+        Its bonus choice was made when it was issued: pressing the same payment
+        button again hands it back, or replaces it once it has run out, on that
+        same choice. Read only.
+        """
+        pending = await self._pending_checkouts(user_id, product_id, provider)
+        return pending[0] if pending else None
 
     async def _pending_checkouts(
         self,
@@ -777,8 +802,9 @@ class CheckoutSession:
     async def expire(self, purchase: Purchase) -> Purchase:
         """Expire one of this buyer's pending purchases of this product.
 
-        Only for an invoice the provider itself reports as expired. Anything
-        no longer pending is returned untouched.
+        For an invoice the provider reports as expired, or one a newer invoice
+        replaces; whatever it held is released in the same transaction.
+        Anything no longer pending is returned untouched.
         """
         self._require_open()
         self._require_own(purchase.user_id, purchase.product_id)

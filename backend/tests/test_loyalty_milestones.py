@@ -288,7 +288,7 @@ async def test_handling_a_delivered_purchase_again_announces_nothing(shop: Shop)
 async def test_a_replayed_stars_payment_announces_once(shop: Shop) -> None:
     await _buyer(shop, received=DISCOUNT_MILESTONE - 1)
     product = await _product(shop)
-    purchase = await shop.checkout.start_stars_checkout(user_id=BUYER, product=product)
+    purchase = (await shop.checkout.start_stars_checkout(user_id=BUYER, product=product)).purchase
 
     for _ in range(3):
         await shop.checkout.settle_payment(

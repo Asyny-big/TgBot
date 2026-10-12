@@ -287,6 +287,14 @@ class PurchaseRepository(Protocol):
         """This buyer's pending purchases of one product on one rail, newest first."""
         ...
 
+    async def has_later_checkout(self, purchase: Purchase) -> bool:
+        """Whether this buyer started a later purchase of the same product on the same rail.
+
+        Later in the order ``pending_checkouts`` uses, and whatever its status:
+        a later invoice replaced this one, paid or not.
+        """
+        ...
+
     async def list_pending(
         self,
         provider: PaymentProvider,

@@ -132,6 +132,7 @@ released.
 /start <slug>          card: photo, title, description, prices, two buttons
                        → nothing is billed, no purchase, no invoice
 ⭐ or 💎 pressed        pending purchase + provider invoice created
+                       (pressed again: the same unpaid invoice comes back)
 payment notification   confirm_payment → deliver_purchase → mark_delivered
 /start <slug> again    already owned → the link is re-sent, never re-charged
 ```
@@ -157,6 +158,9 @@ byte what it always was.
 | Telegram flood control or an outage | delivery retries with exponential back-off, honouring `retry_after` |
 | The buyer blocked the bot | no retries; the purchase stays `paid` and the next `/start` delivers it |
 | Two payment buttons pressed at once | one invoice: the second press is refused by the lock |
+| The same button pressed again later | the buyer's unpaid invoice is sent back; a new ⭐ invoice only once the old one expired, its price changed or a discount became due |
+| An older ⭐ invoice paid after a newer one was issued | refused at pre-checkout: only the newest ⭐ invoice of a product can be paid |
+| An expired ⭐ invoice that carried bonuses or a discount | refused at pre-checkout: what it held was already given back |
 | Stars and USDT invoices both paid | the database allows exactly one paid copy; the loser is reported, not delivered |
 | An invoice is never paid | housekeeping expires it, and it stops being polled |
 | A referral reward is credited twice | it cannot be: `(purchase_id, type)` is unique, so five replayed webhooks leave one reward |

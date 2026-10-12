@@ -702,7 +702,7 @@ async def test_the_free_pack_leaves_the_fifty_percent_discount_alone(shop: Shop)
     free, paid = await _product(shop), await _product(shop)
 
     await _claim(shop, free)
-    purchase = await shop.checkout.start_stars_checkout(user_id=BUYER, product=paid)
+    purchase = (await shop.checkout.start_stars_checkout(user_id=BUYER, product=paid)).purchase
 
     assert purchase.loyalty_amount == Decimal(500)
     assert purchase.amount == Decimal(500)
