@@ -7,7 +7,9 @@ they paid for.
 
 So this class does not classify failures the way ``TelegramDeliveryGateway``
 does. There is no retry, no transient-versus-permanent distinction and no
-back-off: the caller logs whatever comes out and moves on.
+back-off: the caller logs whatever comes out and moves on. The one exception is
+the loyalty progress read for the invitation's "🏆 Мой прогресс" button: it is
+handled here, so a failed read costs that button and never the invitation.
 """
 
 from __future__ import annotations
@@ -15,7 +17,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from app.bot.keyboards import bonus_hint_keyboard, progress_keyboard
-from app.bot.texts import PURCHASE_COMPLETE_HINT, loyalty_milestone_notice, reward_notice
+from app.bot.texts import (
+    PURCHASE_COMPLETE_HINT,
+    loyalty_milestone_notice,
+    progress_button_label,
+    reward_notice,
+)
 from app.core.logging import get_logger
 
 if TYPE_CHECKING:
@@ -23,15 +30,21 @@ if TYPE_CHECKING:
 
     from app.domain.notifications import RewardNotice
     from app.services.daily_entry import DailyEntry
+    from app.services.loyalty import LoyaltyService
 
 logger = get_logger(__name__)
 
 
 class TelegramBonusNotifier:
-    """Sends the reward notice and the post-purchase referral invitation."""
+    """Sends the reward notice and the post-purchase referral invitation.
 
-    def __init__(self, bot: Bot) -> None:
+    With ``loyalty`` switched on, the invitation also offers "🏆 Мой прогресс",
+    labelled with the buyer's progress.
+    """
+
+    def __init__(self, bot: Bot, *, loyalty: LoyaltyService | None = None) -> None:
         self._bot = bot
+        self._loyalty = loyalty
 
     async def notify_reward(self, notice: RewardNotice) -> None:
         """Tell an inviter that a referral's purchase earned them bonuses.
@@ -52,14 +65,30 @@ class TelegramBonusNotifier:
         logger.info("reward_notice_sent", user_id=notice.user_id, units=notice.units)
 
     async def notify_purchase_complete(self, user_id: int) -> None:
-        """Offer the referral programme after a completed purchase."""
+        """Offer the referral programme after a completed purchase.
+
+        While the loyalty programme is on, "🏆 Мой прогресс" follows "🎁 Мои
+        бонусы". Its progress is read after the delivery committed, so the
+        count already includes this purchase.
+        """
         await self._bot.send_message(
             chat_id=user_id,
             text=PURCHASE_COMPLETE_HINT,
-            reply_markup=bonus_hint_keyboard(),
+            reply_markup=bonus_hint_keyboard(progress=await self._progress_label(user_id)),
             disable_web_page_preview=True,
         )
         logger.info("purchase_hint_sent", user_id=user_id)
+
+    async def _progress_label(self, user_id: int) -> str | None:
+        """The progress button's label, or ``None`` to leave the button out. Never raises."""
+        if self._loyalty is None or not self._loyalty.enabled:
+            return None
+        try:
+            progress = await self._loyalty.get_progress(user_id)
+        except Exception as error:
+            logger.warning("purchase_hint_progress_unavailable", user_id=user_id, error=str(error))
+            return None
+        return progress_button_label(progress)
 
 
 class TelegramLoyaltyNotifier:

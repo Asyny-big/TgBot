@@ -12,6 +12,7 @@ from html import escape
 from typing import TYPE_CHECKING, Final
 
 from app.domain.loyalty import (
+    CONTENT_SUGGESTION_MILESTONE,
     DISCOUNT_MILESTONE,
     FREE_PACK_MILESTONE,
     VIP_MILESTONE,
@@ -345,3 +346,38 @@ def loyalty_progress(progress: LoyaltyProgress) -> str:
     else:
         lines.append(f"До VIP: {_purchases(progress.to_vip)}")
     return "\n".join(lines)
+
+
+_PROGRESS_GOALS: Final = (
+    DISCOUNT_MILESTONE,
+    FREE_PACK_MILESTONE,
+    VIP_MILESTONE,
+    CONTENT_SUGGESTION_MILESTONE,
+)
+"""What the post-purchase "🏆 Мой прогресс" button counts towards, in order."""
+
+
+def progress_button_label(progress: LoyaltyProgress) -> str:
+    """ "🏆 Мой прогресс" under the post-purchase hint, with how far the buyer is.
+
+    Below 5: how many purchases the 50% discount still needs. From there: the
+    count against the next goal (10, 15, 20), then the one thing worth knowing
+    now — a reward still waiting, else VIP, else every goal reached. A reward
+    is named only while it is really unused, exactly as the screen says it.
+    """
+    completed = progress.completed_count
+    if progress.discount_50 is MilestoneRewardState.LOCKED:
+        return f"{PROGRESS_SECTION_BUTTON} — ещё {progress.to_discount} до скидки 50%"
+    goal = next((step for step in _PROGRESS_GOALS if completed < step), None)
+    count = str(completed) if goal is None else f"{completed}/{goal}"
+    if progress.free_pack_available:
+        status = "🎁 бесплатный пак"
+    elif progress.discount_50_available:
+        status = "🎉 скидка 50%"
+    elif goal is None:
+        status = "✅ все цели"
+    elif progress.vip:
+        status = "👑 VIP"
+    else:
+        return f"{PROGRESS_SECTION_BUTTON} — {count}"
+    return f"{PROGRESS_SECTION_BUTTON} — {count} · {status}"

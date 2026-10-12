@@ -26,6 +26,7 @@ from app.infrastructure.telegram.notifications import (
 if TYPE_CHECKING:
     from app.core.config import DailySettings, Settings
     from app.services.daily_entry import DailyEntry
+    from app.services.loyalty import LoyaltyService
 
 
 def create_bot(settings: Settings) -> Bot:
@@ -66,9 +67,17 @@ def create_stars_sender(bot: Bot) -> TelegramStarsInvoiceSender:
     return TelegramStarsInvoiceSender(bot)
 
 
-def create_bonus_notifier(bot: Bot) -> TelegramBonusNotifier:
-    """The courtesy-message transport for the bonus feature."""
-    return TelegramBonusNotifier(bot)
+def create_bonus_notifier(
+    bot: Bot,
+    *,
+    loyalty: LoyaltyService | None = None,
+) -> TelegramBonusNotifier:
+    """The courtesy-message transport for the bonus feature.
+
+    With ``loyalty``, the post-purchase invitation offers "🏆 Мой прогресс"
+    while the programme is on.
+    """
+    return TelegramBonusNotifier(bot, loyalty=loyalty)
 
 
 def create_loyalty_notifier(

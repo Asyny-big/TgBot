@@ -36,6 +36,7 @@ from pydantic import SecretStr
 from sqlalchemy import text as sql_text
 
 from app.bot.factory import create_checkout, create_dispatcher
+from app.bot.keyboards import BonusCallback, ProgressCallback
 from app.bot.profile import profile_of
 from app.bot.texts import (
     ALREADY_PURCHASED,
@@ -63,6 +64,7 @@ from app.bot.texts import (
     PRE_CHECKOUT_UNKNOWN,
     PROGRESS_SECTION_BUTTON,
     PROGRESS_UNAVAILABLE,
+    PURCHASE_COMPLETE_HINT,
     REFUND_NOTICE,
     SECTION_UNAVAILABLE,
     STARS_BUTTON,
@@ -2544,3 +2546,85 @@ async def test_no_milestone_notice_while_the_programme_is_off(harness: BotHarnes
     texts = harness.bot.texts()
     assert any(DELIVERY_URL in text for text in texts)
     assert not [text for text in texts if text in LOYALTY_MILESTONE_NOTICES.values()]
+
+
+# --------------------------------------------------------------------------- #
+# Loyalty: "🏆 Мой прогресс" under the post-purchase hint
+# --------------------------------------------------------------------------- #
+def _purchase_hint(harness: BotHarness) -> SendMessage:
+    (hint,) = [m for m in harness.bot.methods(SendMessage) if m.text == PURCHASE_COMPLETE_HINT]
+    assert isinstance(hint, SendMessage)
+    return hint
+
+
+async def test_the_purchase_hint_offers_the_buyers_progress(loyalty_harness: BotHarness) -> None:
+    user = make_user(telegram_id=5503, username="hinted")
+    await _seed_received_packs(loyalty_harness, user.id, 4)
+    product = await _product(loyalty_harness)
+
+    await _pay_with_stars(loyalty_harness, user=user, product=product, first_update=551)
+
+    hint = _purchase_hint(loyalty_harness)
+    assert hint.chat_id == user.id
+    assert isinstance(hint.reply_markup, InlineKeyboardMarkup)
+    assert [
+        [(button.text, button.callback_data) for button in row]
+        for row in hint.reply_markup.inline_keyboard
+    ] == [
+        [(BONUS_SECTION_BUTTON, BonusCallback().pack())],
+        [("🏆 Мой прогресс — 5/10 · 🎉 скидка 50%", ProgressCallback().pack())],
+    ]
+
+    # The button opens the same screen as /progress — the buyer's own.
+    await loyalty_harness.feed(progress_button_update(user=user, update_id=561))
+    assert "Покупок: 5" in loyalty_harness.bot.last_text()
+
+
+async def test_the_purchase_hint_is_unchanged_while_the_programme_is_off(
+    harness: BotHarness,
+) -> None:
+    user = make_user(telegram_id=5504, username="hintoff")
+    await _seed_received_packs(harness, user.id, 4)
+    product = await _product(harness)
+
+    await _pay_with_stars(harness, user=user, product=product, first_update=571)
+
+    assert _labels(_purchase_hint(harness)) == [BONUS_SECTION_BUTTON]
+
+
+async def test_a_failing_progress_read_still_sends_the_purchase_hint(
+    loyalty_harness: BotHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The progress button is an extra: without it the hint is exactly the old one."""
+    user = make_user(telegram_id=5505, username="hintfail")
+    product = await _product(loyalty_harness)
+
+    async def unavailable(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        message = "the database is resting"
+        raise ServiceUnavailableError(message)
+
+    monkeypatch.setattr(LoyaltyService, "get_progress", unavailable)
+
+    await _pay_with_stars(loyalty_harness, user=user, product=product, first_update=581)
+
+    assert [text for text in loyalty_harness.bot.texts() if DELIVERY_URL in text]
+    assert _labels(_purchase_hint(loyalty_harness)) == [BONUS_SECTION_BUTTON]
+
+
+async def test_the_hint_after_a_free_pack_no_longer_offers_it(loyalty_harness: BotHarness) -> None:
+    """Claimed at 10, the pack is the 11th purchase; the discount still waits."""
+    user = make_user(telegram_id=5506, username="hintfree")
+    await _seed_received_packs(loyalty_harness, user.id, 10)
+    product = await _product(loyalty_harness)
+    await loyalty_harness.feed(start_update(product.slug, user=user, update_id=591))
+
+    await loyalty_harness.feed(
+        free_pack_button_update(product_id=product.id, user=user, update_id=592)
+    )
+
+    assert _labels(_purchase_hint(loyalty_harness)) == [
+        BONUS_SECTION_BUTTON,
+        "🏆 Мой прогресс — 11/15 · 🎉 скидка 50%",
+    ]

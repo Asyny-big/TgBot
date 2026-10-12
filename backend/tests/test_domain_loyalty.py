@@ -14,12 +14,19 @@ from uuid import uuid4
 
 import pytest
 
-from app.bot.keyboards import ProgressCallback, progress_keyboard
+from app.bot.keyboards import (
+    BonusCallback,
+    ProgressCallback,
+    bonus_hint_keyboard,
+    progress_keyboard,
+)
 from app.bot.texts import (
+    BONUS_SECTION_BUTTON,
     FREE_PACK_PROGRESS_HINT,
     PROGRESS_SECTION_BUTTON,
     loyalty_milestone_notice,
     loyalty_progress,
+    progress_button_label,
 )
 from app.domain.entities import LoyaltyReward, Product
 from app.domain.enums import Currency, LoyaltyRewardKind, LoyaltyRewardStatus
@@ -254,6 +261,83 @@ def test_the_screen_for_rewards_in_use_and_used() -> None:
 def test_purchases_are_counted_in_proper_russian(missing: int, phrase: str) -> None:
     completed = VIP_MILESTONE - missing
     assert f"До VIP: {phrase}" in _screen(completed)
+
+
+# --------------------------------------------------------------------------- #
+# "🏆 Мой прогресс" under the post-purchase hint                              #
+# --------------------------------------------------------------------------- #
+
+USED_DISCOUNT = _reward(DISCOUNT_MILESTONE, LoyaltyRewardStatus.CONSUMED)
+USED_FREE_PACK = _reward(FREE_PACK_MILESTONE, LoyaltyRewardStatus.CONSUMED)
+
+
+@pytest.mark.parametrize(
+    ("completed", "rewards", "label"),
+    [
+        (0, (), "🏆 Мой прогресс — ещё 5 до скидки 50%"),
+        (4, (), "🏆 Мой прогресс — ещё 1 до скидки 50%"),
+        (5, (), "🏆 Мой прогресс — 5/10 · 🎉 скидка 50%"),
+        (7, (), "🏆 Мой прогресс — 7/10 · 🎉 скидка 50%"),
+        (10, (USED_DISCOUNT,), "🏆 Мой прогресс — 10/15 · 🎁 бесплатный пак"),
+        (15, (USED_DISCOUNT, USED_FREE_PACK), "🏆 Мой прогресс — 15/20 · 👑 VIP"),
+        (20, (USED_DISCOUNT, USED_FREE_PACK), "🏆 Мой прогресс — 20 · ✅ все цели"),
+    ],
+    ids=["0", "4", "5", "7", "10", "15", "20"],
+)
+def test_the_progress_button_shows_the_next_goal_and_what_was_reached(
+    completed: int,
+    rewards: tuple[LoyaltyReward, ...],
+    label: str,
+) -> None:
+    assert progress_button_label(progress_of(completed, rewards)) == label
+
+
+@pytest.mark.parametrize(
+    ("completed", "rewards", "label"),
+    [
+        (7, (USED_DISCOUNT,), "🏆 Мой прогресс — 7/10"),
+        (
+            7,
+            (_reward(DISCOUNT_MILESTONE, LoyaltyRewardStatus.APPLIED),),
+            "🏆 Мой прогресс — 7/10",
+        ),
+        (11, (USED_DISCOUNT, USED_FREE_PACK), "🏆 Мой прогресс — 11/15"),
+        (11, (USED_FREE_PACK,), "🏆 Мой прогресс — 11/15 · 🎉 скидка 50%"),
+        (17, (USED_DISCOUNT,), "🏆 Мой прогресс — 17/20 · 🎁 бесплатный пак"),
+        (23, (USED_DISCOUNT, USED_FREE_PACK), "🏆 Мой прогресс — 23 · ✅ все цели"),
+    ],
+    ids=[
+        "discount-used",
+        "discount-in-an-invoice",
+        "both-used",
+        "discount-waits",
+        "pack-waits",
+        "twenty-three",
+    ],
+)
+def test_the_progress_button_names_a_reward_only_while_it_is_unused(
+    completed: int,
+    rewards: tuple[LoyaltyReward, ...],
+    label: str,
+) -> None:
+    """A used reward is not advertised again; one still waiting is, whatever the count."""
+    assert progress_button_label(progress_of(completed, rewards)) == label
+
+
+def test_the_purchase_hint_offers_progress_only_when_given_a_label() -> None:
+    plain = bonus_hint_keyboard()
+    with_progress = bonus_hint_keyboard(progress="🏆 Мой прогресс — 7/10")
+
+    assert [[button.text for button in row] for row in plain.inline_keyboard] == [
+        [BONUS_SECTION_BUTTON]
+    ]
+    assert [
+        [(button.text, button.callback_data) for button in row]
+        for row in with_progress.inline_keyboard
+    ] == [
+        [(BONUS_SECTION_BUTTON, BonusCallback().pack())],
+        [("🏆 Мой прогресс — 7/10", ProgressCallback().pack())],
+    ]
 
 
 # --------------------------------------------------------------------------- #

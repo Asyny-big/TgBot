@@ -218,13 +218,17 @@ def daily_entry_keyboard(link: str | None) -> InlineKeyboardMarkup | None:
     return InlineKeyboardMarkup(inline_keyboard=[[daily_entry_button(link)]])
 
 
-def bonus_hint_keyboard() -> InlineKeyboardMarkup:
-    """Offer the bonus section after a completed purchase. Never required."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=BONUS_SECTION_BUTTON, callback_data=BonusCallback().pack())]
-        ]
-    )
+def bonus_hint_keyboard(*, progress: str | None = None) -> InlineKeyboardMarkup:
+    """Offer the bonus section after a completed purchase. Never required.
+
+    With ``progress`` — the label ``progress_button_label`` made, given only
+    while the loyalty programme is on — "🏆 Мой прогресс" follows on its own
+    row, so the label keeps the full width. It opens the ``/progress`` screen.
+    """
+    rows = [[InlineKeyboardButton(text=BONUS_SECTION_BUTTON, callback_data=BonusCallback().pack())]]
+    if progress is not None:
+        rows.append([InlineKeyboardButton(text=progress, callback_data=ProgressCallback().pack())])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def share_url(*, referral_link: str, text: str) -> str:
