@@ -28,7 +28,7 @@ from app.core.exceptions import (
     UserNotFoundError,
 )
 from app.core.logging import get_logger
-from app.domain.bonuses import plain_quote
+from app.domain.bonuses import PriceQuote, plain_quote
 from app.domain.cards import PaymentOption, ProductCard
 from app.domain.commands import PurchaseDraft
 from app.domain.delivery import RecordedDelivery
@@ -44,13 +44,14 @@ from app.domain.loyalty import (
     FreePackGrant,
     free_pack_external_id,
     free_pack_value,
+    loyalty_quote,
 )
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from uuid import UUID
 
-    from app.domain.bonuses import CheckoutPricing, PriceQuote
+    from app.domain.bonuses import CheckoutPricing
     from app.domain.commands import UserDraft
     from app.domain.entities import LoyaltyReward, Product, Purchase, User
     from app.domain.enums import Currency
@@ -157,10 +158,19 @@ class PurchaseService:
         product: Product,
         provider: PaymentProvider,
     ) -> PriceQuote:
-        """This visitor's price on one rail, as the card shows it."""
+        """This visitor's price on one rail, as the card shows it.
+
+        A discount held by the visitor's own unpaid invoice for this pack is
+        invisible to a fresh quote, yet the button bills it: the ⭐ invoice is
+        sent again, the 💎 one handed back, and an unpaid ⭐ invoice's loyalty
+        discount moves to a new 💎 one. So the card shows it as well.
+        """
         base_amount = Decimal(self._price(product, provider))
         if self.pricing is None:
             return plain_quote(base_amount, provider.currency)
+        held = await self._held_discount(uow, user_id, product, provider, base_amount)
+        if held is not None:
+            return held
         return await self.pricing.card_quote(
             uow,
             user_id=user_id,
@@ -168,6 +178,41 @@ class PurchaseService:
             currency=provider.currency,
             stars_per_usdt=product.stars_per_usdt,
         )
+
+    async def _held_discount(
+        self,
+        uow: UnitOfWork,
+        user_id: int,
+        product: Product,
+        provider: PaymentProvider,
+        base_amount: Decimal,
+    ) -> PriceQuote | None:
+        """The discount this rail's button bills from the visitor's own unpaid invoice.
+
+        The newest unpaid invoice on this rail keeps its discount: it is sent or
+        handed back again, or — once it has run out or the price moved — the
+        discount it gives up goes to its replacement. A referral discount is
+        only mirrored at the list price it was taken off. Without a live 💎
+        invoice, a 💎 button takes the loyalty discount an unpaid ⭐ invoice for
+        this pack holds.
+        """
+        pending = await uow.purchases.pending_checkouts(user_id, product.id, provider)
+        newest = pending[0] if pending else None
+        if newest is not None and newest.loyalty_amount > 0:
+            return loyalty_quote(base_amount, provider.currency)
+        if newest is not None and newest.discount_amount > 0 and newest.list_amount == base_amount:
+            return PriceQuote(
+                base_amount=base_amount,
+                discount_amount=newest.discount_amount,
+                currency=provider.currency,
+            )
+        if provider is PaymentProvider.CRYPTO and (newest is None or self.is_stale(newest)):
+            stars = await uow.purchases.pending_checkouts(
+                user_id, product.id, PaymentProvider.STARS
+            )
+            if any(purchase.loyalty_amount > 0 for purchase in stars):
+                return loyalty_quote(base_amount, provider.currency)
+        return None
 
     def _payment_option(
         self,

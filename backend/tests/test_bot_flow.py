@@ -129,6 +129,7 @@ if TYPE_CHECKING:
     from aiogram.types import User as TelegramUser
     from redis.asyncio import Redis
 
+    from app.domain.cards import ProductCard
     from app.domain.entities import Product
     from app.infrastructure.cache.locks import RedisLockManager
     from app.infrastructure.db.engine import Database
@@ -2407,6 +2408,94 @@ async def test_the_card_shows_the_loyalty_price(loyalty_harness: BotHarness) -> 
     assert "<s>150</s> 75 XTR" in text
     assert "<s>5</s> 2.5 USDT" in text
     assert "🏆 Скидка 50% по программе лояльности" in text
+
+
+def _shown(card: ProductCard) -> dict[PaymentProvider, Decimal | None]:
+    return {option.provider: option.discounted_amount for option in card.options}
+
+
+async def test_the_card_still_shows_the_discount_its_own_unpaid_invoice_holds(
+    loyalty_harness: BotHarness,
+) -> None:
+    """Opened again after ⭐: ⭐ sends that invoice again and 💎 takes its discount."""
+    user = make_user(telegram_id=5512, username="reopen")
+    await _seed_received_packs(loyalty_harness, user.id, 5)
+    product = await _product(loyalty_harness)
+    await loyalty_harness.feed(start_update(product.slug, user=user, update_id=651))
+    await loyalty_harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=user,
+            update_id=652,
+        )
+    )
+
+    await loyalty_harness.feed(start_update(product.slug, user=user, update_id=653))
+
+    text = loyalty_harness.bot.last_text()
+    assert "<s>150</s> 75 XTR" in text
+    assert "<s>5</s> 2.5 USDT" in text
+    card = await loyalty_harness.container.purchases.open_card(profile_of(user), product.slug)
+    assert _shown(card) == {
+        PaymentProvider.STARS: Decimal(75),
+        PaymentProvider.CRYPTO: Decimal("2.50"),
+    }
+
+
+async def test_after_cryptobot_the_card_shows_the_discount_on_cryptobot_only(
+    loyalty_harness: BotHarness,
+) -> None:
+    """The 💎 invoice keeps the discount, so ⭐ now bills the list price — as shown."""
+    user = make_user(telegram_id=5513, username="cryptofirst")
+    await _seed_received_packs(loyalty_harness, user.id, 5)
+    product = await _product(loyalty_harness)
+    await loyalty_harness.feed(start_update(product.slug, user=user, update_id=661))
+    await loyalty_harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.CRYPTO,
+            product_id=product.id,
+            user=user,
+            update_id=662,
+        )
+    )
+
+    card = await loyalty_harness.container.purchases.open_card(profile_of(user), product.slug)
+
+    assert _shown(card) == {PaymentProvider.STARS: None, PaymentProvider.CRYPTO: Decimal("2.50")}
+    await loyalty_harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=user,
+            update_id=663,
+        )
+    )
+    assert loyalty_harness.bot.methods(SendInvoice)[-1].prices[0].amount == STARS_PRICE
+
+
+async def test_the_card_still_shows_the_referral_discount_its_unpaid_invoice_holds(
+    harness: BotHarness,
+) -> None:
+    inviter = make_user(telegram_id=5514, username="inviter5514")
+    invited = make_user(telegram_id=5515, username="invited5515")
+    payload = await _referral_link_payload(harness, inviter)
+    await harness.feed(start_update(payload, user=invited, update_id=671))
+    product = await _product(harness, price_stars=1000, price_usdt=None)
+    await harness.feed(start_update(product.slug, user=invited, update_id=672))
+    await harness.feed(
+        pay_button_update(
+            provider=PaymentProvider.STARS,
+            product_id=product.id,
+            user=invited,
+            update_id=673,
+        )
+    )
+    assert harness.bot.methods(SendInvoice)[-1].prices[0].amount == 900
+
+    card = await harness.container.purchases.open_card(profile_of(invited), product.slug)
+
+    assert _shown(card) == {PaymentProvider.STARS: Decimal(900)}
 
 
 async def test_no_bonus_question_while_the_loyalty_discount_applies(
